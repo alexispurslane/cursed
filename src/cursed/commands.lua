@@ -782,6 +782,7 @@ commands.execute_command = function(view, editor)
         prompt = "M-x ",
         value = cmd_name and tostring(cmd_name),
         completion = true,
+        palette = true,
         completer = completers.commands(commands.names, function(name)
             -- Resolve the canonical command name to its bound chord via
             -- the editor's reverse map (rebuilt whenever the active trie

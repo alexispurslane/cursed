@@ -188,6 +188,11 @@ function Minibuffer.new()
         _comp_scroll = 0,
         auto_accept = false,
         _auto_accepting = false,
+        --- When true the minibuffer renders as a centered floating
+        --- palette (command-palette style) instead of the inline
+        --- bottom strip. Set by callers like M-x; ordinary reads
+        --- (search, find-file, read-char) stay inline.
+        palette = false,
     }, Minibuffer)
 end
 
@@ -439,7 +444,7 @@ end
 
 --- Activate the minibuffer with the given options.
 --- Resets the buffer content and overwrites callbacks.
----@param opts { prompt: string?, on_submit: function?, on_cancel: function?, on_change: function?, initial: string?, completion: boolean?, completer: function?, value: any?, auto_accept: boolean? }
+---@param opts { prompt: string?, on_submit: function?, on_cancel: function?, on_change: function?, initial: string?, completion: boolean?, completer: function?, value: any?, auto_accept: boolean?, palette: boolean? }
 function Minibuffer:activate(opts)
     local view = self.view
 
@@ -501,6 +506,7 @@ function Minibuffer:activate(opts)
     end
     self.auto_accept = opts.auto_accept or false
     self._auto_accepting = false
+    self.palette = opts.palette or false
 end
 
 --- Deactivate the minibuffer, clearing callbacks.
@@ -521,6 +527,7 @@ function Minibuffer:deactivate()
     self._comp_scroll = 0
     self.auto_accept = false
     self._auto_accepting = false
+    self.palette = false
 end
 
 ----------------------------------------------------------------------------------------------------

@@ -525,7 +525,7 @@ end
 --- Activate the minibuffer to read a line of input from the user.
 --- If `opts.value` is non-nil, short-circuits: calls on_submit(value) directly
 --- without showing the minibuffer.
----@param opts { prompt: string?, on_submit: function?, on_cancel: function?, on_change: function?, initial: string?, completion: boolean?, completer: function?, value: any?, auto_accept: boolean? }
+---@param opts { prompt: string?, on_submit: function?, on_cancel: function?, on_change: function?, initial: string?, completion: boolean?, completer: function?, value: any?, auto_accept: boolean?, palette: boolean? }
 function Editor:read_from_minibuffer(opts)
     -- When replaying a kmacro, pop from the input stack to auto-submit.
     -- This lets commands like find_file, isearch, etc. skip the
@@ -1837,12 +1837,13 @@ function Editor:render()
     term:print(pos_x - 1, modeline_y, "◢", pos_bg, mid_bg)
     term:print(pos_x, modeline_y, pos_str, pos_fg, pos_bg)
 
-    -- Minibuffer (starting at modeline_y + 1, when active).
-    -- The modeline's accent bg already separates it from the buffer;
-    -- no spare row for a border rule (footer_rows accounts for exactly
-    -- modeline + minibuffer + completions). The `border` concept stays
-    -- defined for future panel dividers.
-    if mb and mb.active then
+    -- Minibuffer — inline bottom strip (search, find-file, read-char,
+    -- query-replace, …). NOT used for M-x, which renders as a centered
+    -- floating palette (see the `mb.palette` branch below). The
+    -- modeline's accent bg already separates the inline strip from the
+    -- buffer; no spare row for a border rule (footer_rows accounts for
+    -- exactly modeline + minibuffer + completions).
+    if mb and mb.active and not mb.palette then
         local mb_view = mb.view
         local mb_buf = mb_view.buffer
         local prompt = mb.prompt
@@ -1957,6 +1958,138 @@ function Editor:render()
                 end
             end
         end
+    elseif mb and mb.active and mb.palette then
+        -- Command-palette mode (M-x): render the minibuffer as a
+        -- centered floating box over the buffer, with rounded borders
+        -- and the completions listed inside. Width and height are
+        -- derived from the content + viewport, clamped to safe bounds.
+        -- Painted ON TOP of already-rendered buffer rows (a solid bg
+        -- box overwrites whatever was there), so footer_rows doesn't
+        -- need to reserve space for it.
+        local mb_view = mb.view
+        local mb_buf = mb_view.buffer
+        local prompt = mb.prompt
+        local prompt_w = cell_len(prompt)
+
+        -- Box dimensions.
+        local box_w = math.min(math.max(48, prompt_w + 24), w - 4)
+        local box_x = math.floor((w - box_w) / 2)
+        -- Rows: top border + input + (completions) + bottom border.
+        local n_comp = 0
+        if has_completions then
+            n_comp = math.min(#mb._completions - (mb._comp_scroll or 0), 5)
+        end
+        local box_h = 2 + 1 + n_comp + 1
+        local box_y = math.floor((h - box_h) / 2)
+
+        local border_fg = ui("border")
+        local bg = ui("default_bg")
+        local prompt_fg = ui("minibuffer_prompt")
+        local text_fg = ui("minibuffer_text")
+        local meta_fg = ui("minibuffer_metadata")
+
+        -- Clear the box interior with default_bg so it floats over the
+        -- buffer cleanly.
+        for r = 0, box_h - 1 do
+            term:print(box_x, box_y + r, string.rep(" ", box_w), bg, bg)
+        end
+
+        -- Top border: ╭─...─╮
+        term:print(box_x, box_y, "╭" .. string.rep("─", box_w - 2) .. "╮", border_fg, bg)
+
+        -- Input row: prompt + text.
+        local input_y = box_y + 1
+        term:print(box_x + 1, input_y, prompt, prompt_fg, bg)
+        do
+            local lt = mb_buf:line_text(0)
+            if #lt > 0 and lt:byte(#lt) == 10 then
+                lt = lt:sub(1, #lt - 1)
+            end
+            local max_text = box_w - 2 - prompt_w
+            term:print(box_x + 1 + prompt_w, input_y, truncate_cells(lt, max_text), text_fg, bg)
+        end
+
+        -- Caret (underline bar, same as inline minibuffer).
+        if self._blink_on then
+            local lt = mb_buf:line_text(0)
+            if #lt > 0 and lt:byte(#lt) == 10 then
+                lt = lt:sub(1, #lt - 1)
+            end
+            local bcol = mb_view:p().col
+            local cursor_col = box_x + 1 + prompt_w + bcol
+            if cursor_col < box_x + box_w - 1 then
+                local ch = lt:sub(bcol + 1, bcol + 1)
+                if #ch == 0 then
+                    ch = " "
+                end
+                local bar_fg = bit.bor(ui("cursor_bg"), tb.underline)
+                term:print(cursor_col, input_y, ch, bar_fg, bg)
+            end
+        end
+
+        -- Completions inside the box.
+        if has_completions and n_comp > 0 then
+            local selected = mb._comp_index or 0
+            local scroll = mb._comp_scroll or 0
+            local comp_start = input_y + 1
+            local comp_w = box_w - 2 -- interior width
+            -- Metadata column: longest displayed text + 2-space gap.
+            local max_text = 0
+            for i = 1, n_comp do
+                local item = mb._completions[scroll + i]
+                local tlen = cell_len(completers.comp_text(item))
+                if tlen > max_text then
+                    max_text = tlen
+                end
+            end
+            local meta_col = max_text + 2
+            local show_meta = meta_col + 4 <= comp_w
+
+            for i = 1, n_comp do
+                local ci = scroll + i
+                local row = comp_start + i - 1
+                local item = mb._completions[ci]
+                local text = completers.comp_text(item)
+                local meta = show_meta and completers.comp_meta(item) or nil
+                text = truncate_cells(text, comp_w)
+                if ci == selected then
+                    local cur_fg = ui("cursor_fg")
+                    local cur_bg = ui("cursor_bg")
+                    local pad_to = (meta and #meta > 0) and math.min(meta_col, comp_w) or comp_w
+                    text = text .. string.rep(" ", math.max(0, pad_to - cell_len(text)))
+                    term:print(box_x + 1, row, text, cur_fg, cur_bg)
+                    if meta and #meta > 0 and meta_col + #meta <= comp_w then
+                        term:print(box_x + 1 + meta_col, row, meta, cur_fg, cur_bg)
+                    end
+                    local filled = (meta and #meta > 0 and meta_col + #meta <= comp_w)
+                            and (meta_col + #meta)
+                        or cell_len(text)
+                    if filled < comp_w then
+                        term:print(
+                            box_x + 1 + filled,
+                            row,
+                            string.rep(" ", comp_w - filled),
+                            cur_fg,
+                            cur_bg
+                        )
+                    end
+                else
+                    term:print(box_x + 1, row, text, prompt_fg, bg)
+                    if meta and #meta > 0 and meta_col + #meta <= comp_w then
+                        term:print(box_x + 1 + meta_col, row, meta, meta_fg, bg)
+                    end
+                end
+            end
+        end
+
+        -- Bottom border: ╰─...─╯
+        term:print(
+            box_x,
+            box_y + box_h - 1,
+            "╰" .. string.rep("─", box_w - 2) .. "╯",
+            border_fg,
+            bg
+        )
     -- Eval result (in minibuffer row when not active)
     elseif self._eval_result then
         local eval_row = modeline_y + 1
