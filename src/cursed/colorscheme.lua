@@ -134,6 +134,11 @@ local CONCEPT_SLOTS = {
     -- border: thin separators — the minibuffer/completions top rule
     -- and any future panel dividers.
     border = 0x02,
+    -- scrollbar_track / scrollbar_thumb: the gutter drawn on the far
+    -- right of a completion list when more items exist than fit.
+    -- Track = dim │, thumb = █ over the visible portion of the list.
+    scrollbar_track = 0x03,
+    scrollbar_thumb = 0x04,
 }
 
 -- Capture name → concept. Tree-sitter queries use the standard

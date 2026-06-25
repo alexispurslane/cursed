@@ -1361,6 +1361,11 @@ function Editor:render()
     -- wherever it should appear (main view + minibuffer).
     term:hide_cursor()
 
+    -- Hoisted before the paint helpers so they can close over `mb`
+    -- (the completion renderer reads mb._completions / _comp_index /
+    -- _comp_scroll directly).
+    local mb = self.minibuffer
+
     --- Paint a text chunk's base layer with syntax-highlight spans.
     --- Falls back to a single plain-default print when highlighting is off
     --- or the chunk has no spans. Overlays (selection/cursor/drops) are
@@ -1394,8 +1399,96 @@ function Editor:render()
         end
     end
 
+    --- Unified completion-list renderer shared by the inline minibuffer
+    --- and the floating palette. Geometry is parameterized (x, y, width,
+    --- max_visible) so both call sites paint identically, just at
+    --- different sizes. Draws a scrollbar on the far right when the list
+    --- overflows. Background `bg` is the surrounding bg (default_bg for
+    --- inline, the box interior bg for palette). Reads mb._completions /
+    --- _comp_index / _comp_scroll directly.
+    local function paint_completions(x, y, width, max_visible, bg)
+        local completions = mb._completions
+        local total = #completions
+        if total == 0 then
+            return
+        end
+        local selected = mb._comp_index or 0
+        local scroll = mb._comp_scroll or 0
+        local n = math.min(total - scroll, max_visible)
+        if n <= 0 then
+            return
+        end
+        -- Reserve a scrollbar gutter on the far right only when the
+        -- list actually overflows; otherwise the full width is usable.
+        local needs_sb = total > max_visible
+        local list_w = needs_sb and (width - 1) or width
+        local cur_fg = ui("cursor_fg")
+        local cur_bg = ui("cursor_bg")
+        local norm_fg = ui("minibuffer_prompt")
+        local meta_fg = ui("minibuffer_metadata")
+
+        -- Metadata column: longest displayed text + 2-space gap.
+        local max_text = 0
+        for i = 1, n do
+            local tlen = cell_len(completers.comp_text(completions[scroll + i]))
+            if tlen > max_text then
+                max_text = tlen
+            end
+        end
+        local meta_col = max_text + 2
+        local show_meta = meta_col + 4 <= list_w
+
+        for i = 1, n do
+            local ci = scroll + i
+            local row = y + i - 1
+            local item = completions[ci]
+            local text = truncate_cells(completers.comp_text(item), list_w)
+            local meta = show_meta and completers.comp_meta(item) or nil
+            if ci == selected then
+                -- Full-width reverse-video bar: fill the row with the
+                -- selection bg first, then print text + meta on top so
+                -- the highlight is contiguous across the gap.
+                term:print(x, row, string.rep(" ", list_w), cur_fg, cur_bg)
+                term:print(x, row, text, cur_fg, cur_bg)
+                if meta and meta_col + cell_len(meta) <= list_w then
+                    term:print(x + meta_col, row, meta, cur_fg, cur_bg)
+                end
+            else
+                term:print(x, row, text, norm_fg, bg)
+                if meta and meta_col + cell_len(meta) <= list_w then
+                    term:print(x + meta_col, row, meta, meta_fg, bg)
+                end
+            end
+        end
+
+        -- Scrollbar: a 1-column gutter on the far right. Track = dim │,
+        -- thumb = █ over the slice of the list currently in view.
+        if needs_sb then
+            local sb_col = x + width - 1
+            local track_fg = ui("scrollbar_track")
+            local thumb_fg = ui("scrollbar_thumb")
+            local scrollable = math.max(1, total - n)
+            local thumb_size = math.max(1, math.floor(n * n / total))
+            local thumb_top = math.floor(scroll / scrollable * (n - thumb_size))
+            if thumb_top < 0 then
+                thumb_top = 0
+            elseif thumb_top > n - thumb_size then
+                thumb_top = n - thumb_size
+            end
+            for i = 0, n - 1 do
+                local on_thumb = i >= thumb_top and i < thumb_top + thumb_size
+                term:print(
+                    sb_col,
+                    y + i,
+                    on_thumb and "█" or "│",
+                    on_thumb and thumb_fg or track_fg,
+                    bg
+                )
+            end
+        end
+    end
+
     local view = self:current_view()
-    local mb = self.minibuffer
     -- Footer rows: modeline + optional completions row + minibuffer/eval
     local footer_rows = self:footer_rows()
     local has_completions = mb and mb.active and mb.completion and #mb._completions > 0
@@ -1901,68 +1994,11 @@ function Editor:render()
             term:print(cursor_col, cursor_row, ch, bar_fg, ui("default_bg"))
         end
 
-        -- Completions (below minibuffer input, vertical, max 5 visible)
+        -- Completions: shared renderer (inline geometry — full width,
+        -- starting below the input row). Scrollbar + metadata handled
+        -- inside the helper.
         if has_completions then
-            local selected = mb._comp_index or 0
-            local scroll = mb._comp_scroll or 0
-            local comp_start = line_offset + line_count
-            local n = math.min(#mb._completions - scroll, 5)
-
-            -- Compute the metadata column once per render pass: the
-            -- longest displayed completion text + a 2-space gap. If the
-            -- chord column wouldn't fit at all, skip metadata entirely.
-            local max_text = 0
-            for i = 1, n do
-                local item = mb._completions[scroll + i]
-                local tlen = #completers.comp_text(item)
-                if tlen > max_text then
-                    max_text = tlen
-                end
-            end
-            local meta_col = max_text + 2
-            local show_meta = meta_col + 4 <= w
-            local meta_fg = ui("minibuffer_metadata")
-            local meta_bg = ui("default_bg")
-
-            for i = 1, n do
-                local ci = scroll + i
-                local row = comp_start + i - 1
-                local item = mb._completions[ci]
-                local text = completers.comp_text(item)
-                local meta = show_meta and completers.comp_meta(item) or nil
-                if #text > w then
-                    text = text:sub(1, w)
-                end
-                if ci == selected then
-                    -- Selected: reverse-video bar spans the full row.
-                    -- Pad text out to the metadata column (or full width
-                    -- when metadata won't be drawn) so the highlight is
-                    -- contiguous, then print metadata in gray on the
-                    -- reverse bg, then fill the remainder.
-                    local text_pad_to = (meta and #meta > 0) and meta_col or w
-                    if #text < text_pad_to then
-                        text = text .. string.rep(" ", text_pad_to - #text)
-                    end
-                    local cur_fg = ui("cursor_fg")
-                    local cur_bg = ui("cursor_bg")
-                    term:print(0, row, text, cur_fg, cur_bg)
-                    if meta and #meta > 0 and meta_col + #meta <= w then
-                        term:print(meta_col, row, meta, cur_fg, cur_bg)
-                    end
-                    -- Fill remainder of the row with the reverse bg.
-                    local filled = (meta and #meta > 0 and meta_col + #meta <= w)
-                            and (meta_col + #meta)
-                        or text_pad_to
-                    if filled < w then
-                        term:print(filled, row, string.rep(" ", w - filled), cur_fg, cur_bg)
-                    end
-                else
-                    term:print(0, row, text, ui("minibuffer_prompt"), ui("default_bg"))
-                    if meta and #meta > 0 and meta_col + #meta <= w then
-                        term:print(meta_col, row, meta, meta_fg, meta_bg)
-                    end
-                end
-            end
+            paint_completions(0, line_offset + line_count, w, 5, ui("default_bg"))
         end
     elseif mb and mb.active and mb.palette then
         -- Command-palette mode (M-x): render the minibuffer as a
@@ -2033,59 +2069,10 @@ function Editor:render()
             end
         end
 
-        -- Completions inside the box.
+        -- Completions: shared renderer (palette geometry — interior
+        -- width, below the input row). Same paint path as inline.
         if has_completions and n_comp > 0 then
-            local selected = mb._comp_index or 0
-            local scroll = mb._comp_scroll or 0
-            local comp_start = input_y + 1
-            local comp_w = box_w - 2 -- interior width
-            -- Metadata column: longest displayed text + 2-space gap.
-            local max_text = 0
-            for i = 1, n_comp do
-                local item = mb._completions[scroll + i]
-                local tlen = cell_len(completers.comp_text(item))
-                if tlen > max_text then
-                    max_text = tlen
-                end
-            end
-            local meta_col = max_text + 2
-            local show_meta = meta_col + 4 <= comp_w
-
-            for i = 1, n_comp do
-                local ci = scroll + i
-                local row = comp_start + i - 1
-                local item = mb._completions[ci]
-                local text = completers.comp_text(item)
-                local meta = show_meta and completers.comp_meta(item) or nil
-                text = truncate_cells(text, comp_w)
-                if ci == selected then
-                    local cur_fg = ui("cursor_fg")
-                    local cur_bg = ui("cursor_bg")
-                    local pad_to = (meta and #meta > 0) and math.min(meta_col, comp_w) or comp_w
-                    text = text .. string.rep(" ", math.max(0, pad_to - cell_len(text)))
-                    term:print(box_x + 1, row, text, cur_fg, cur_bg)
-                    if meta and #meta > 0 and meta_col + #meta <= comp_w then
-                        term:print(box_x + 1 + meta_col, row, meta, cur_fg, cur_bg)
-                    end
-                    local filled = (meta and #meta > 0 and meta_col + #meta <= comp_w)
-                            and (meta_col + #meta)
-                        or cell_len(text)
-                    if filled < comp_w then
-                        term:print(
-                            box_x + 1 + filled,
-                            row,
-                            string.rep(" ", comp_w - filled),
-                            cur_fg,
-                            cur_bg
-                        )
-                    end
-                else
-                    term:print(box_x + 1, row, text, prompt_fg, bg)
-                    if meta and #meta > 0 and meta_col + #meta <= comp_w then
-                        term:print(box_x + 1 + meta_col, row, meta, meta_fg, bg)
-                    end
-                end
-            end
+            paint_completions(box_x + 1, input_y + 1, box_w - 2, 5, bg)
         end
 
         -- Bottom border: ╰─...─╯
