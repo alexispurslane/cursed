@@ -1323,11 +1323,17 @@ function Editor:footer_rows()
     local mb = self.minibuffer
     local mb_rows = 0
     if mb and mb.active then
-        mb_rows = mb:input_rows()
+        -- Palette mode floats over the buffer (centered box), so it
+        -- reserves NO bottom rows — only the modeline does.
+        if not mb.palette then
+            mb_rows = mb:input_rows()
+        end
     elseif self._eval_result then
         mb_rows = 1
     end
-    local comp_rows = (mb and mb.active and mb.completion) and mb:comp_visible_rows() or 0
+    local comp_rows = (mb and mb.active and not mb.palette and mb.completion)
+            and mb:comp_visible_rows()
+        or 0
     return 1 + mb_rows + comp_rows
 end
 

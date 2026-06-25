@@ -43,3 +43,7 @@ beautiful! now can we make the minibuffer always render in the center of the scr
 ---
 
 actually wait, let's make it floating in the center be optional, and only use it for M-x
+
+---
+
+when we're in palette mode, we still reserve lines at the bottom of the screen which is odd lol
