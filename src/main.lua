@@ -474,6 +474,13 @@ local function process_key(editor, view, trie, key_state, key_node, token, ev, p
             if not ok then
                 log.error("main", "keybinding error", { error = tostring(result) })
                 editor.status_message = "error: " .. tostring(result)
+                local ef = io.open("/tmp/cursed_err.log", "a")
+                if ef then
+                    ef:write("=== keybinding error " .. os.date() .. " ===\n")
+                    ef:write(tostring(result) .. "\n")
+                    ef:write(debug.traceback("", 2) .. "\n")
+                    ef:close()
+                end
             end
             -- Update consecutive-kill merge state after command dispatch.
             -- If push_kill was called, this was a kill command; otherwise it wasn't.
