@@ -15,3 +15,7 @@ use the box drawing set; I don't want to depend on a nerd font
 ---
 
 okay, maybe try vertical thin unicode triangles (left/right) isntead
+
+---
+
+I meant these: ◢/◣/◤/◥ (triangles)

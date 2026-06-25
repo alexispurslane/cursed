@@ -1734,8 +1734,8 @@ function Editor:render()
     end
 
     -- Modeline (at row h - footer_rows).
-    -- Segmented layout: three colored blocks separated by box-drawing
-    -- half-blocks (▌ ▕, U+258C / U+2595), palette-driven so every theme
+    -- Segmented layout: three colored blocks separated by triangle
+    -- separators (◣ ◢, U+25E3 / U+25E2), palette-driven so every theme
     -- recolors it for free. Each section carries a single-cell unicode
     -- icon: ◆ mode, ▤ file, ⌖ position. Transient status (read-char /
     -- search / arg / status_message) replaces the middle section,
@@ -1781,12 +1781,12 @@ function Editor:render()
     term:print(0, modeline_y, string.rep(" ", w), mid_fg, mid_bg)
 
     -- Left block: " ◆ mode " in the mode accent, followed by a
-    -- half-block separator (▌ U+258C) whose fg is the mode bg and
+    -- triangle separator (◣ U+25E3) whose fg is the mode bg and
     -- whose bg is the mid bg — so the accent edge visibly "bleeds"
-    -- into the middle. Pure box-drawing set: no Nerd Font required.
+    -- into the middle. Core unicode (Geometric Shapes): no Nerd Font.
     local mode_text = " " .. ICON_MODE .. " " .. mode_name .. " "
     term:print(0, modeline_y, mode_text, mode_fg, mode_bg)
-    term:print(#mode_text, modeline_y, "▌", mode_bg, mid_bg)
+    term:print(#mode_text, modeline_y, "◣", mode_bg, mid_bg)
 
     -- Middle block: transient status or filepath+modified. Truncated
     -- to the space between the left separator and the right block.
@@ -1799,11 +1799,11 @@ function Editor:render()
         term:print(#mode_text + 1, modeline_y, mid_str, mid_fg, mid_bg)
     end
 
-    -- Right block: a leading half-block separator (▕ U+2595, fg =
+    -- Right block: a leading triangle separator (◢ U+25E2, fg =
     -- pos_bg / bg = mid_bg) followed by the position text in the pos
-    -- accent. Same box-drawing-only constraint.
+    -- accent. Same core-unicode-only constraint.
     local pos_x = w - #pos_str
-    term:print(pos_x - 1, modeline_y, "▕", pos_bg, mid_bg)
+    term:print(pos_x - 1, modeline_y, "◢", pos_bg, mid_bg)
     term:print(pos_x, modeline_y, pos_str, pos_fg, pos_bg)
 
     -- Minibuffer (starting at modeline_y + 1, when active).
