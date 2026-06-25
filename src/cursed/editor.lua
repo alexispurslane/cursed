@@ -1571,10 +1571,13 @@ function Editor:render()
                             if rel_ce > rel_cs then
                                 -- Whitespace visualization inside the
                                 -- selection: spaces → middle dot (·),
-                                -- tabs → arrow (→). Makes trailing/leading
-                                -- whitespace visible exactly where the
-                                -- user is operating. Done display-only
-                                -- (the buffer is untouched).
+                                -- tabs → arrow (→), and a ↵ (U+21B5)
+                                -- shown at end-of-line when the
+                                -- selection reaches the line's trailing
+                                -- newline. Makes trailing/leading
+                                -- whitespace and line-spanning
+                                -- selections visible exactly where the
+                                -- user is operating. Buffer is untouched.
                                 local sel_text =
                                     chunk:sub(rel_cs + 1, rel_ce):gsub(" ", "·"):gsub("\t", "→")
                                 term:print(
@@ -1584,6 +1587,28 @@ function Editor:render()
                                     ui("cursor_fg"),
                                     ui("selection_bg")
                                 )
+                                -- Newline marker: this run reaches the
+                                -- last cell of the line's last sub-row
+                                -- AND the original line had a trailing
+                                -- newline → the selection includes EOL,
+                                -- so draw ↵ one cell past content.
+                                if
+                                    rel_ce == #chunk
+                                    and chunk_end >= content_len
+                                    and #line_text > 0
+                                    and line_text:byte(#line_text) == 10
+                                then
+                                    local nl_x = gutter_width + rel_ce
+                                    if nl_x < w then
+                                        term:print(
+                                            nl_x,
+                                            row,
+                                            "↵",
+                                            ui("cursor_fg"),
+                                            ui("selection_bg")
+                                        )
+                                    end
+                                end
                             end
                         end
                     end
