@@ -35,6 +35,38 @@ local function ui(name)
     return scheme:color(name)
 end
 
+--- Display width (cell count) of a UTF-8 string. `#s` counts BYTES,
+--- but termbox x/y are CELL columns — so any modeline math involving
+--- unicode glyphs (◆ ▤ ⌖ ◣ ◢ …, all 1 cell but ≥2 bytes) must use this
+--- instead or the column offsets drift and leave visible gaps. Counts
+--- UTF-8 codepoints; assumes no double-wide CJK (true for our chrome).
+---@param s string
+---@return integer cells
+local function cell_len(s)
+    local _, n = s:gsub("[^\128-\191]", "")
+    return n
+end
+
+--- Truncate `s` to at most `max` display cells, never splitting a
+--- multibyte codepoint. ASCII `:sub` would slice a ◆/▤ mid-byte.
+---@param s string
+---@param max integer max cells
+---@return string
+local function truncate_cells(s, max)
+    if cell_len(s) <= max then
+        return s
+    end
+    local out, n = {}, 0
+    for seq in s:gmatch("[%z\1-\127\192-\255][\128-\191]*") do
+        if n >= max then
+            break
+        end
+        out[#out + 1] = seq
+        n = n + 1
+    end
+    return table.concat(out)
+end
+
 ----------------------------------------------------------------------------------------------------
 -- Pretty printer for eval output
 ----------------------------------------------------------------------------------------------------
@@ -1785,24 +1817,23 @@ function Editor:render()
     -- whose bg is the mid bg — so the accent edge visibly "bleeds"
     -- into the middle. Core unicode (Geometric Shapes): no Nerd Font.
     local mode_text = " " .. ICON_MODE .. " " .. mode_name .. " "
+    local mode_w = cell_len(mode_text)
     term:print(0, modeline_y, mode_text, mode_fg, mode_bg)
-    term:print(#mode_text, modeline_y, "◣", mode_bg, mid_bg)
+    term:print(mode_w, modeline_y, "◣", mode_bg, mid_bg)
 
     -- Middle block: transient status or filepath+modified. Truncated
     -- to the space between the left separator and the right block.
-    local right_w = #pos_str + 1 -- +1 for the leading separator
-    local mid_max = w - #mode_text - 1 - right_w
+    local right_w = cell_len(pos_str) + 1 -- +1 for the leading separator
+    local mid_max = w - mode_w - 1 - right_w
     if mid_max > 0 then
-        if #mid_str > mid_max then
-            mid_str = mid_str:sub(1, mid_max)
-        end
-        term:print(#mode_text + 1, modeline_y, mid_str, mid_fg, mid_bg)
+        mid_str = truncate_cells(mid_str, mid_max)
+        term:print(mode_w + 1, modeline_y, mid_str, mid_fg, mid_bg)
     end
 
     -- Right block: a leading triangle separator (◢ U+25E2, fg =
     -- pos_bg / bg = mid_bg) followed by the position text in the pos
     -- accent. Same core-unicode-only constraint.
-    local pos_x = w - #pos_str
+    local pos_x = w - cell_len(pos_str)
     term:print(pos_x - 1, modeline_y, "◢", pos_bg, mid_bg)
     term:print(pos_x, modeline_y, pos_str, pos_fg, pos_bg)
 
