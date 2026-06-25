@@ -55,3 +55,7 @@ alright, one other thing: the minibuffer in both palette and bottom mode need, i
 ---
 
 can we use ghostty/kitty capabilities to tint everything but the palette?
+
+---
+
+wowww, wild, dim just makes all the text go away! let's redo with option two

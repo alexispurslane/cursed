@@ -35,7 +35,33 @@ local function ui(name)
     return scheme:color(name)
 end
 
---- Display width (cell count) of a UTF-8 string. `#s` counts BYTES,
+--- Blend a truecolor attr (`TB_TRUECOLOR` int 0xRRGGBB, possibly OR'd
+--- with style bits) `factor` of the way toward the target color. Style
+--- bits are preserved. Pure module-level helper; the focus backdrop
+--- (inside render) uses it to dim fg AND bg toward default_bg. Unlike
+--- SGR `dim` — which vanishes against a dark bg in many terminals —
+--- blending keeps text legible while receding the buffer behind the
+--- floating palette.
+---@param color integer termbox attr (0xRRGGBB [+ style bits])
+---@param target integer 0xRRGGBB (no style bits)
+---@param factor integer 0..255; 0 = color unchanged, 255 = fully target
+---@return integer
+local function blend(color, target, factor)
+    -- Strip style bits (everything ≥ 0x01000000) before blending.
+    local style = bit.band(color, 0xFF000000)
+    local c = bit.band(color, 0xFFFFFF)
+    local tr = bit.rshift(target, 16)
+    local tg = bit.band(bit.rshift(target, 8), 0xFF)
+    local tb_ = bit.band(target, 0xFF)
+    local r = bit.band(bit.rshift(c, 16), 0xFF)
+    local g = bit.band(bit.rshift(c, 8), 0xFF)
+    local b = bit.band(c, 0xFF)
+    local inv = 255 - factor
+    r = bit.rshift(r * inv + tr * factor, 8)
+    g = bit.rshift(g * inv + tg * factor, 8)
+    b = bit.rshift(b * inv + tb_ * factor, 8)
+    return bit.bor(bit.bor(bit.bor(bit.lshift(r, 16), bit.lshift(g, 8)), b), style)
+end
 --- but termbox x/y are CELL columns — so any modeline math involving
 --- unicode glyphs (◆ ▤ ⌖ ◣ ◢ …, all 1 cell but ≥2 bytes) must use this
 --- instead or the column offsets drift and leave visible gaps. Counts
@@ -1366,6 +1392,21 @@ function Editor:render()
     -- _comp_scroll directly).
     local mb = self.minibuffer
 
+    --- Focus-backdrop tint: when the palette (M-x) is open, blend every
+    --- buffer-region fg AND bg toward default_bg so the code visibly
+    --- recedes behind the floating palette. fg blends ~60% toward bg
+    --- (clearly muted but still legible); bg blends ~25% (just enough
+    --- to darken, since most bgs are already dark). Returns the
+    --- originals unchanged when the palette isn't active. The modeline
+    --- is painted separately and stays full-saturation.
+    local dim_bg_color = ui("default_bg")
+    local function focus_dim(fg, bg)
+        if not (mb and mb.palette) then
+            return fg, bg
+        end
+        return blend(fg, dim_bg_color, 150), blend(bg, dim_bg_color, 60)
+    end
+
     --- Paint a text chunk's base layer with syntax-highlight spans.
     --- Falls back to a single plain-default print when highlighting is off
     --- or the chunk has no spans. Overlays (selection/cursor/drops) are
@@ -1378,15 +1419,9 @@ function Editor:render()
         local segs = view:highlight_segments(li, chunk_start, chunk_end)
         local dfg = ui("default_fg")
         local dbg = row_bg or ui("default_bg")
-        -- Focus backdrop: when the palette (M-x) is open, faint every
-        -- buffer fg via SGR dim (the `dim` attr bit). Backgrounds are
-        -- left alone so active-line/selection bg tints remain visible;
-        -- only the *text* recedes, matching the "dialog backdrop" look.
-        -- The modeline is painted separately and stays full-saturation.
-        local dim_mask = (mb and mb.palette) and tb.dim or 0
-        if dim_mask ~= 0 then
-            dfg = bit.bor(dfg, dim_mask)
-        end
+        -- Focus backdrop: when the palette is open, blend fg+bg toward
+        -- default_bg so the buffer recedes behind the floating box.
+        dfg, dbg = focus_dim(dfg, dbg)
         if segs == nil or #segs == 0 then
             term:print(gutter_width, row, chunk, dfg, dbg)
             return
@@ -1398,9 +1433,9 @@ function Editor:render()
             end
             if s.ce > s.cs then
                 local seg_fg = s.fg
-                if dim_mask ~= 0 then
-                    seg_fg = bit.bor(seg_fg, dim_mask)
-                end
+                -- Per-span fg also gets the focus tint; bg is the row's
+                -- dbg (already dimmed above).
+                seg_fg = focus_dim(seg_fg, dbg)
                 term:print(gutter_width + s.cs, row, chunk:sub(s.cs + 1, s.ce), seg_fg, dbg)
             end
             if s.ce > painted then
@@ -1624,12 +1659,10 @@ function Editor:render()
                 local is_active = (view:p().line == li)
                 local row_bg = is_active and ui("active_line_bg") or ui("default_bg")
                 local num_fg = is_active and ui("line_number_active") or ui("line_number")
-                -- Focus backdrop: faint the gutter numbers too so the
-                -- whole buffer region recedes behind the palette. The
-                -- tint is on fg only; row_bg (active-line bg) is kept.
-                if mb and mb.palette then
-                    num_fg = bit.bor(num_fg, tb.dim)
-                end
+                -- Focus backdrop: dim the gutter numbers + the row bg so
+                -- the whole buffer region (gutter + text) recedes behind
+                -- the palette together.
+                num_fg, row_bg = focus_dim(num_fg, row_bg)
                 -- Pre-fill the entire row with row_bg so the active tint
                 -- spans the gutter, the text region, and the trailing
                 -- margin (paint_chunk + overlays paint on top of this).
