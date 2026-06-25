@@ -71,3 +71,7 @@ okay, what other beautifying stuff can we do?
 ---
 
 we need to also darkent he background when the palette is opened
+
+---
+
+okay, now the box drawing characters around the palette don't look right, so rmeove them. looks good tho otherwise
