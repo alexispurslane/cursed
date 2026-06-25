@@ -1,1 +1,5 @@
 create a detailed readme for the current project based both comprehensively on the current features --- and the design philosophy underlying them --- and the planned future work
+
+---
+
+the wrap cursor bug is done fyi

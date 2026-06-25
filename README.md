@@ -451,7 +451,6 @@ The full architectural survey and per-item status lives in
 - **UTF-8-aware cursor + rendering** — cursor is byte-oriented; breaks
   on CJK/combining marks. Needs a `display_width(byte)` helper threaded
   through wrap math, paint, and mouse-click conversion.
-- **Cursor-disappears-on-wrapped-rows bug** — concrete render bug.
 - **Damage tracking: rerender from first cursor down** — partial-damage
   scheme, simpler than a glyph matrix.
 - **Page-up/down piece-table compaction** — piggyback coalescing onto

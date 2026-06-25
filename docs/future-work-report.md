@@ -12,7 +12,7 @@ The piece-table-with-mmap'd-orig design is Emacs-grade; multi-cursor + undo-in-s
 - **UTF-8 cursor + rendering** [#2]. Cursor is byte-oriented (`col` is a byte offset, `move_char` advances by bytes) — genuinely broken for non-ASCII. Needs a `tb_utf8_char_length`-aware layer in the View. Fixable without restructuring.
 - **Allocless cross-thread buffer sharing** [#24]. The architectural root beneath #1: the highlight lane currently gets a full-text snapshot via `write_text_direct` (O(doc) memcpy per keystroke). Want Buffer/View/Editor in Lua for ergonomics, but Lua values don't cross `lua_State` boundaries. Proposed direction: a buffer arena in C/FFI-shared memory, RWLock'd, pointed-to from Lua wrappers. **This is the one genuinely-open architectural question** — deferred for a dedicated design session.
 - **Page-up/down piece-table compaction** [#3]. Piggyback piece coalescing onto page navigation, doing the compaction work where the user already expects a perceptible transition. Addresses the "no compaction pass" gap in the snapshot-undo design.
-- **Cursor-disappears-on-wrapped-rows bug** [#0]. Concrete render bug to fix.
+- **Cursor-disappears-on-wrapped-rows bug** [#0] ✅ **DONE.** Fixed — the caret cell is now painted on wrapped non-first sub-rows (the original guard `csub_col < chunk_start` failed on any wrapped row).
 
 *Rejected as architectural concerns:* mark rings, registers, narrowing, rectangles — all are additive on the clean View/Buffer API, not structural. Multiple-cursors (already implemented, ahead of Emacs) absorbs the rectangle case.
 
@@ -101,7 +101,6 @@ The user corrected my harsh ★★ judgment: bytecode-preloaded modules still ru
 
 ## Cross-cutting / out of dimension
 
-- **#0 cursor-disappears-on-wrapped-rows bug** (Buffer/Render).
 - **#24 allocless cross-thread buffer sharing** (Buffer / Async) — the genuinely-open architectural question; touches every dimension that ever copies buffer text.
 
 ---
