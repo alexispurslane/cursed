@@ -614,6 +614,13 @@ local function main()
     editor._chord_for_command = chord_for_command
     editor._printable_fn = printable_fn
     editor._config = config
+    -- Margin: global config applied to every view at load. The initial
+    -- view is added before config loads, so backfill it here; views
+    -- added later (find-file, etc.) inherit via Editor:add_view.
+    editor.margin = config.margin
+    for _, v in ipairs(editor.views) do
+        v.margin = config.margin
+    end
     log.info("main", "config and keybindings loaded")
 
     -- Resolve the colorscheme path now that config is loaded.

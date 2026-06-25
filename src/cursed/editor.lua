@@ -202,6 +202,7 @@ end
 ---@field _read_char_cb function|nil active callback for read-char (one-shot)
 ---@field _read_char_prompt string the prompt shown during read-char
 ---@field _config Config the loaded user configuration
+---@field margin integer|nil max text render width; when set, the (gutter+text) column is centered in the window
 ---@field _blink_on boolean caret visible (drawn) this blink phase
 ---@field _blink_next_us integer deadline (us) of next on/off toggle; 0 = uninitialized
 ---@field event_system EventSystem central event hub (pre/post-command, mode_enter/exit, ring-buffer, ...)
@@ -400,6 +401,7 @@ end
 ---@param view View
 function Editor:add_view(view)
     view.editor = self
+    view.margin = self.margin
     table.insert(self.views, view)
     --    self.active_view = #self.views
     self:set_active_view(#self.views)
@@ -1450,7 +1452,7 @@ function Editor:render()
     --- active-line highlight carries through the syntax spans (which
     --- would otherwise repaint with default_bg). Defaults to
     --- default_bg for non-active rows.
-    local function paint_chunk(view, li, row, gutter_width, chunk, chunk_start, chunk_end, row_bg)
+    local function paint_chunk(view, li, row, text_x, chunk, chunk_start, chunk_end, row_bg)
         local segs = view:highlight_segments(li, chunk_start, chunk_end)
         local dfg = ui("default_fg")
         local dbg = row_bg or ui("default_bg")
@@ -1458,27 +1460,27 @@ function Editor:render()
         -- default_bg so the buffer recedes behind the floating box.
         dfg, dbg = focus_dim(dfg, dbg)
         if segs == nil or #segs == 0 then
-            term:print(gutter_width, row, chunk, dfg, dbg)
+            term:print(text_x, row, chunk, dfg, dbg)
             return
         end
         local painted = 0 -- byte offset within chunk already painted
         for _, s in ipairs(segs) do
             if s.cs > painted then
-                term:print(gutter_width + painted, row, chunk:sub(painted + 1, s.cs), dfg, dbg)
+                term:print(text_x + painted, row, chunk:sub(painted + 1, s.cs), dfg, dbg)
             end
             if s.ce > s.cs then
                 local seg_fg = s.fg
                 -- Per-span fg also gets the focus tint; bg is the row's
                 -- dbg (already dimmed above).
                 seg_fg = focus_dim(seg_fg, dbg)
-                term:print(gutter_width + s.cs, row, chunk:sub(s.cs + 1, s.ce), seg_fg, dbg)
+                term:print(text_x + s.cs, row, chunk:sub(s.cs + 1, s.ce), seg_fg, dbg)
             end
             if s.ce > painted then
                 painted = s.ce
             end
         end
         if painted < #chunk then
-            term:print(gutter_width + painted, row, chunk:sub(painted + 1), dfg, dbg)
+            term:print(text_x + painted, row, chunk:sub(painted + 1), dfg, dbg)
         end
     end
 
@@ -1657,11 +1659,29 @@ function Editor:render()
 
     -- Gutter width
     local gutter_width = math.max(3, #tostring(line_count) + 1)
-    local text_width = w - gutter_width
-    if text_width <= 0 then
+    local avail_text = w - gutter_width
+    if avail_text <= 0 then
         term:present()
         return
     end
+
+    -- Margin: when set and narrower than the available text area, cap the
+    -- text render width at `margin` and center the resulting gutter + text
+    -- column within the window. Text stays left-aligned inside the column.
+    -- When margin is unset or the window is too narrow, fill the available
+    -- width with no centering (the historical behavior).
+    local margin = view.margin
+    local text_width, block_x, block_w
+    if margin and margin > 0 and margin < avail_text then
+        text_width = margin
+        block_w = gutter_width + text_width
+        block_x = math.floor((w - block_w) / 2)
+    else
+        text_width = avail_text
+        block_w = w
+        block_x = 0
+    end
+    local text_x = block_x + gutter_width
 
     -- Soft wrapping: set wrap_width to the text area width
     -- so the cache stays consistent with the current window size.
@@ -1764,19 +1784,24 @@ function Editor:render()
                 -- the whole buffer region (gutter + text) recedes behind
                 -- the palette together.
                 num_fg, row_bg = focus_dim(num_fg, row_bg)
-                -- Pre-fill the entire row with row_bg so the active tint
-                -- spans the gutter, the text region, and the trailing
-                -- margin (paint_chunk + overlays paint on top of this).
-                term:print(0, row, string.rep(" ", w), row_bg, row_bg)
+                -- Pre-fill: outside the centered text column gets the
+                -- default bg (so the column reads as centered); the
+                -- column itself (gutter + text) gets row_bg so the active
+                -- tint spans exactly the block. When no margin is set,
+                -- block_x=0 and block_w=w so this collapses to a single
+                -- full-width row_bg fill (the historical behavior).
+                local _, empty_bg = focus_dim(ui("default_fg"), ui("default_bg"))
+                term:print(0, row, string.rep(" ", w), empty_bg, empty_bg)
+                term:print(block_x, row, string.rep(" ", block_w), row_bg, row_bg)
                 -- Gutter: line number on first sub-row, blank on wrapped
                 -- continuation rows. Painted on row_bg so the active tint
                 -- shows through the gutter.
                 if sub_row == 0 then
                     local line_num = tostring(li + 1)
                     local num_pad = string.rep(" ", gutter_width - 1 - #line_num)
-                    term:print(0, row, num_pad .. line_num .. " ", num_fg, row_bg)
+                    term:print(block_x, row, num_pad .. line_num .. " ", num_fg, row_bg)
                 else
-                    term:print(0, row, string.rep(" ", gutter_width), num_fg, row_bg)
+                    term:print(block_x, row, string.rep(" ", gutter_width), num_fg, row_bg)
                 end
 
                 -- Extract the sub-row's text chunk
@@ -1820,29 +1845,11 @@ function Editor:render()
 
                     if #merged == 0 then
                         -- Base layer only: syntax-highlighted spans.
-                        paint_chunk(
-                            view,
-                            li,
-                            row,
-                            gutter_width,
-                            chunk,
-                            chunk_start,
-                            chunk_end,
-                            row_bg
-                        )
+                        paint_chunk(view, li, row, text_x, chunk, chunk_start, chunk_end, row_bg)
                     else
                         -- Base layer (highlight) first, then overlay each
                         -- selection run in reverse-video on top.
-                        paint_chunk(
-                            view,
-                            li,
-                            row,
-                            gutter_width,
-                            chunk,
-                            chunk_start,
-                            chunk_end,
-                            row_bg
-                        )
+                        paint_chunk(view, li, row, text_x, chunk, chunk_start, chunk_end, row_bg)
                         for _, r in ipairs(merged) do
                             local rel_cs = r[1] - chunk_start
                             local rel_ce = r[2] - chunk_start
@@ -1865,7 +1872,7 @@ function Editor:render()
                                 local sel_text =
                                     chunk:sub(rel_cs + 1, rel_ce):gsub(" ", "·"):gsub("\t", "→")
                                 term:print(
-                                    gutter_width + rel_cs,
+                                    text_x + rel_cs,
                                     row,
                                     sel_text,
                                     ui("cursor_fg"),
@@ -1882,7 +1889,7 @@ function Editor:render()
                                     and #line_text > 0
                                     and line_text:byte(#line_text) == 10
                                 then
-                                    local nl_x = gutter_width + rel_ce
+                                    local nl_x = text_x + rel_ce
                                     if nl_x < w then
                                         term:print(
                                             nl_x,
@@ -1908,13 +1915,7 @@ function Editor:render()
                     local guide_fg = ui("indent_guide")
                     for _, g in ipairs(guide_cols) do
                         if g >= chunk_start and g < chunk_end then
-                            term:print(
-                                gutter_width + (g - chunk_start),
-                                row,
-                                "│",
-                                guide_fg,
-                                row_bg
-                            )
+                            term:print(text_x + (g - chunk_start), row, "│", guide_fg, row_bg)
                         end
                     end
                 end
@@ -1949,13 +1950,7 @@ function Editor:render()
                                 if #ch == 0 then
                                     ch = " "
                                 end
-                                term:print(
-                                    gutter_width + rel,
-                                    row,
-                                    ch,
-                                    ui("cursor_fg"),
-                                    ui("cursor_bg")
-                                )
+                                term:print(text_x + rel, row, ch, ui("cursor_fg"), ui("cursor_bg"))
                             end
                         end
                     end
@@ -1980,13 +1975,7 @@ function Editor:render()
                                 if #ch == 0 then
                                     ch = " "
                                 end
-                                term:print(
-                                    gutter_width + rel,
-                                    row,
-                                    ch,
-                                    ui("cursor_fg"),
-                                    ui("drop_bg")
-                                )
+                                term:print(text_x + rel, row, ch, ui("cursor_fg"), ui("drop_bg"))
                             end
                         end
                     end

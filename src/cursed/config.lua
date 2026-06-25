@@ -100,6 +100,7 @@ local DEFAULT_FILE_PATTERNS = {
 ---@field keybindings table<string, string|function> global keybinding overrides
 ---@field colorscheme string|nil name or absolute path to a base16 theme file
 ---@field concept_slots table<string, integer>|nil concept → base-slot (0x0N) overrides
+---@field margin integer|nil max text render width; when the window is wider, the (gutter+text) column is centered within it
 local Config = {}
 Config.__index = Config
 
@@ -418,12 +419,25 @@ function Config.load()
         concept_slots = parse_concept_slots(result.concept_slots)
     end
 
+    -- Margin: maximum text render width. When the window is wider than
+    -- this, the gutter + text column is centered within the window with
+    -- the text left-aligned inside it. nil or <=0 → no margin (fill the
+    -- available width, current behavior). Set in init.lua as `margin = 80`.
+    local margin = nil
+    if result and type(result.margin) == "number" then
+        local m = math.floor(result.margin)
+        if m > 0 then
+            margin = m
+        end
+    end
+
     return setmetatable({
         modes = modes,
         file_patterns = file_patterns,
         keybindings = keybindings,
         colorscheme = colorscheme,
         concept_slots = concept_slots,
+        margin = margin,
     }, Config)
 end
 

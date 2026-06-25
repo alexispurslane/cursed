@@ -56,6 +56,7 @@ local ffi = require("ffi")
 ---@field expand_tab boolean if true, Tab inserts spaces instead of \t
 ---@field indent_width integer number of columns for auto-indent
 ---@field wrap_width integer|nil when set, soft-wrap lines at this width
+---@field margin integer|nil max text render width; when the window is wider, the text column (gutter + text) is centered within it
 ---@field _wrap_rows integer[]|nil cache: _wrap_rows[li+1] = number of screen rows for logical line li
 ---@field _wrap_cum integer[]|nil cache: _wrap_cum[li+1] = screen row where logical line li starts (0-based)
 ---@field _wrap_gen integer|nil cache generation counter (undo.count + redo.count)
@@ -131,6 +132,7 @@ function View.new(buffer)
         expand_tab = false,
         indent_width = 8,
         wrap_width = nil,
+        margin = nil,
         _wrap_rows = nil,
         _wrap_cum = nil,
         _wrap_gen = nil,
