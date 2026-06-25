@@ -11,3 +11,7 @@ is there a way we can make the editor *look* strikingly beautiful/modern with wh
 ---
 
 use the box drawing set; I don't want to depend on a nerd font
+
+---
+
+okay, maybe try vertical thin unicode triangles (left/right) isntead
