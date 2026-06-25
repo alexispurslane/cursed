@@ -6,41 +6,37 @@ WINSIZE = struct.pack("HHHH", 40, 120, 0, 0)
 
 # action sequences to try. Each is a list of (bytes, label).
 SEQS = {
-  "select+delkey+undo": [
-     (b"\x00", "setmark"),
-     (b"\x1b[C"*4, "right4"),
-     (b"\x1b[3~", "Del"),       # delete key (termbox: key_dc)
-     (b"\x1f", "undo"),
-  ],
-  "select+ctrld+undo": [
-     (b"\x00", "setmark"),
-     (b"\x1b[C"*4, "right4"),
-     (b"\x04", "C-d"),
-     (b"\x1f", "undo"),
-  ],
-  "select+backspace+undo": [
+  "select+BS+ctrl-x-u": [
      (b"\x00", "setmark"),
      (b"\x1b[C"*4, "right4"),
      (b"\x7f", "BS"),
-     (b"\x1f", "undo"),
+     (b"\x18\x15", "ctrl-x ctrl-u"),   # C-x C-u? no—default is C-x u; the user said ctrl-x ctrl-u
   ],
-  "select+type+undo": [
+  "select+Del+ctrl-x-u": [
      (b"\x00", "setmark"),
      (b"\x1b[C"*4, "right4"),
-     (b"X", "typeX"),
-     (b"\x1f", "undo"),
+     (b"\x1b[3~", "Del"),
+     (b"\x18\x15", "C-x C-u"),
   ],
-  "select跨newline+type+undo": [
-     (b"\x1b[C"*8, "right8"),       # move to end of line1
+  "select+BS+C-x-u": [
      (b"\x00", "setmark"),
-     (b"\x1b[C"*4, "right4"),      # into line2
-     (b"X", "typeX"),
-     (b"\x1f", "undo"),
-     (b"\x1f", "undo"),
+     (b"\x1b[C"*4, "right4"),
+     (b"\x7f", "BS"),
+     (b"\x18u", "C-x u"),
   ],
-  "justtype+undo": [
-     (b"Z", "typeZ"),
-     (b"\x1f", "undo"),
+  "select+BS+C-x-u_multiline": [
+     (b"\x1b[C"*8, "right8"),
+     (b"\x00", "setmark"),
+     (b"\x1b[C"*4, "right4"),
+     (b"\x7f", "BS"),                 # backspace with selection -- actually deletes selection
+     (b"\x18u", "C-x u"),
+     (b"\x18u", "C-x u"),
+  ],
+  "select+Del+Ctrl-D": [
+     (b"\x00", "setmark"),
+     (b"\x1b[C"*4, "right4"),
+     (b"\x04", "C-d"),
+     (b"\x18u", "C-x u"),
   ],
 }
 
@@ -63,7 +59,6 @@ def run(seq):
                 if not d: break
                 log.extend(d)
     time.sleep(0.6); drain(0.4)
-    time.sleep(1.8); drain(0.6)   # let highlighter lane install
     for b,label in seq:
         os.write(fd,b); time.sleep(0.06); drain(0.35)
     time.sleep(0.2); drain(0.6)
