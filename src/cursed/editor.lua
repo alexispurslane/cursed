@@ -62,6 +62,31 @@ local function blend(color, target, factor)
     b = bit.rshift(b * inv + tb_ * factor, 8)
     return bit.bor(bit.bor(bit.bor(bit.lshift(r, 16), bit.lshift(g, 8)), b), style)
 end
+
+--- Matched-substring byte set for completion highlighting. Mirrors the
+--- completers.lua matcher (space-separated terms, case-insensitive,
+--- plain substring) and returns the set of byte positions in `display`
+--- covered by the FIRST occurrence of each term. Drives the
+--- match-highlighting paint in the completion list (Helm/ido-style).
+---@param display string visible (already-truncated) completion text
+---@param query string current minibuffer input
+---@return table set of byte-index -> true (1-based, inclusive)
+local function match_byte_set(display, query)
+    local set = {}
+    if not query or query == "" then
+        return set
+    end
+    local lower = display:lower()
+    for term in query:lower():gmatch("%S+") do
+        local i, j = lower:find(term, 1, true)
+        if i then
+            for b = i, j do
+                set[b] = true
+            end
+        end
+    end
+    return set
+end
 --- but termbox x/y are CELL columns — so any modeline math involving
 --- unicode glyphs (◆ ▤ ⌖ ◣ ◢ …, all 1 cell but ≥2 bytes) must use this
 --- instead or the column offsets drift and leave visible gaps. Counts
@@ -1464,6 +1489,53 @@ function Editor:render()
     --- overflows. Background `bg` is the surrounding bg (default_bg for
     --- inline, the box interior bg for palette). Reads mb._completions /
     --- _comp_index / _comp_scroll directly.
+    --- print_highlighted: print a completion-text row with matched
+    --- substrings (per match_byte_set) drawn in a distinct fg + style so
+    --- the user can see WHY each candidate matched — the signature
+    --- readability cue of a great command palette (Helm/ido style).
+    --- Splits into contiguous matched / unmatched byte-runs and prints
+    --- each run with its own fg, advancing by cell width so multi-byte
+    --- chrome stays aligned. `mset` nil → single unmatch-fg pass (no
+    --- highlighting), preserving the pre-highlight look on empty query.
+    local function print_highlighted(
+        cx,
+        cy,
+        text,
+        matched_fg,
+        unmatch_fg,
+        bg_p,
+        mset,
+        matched_style
+    )
+        local n = #text
+        if n == 0 then
+            return
+        end
+        local sx = cx
+        local run_start = 1
+        local cur = mset and mset[1] or false
+        if mset == nil then
+            cur = false
+        end
+        for i = 2, n + 1 do
+            local m = (mset ~= nil) and (mset[i] or false) or false
+            if m ~= cur or i == n + 1 then
+                local seg_end = i - 1
+                if seg_end >= run_start then
+                    local sub = text:sub(run_start, seg_end)
+                    local fg = cur and matched_fg or unmatch_fg
+                    if cur and matched_style then
+                        fg = bit.bor(fg, matched_style)
+                    end
+                    term:print(sx, cy, sub, fg, bg_p)
+                    sx = sx + cell_len(sub)
+                end
+                run_start = i
+                cur = m
+            end
+        end
+    end
+
     local function paint_completions(x, y, width, max_visible, bg)
         local completions = mb._completions
         local total = #completions
@@ -1484,6 +1556,15 @@ function Editor:render()
         local cur_bg = ui("cursor_bg")
         local norm_fg = ui("minibuffer_prompt")
         local meta_fg = ui("minibuffer_metadata")
+        -- Match-highlighting colors (Helm/ido style): matched chars pop,
+        -- unmatched recede. On the non-selected rows matched chars use
+        -- the bright default fg (bold) over dim-gray unmatched text; on
+        -- the selected bar matched chars use the blue accent (bold)
+        -- over the natural dark cursor_fg so they read on the light bar.
+        local bright_fg = ui("minibuffer_text")
+        local dim_fg = meta_fg
+        local accent_fg = norm_fg
+        local query = mb:view_text()
 
         -- Metadata column: longest displayed text + 2-space gap.
         local max_text = 0
@@ -1507,12 +1588,22 @@ function Editor:render()
                 -- selection bg first, then print text + meta on top so
                 -- the highlight is contiguous across the gap.
                 term:print(x, row, string.rep(" ", list_w), cur_fg, cur_bg)
-                term:print(x, row, text, cur_fg, cur_bg)
+                local mset = match_byte_set(text, query)
+                if next(mset) then
+                    print_highlighted(x, row, text, accent_fg, cur_fg, cur_bg, mset, tb.bold)
+                else
+                    term:print(x, row, text, cur_fg, cur_bg)
+                end
                 if meta and meta_col + cell_len(meta) <= list_w then
                     term:print(x + meta_col, row, meta, cur_fg, cur_bg)
                 end
             else
-                term:print(x, row, text, norm_fg, bg)
+                local mset = match_byte_set(text, query)
+                if next(mset) then
+                    print_highlighted(x, row, text, bright_fg, dim_fg, bg, mset, tb.bold)
+                else
+                    term:print(x, row, text, norm_fg, bg)
+                end
                 if meta and meta_col + cell_len(meta) <= list_w then
                     term:print(x + meta_col, row, meta, meta_fg, bg)
                 end
@@ -2086,7 +2177,12 @@ function Editor:render()
         local box_h = 2 + 1 + n_comp + 1
         local box_y = math.floor((h - box_h) / 2)
 
-        local border_fg = ui("border")
+        -- Glow accent border: vivid blue accent (minibuffer_prompt,
+        -- base0D) + bold instead of the dim neutral border, so the
+        -- floating box reads as the focused surface against the now-
+        -- blackened backdrop. Same accent the prompt + selected-bar
+        -- match-highlight use, tying the palette's chrome together.
+        local border_fg = bit.bor(ui("minibuffer_prompt"), tb.bold)
         local bg = ui("default_bg")
         local prompt_fg = ui("minibuffer_prompt")
         local text_fg = ui("minibuffer_text")

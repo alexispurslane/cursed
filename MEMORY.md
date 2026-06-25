@@ -10,12 +10,10 @@ so the agent can pick up context across sessions.
 - If that's awkward, an acceptable alternative: skip creating the initial empty view when args are present — but that touches earlier code; prefer the reuse approach to keep the diff...
 - Prefer the approach that keeps the diff small and clearly correct.
 - prefer the lexicographically-first chord, or the shortest — pick one and document it).
+- use the box drawing set; I don't want to depend on a nerd font
 
 ## Key Decisions
 
-- path` is never set, so `require("external")` fails without manual coercion.
-- we're still better than emacs in practice, because in practice we gain in general so much, even on edits, on various things, that our time/space complexity isn't an issue.
-- However, we should actually probably do things differently in pratice --- I've reevaluated my idea.
 - the callable table is obviously what we should do, and sort of what I had in mind.
 - Let me split into two files:
 - ** Roberto Ierusalimschy has said the design rule is roughly: if something can be done acceptably in userspace, it should not be in the core.
@@ -23,6 +21,9 @@ so the agent can pick up context across sessions.
 - language` directive) → look up parser → `set_included_ranges([content_range])` → parse → `filtered_captures` over injected query → collect → merge into block captures.
 - The query has `subscript subscript: (word) @field` — using `subscript` as both the node type *and* a field name.
 - All injected captures (absolute byte offsets) merge into one sorted stream that `build_range_spans` runs the stack algorithm over, so bold-inside-a-heading and lua-inside-a-fence layer correctly.
+- we should show newlines at the end of selected lines within whitespace.
+- actually wait, let's make it floating in the center be optional, and only use it for M-x
+- This also fixed the lingering byte-vs-cell bug in the inline path (it was using `#text` for column math; now everything uses `cell_len`).
 
 ## Gotchas & Errors
 
@@ -34,3 +35,8 @@ so the agent can pick up context across sessions.
 - ===== BUFFER METHODS =====
 - Could not find the exact text in /Users/alexispurslane/Development/scratch/cursed/docs/future-work-report.md. The old text must match exactly including all whitespace and newlines.
 - md` (both the §1/§2 listings and the cross-cutting section), noting the fix — the caret cell is now painted on wrapped non-first sub-rows (the original guard `csub_col < chunk_start` failed on any...
+
+## Heavily Read
+
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/editor.lua (44 reads) — Let me look at the actual render chrome painting — modeline, gutter, and how cel
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/minibuffer.lua (4 reads) — The M-x invocation is `commands.execute_command` (commands.lua:779) with `prompt
