@@ -59,3 +59,7 @@ can we use ghostty/kitty capabilities to tint everything but the palette?
 ---
 
 wowww, wild, dim just makes all the text go away! let's redo with option two
+
+---
+
+it's beautiful! now, can we set up a way to set the default color scheme in init.lua
