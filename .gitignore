@@ -1,0 +1,5 @@
+build/
+*.o
+lua_modules/
+.luarocks/
+random_text_35mb.txt

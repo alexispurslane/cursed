@@ -1,0 +1,82 @@
+{
+  "runtime": {
+    "version": "LuaJIT"
+  },
+  "diagnostics": {
+    "neededFileStatus": {
+      "undefined-global": "Any!",
+      "undefined-field": "Any!",
+      "undefined-doc-name": "Any!",
+      "undefined-doc-param": "Any!",
+      "undefined-env-child": "Any!",
+      "no-unknown": "Any!",
+      "deprecated": "None!"
+    },
+    "severity": {
+      "undefined-global": "Error!",
+      "undefined-field": "Error!",
+      "undefined-doc-name": "Error!",
+      "undefined-doc-param": "Error!",
+      "undefined-env-child": "Error!",
+      "assign-type-mismatch": "Error!",
+      "cast-type-mismatch": "Error!",
+      "cast-local-type": "Error!",
+      "param-type-mismatch": "Error!",
+      "return-type-mismatch": "Error!",
+      "inject-field": "Error!",
+      "need-check-nil": "Error!",
+      "missing-fields": "Error!",
+      "missing-parameter": "Error!",
+      "missing-return": "Error!",
+      "missing-return-value": "Error!",
+      "redundant-parameter": "Error!",
+      "redundant-return-value": "Error!",
+      "redundant-value": "Error!",
+      "duplicate-index": "Error!",
+      "duplicate-set-field": "Error!",
+      "duplicate-doc-alias": "Error!",
+      "duplicate-doc-field": "Error!",
+      "duplicate-doc-param": "Error!",
+      "redefined-local": "Error!",
+      "unused-local": "Error!",
+      "unused-function": "Error!",
+      "unused-label": "Error!",
+      "unused-vararg": "Error!",
+      "empty-block": "Error!",
+      "unreachable-code": "Error!",
+      "code-after-break": "Error!",
+      "lowercase-global": "Error!",
+      "global-in-nil-env": "Error!",
+      "no-unknown": "Error!"
+    },
+    "groupSeverity": {
+      "ambiguity": "Error",
+      "duplicate": "Error",
+      "global": "Error",
+      "redefined": "Error",
+      "strict": "Error",
+      "strong": "Error",
+      "type-check": "Error",
+      "unbalanced": "Error",
+      "unused": "Error"
+    },
+    "groupFileStatus": {
+      "ambiguity": "Any",
+      "duplicate": "Any",
+      "global": "Any",
+      "redefined": "Any",
+      "strict": "Any",
+      "strong": "Any",
+      "type-check": "Any",
+      "unbalanced": "Any",
+      "unused": "Any"
+    }
+  },
+  "workspace": {
+    "library": [],
+    "ignoreDir": ["vendor", "build"]
+  },
+  "type": {
+    "castTypeStrictness": "Disabled"
+  }
+}
