@@ -3,3 +3,7 @@ I get this error: `[string "cursed.view"]:0: attempt to perform arithmetic on a 
 ---
 
 still getting the error. I highlight something, hit backspace/delete, ctrl-x ctrl-u, kaboom!
+
+---
+
+sorry no I was doing ctrl-x u
