@@ -40,6 +40,7 @@ local keybind = require("cursed.keybind")
 ---@field tab_width integer visual width of a tab stop (default 8)
 ---@field expand_tab boolean if true, Tab key inserts spaces instead of \t (default false)
 ---@field indent_width integer number of columns for auto-indent (default = tab_width)
+---@field margin integer|nil max text render width; overrides the global config margin when set (centers the gutter+text column when the window is wider)
 ---@field language string|nil bundled tree-sitter grammar name (enables highlighting)
 ---@field highlight_query string|nil override query source for the grammar
 ---@field injection_query string|nil injections query (walks the block tree for content regions to inject another grammar into — markdown: inline nodes, fenced code blocks, metadata blocks)
@@ -55,6 +56,7 @@ MajorMode.__index = MajorMode
 ---@field tab_width? integer
 ---@field expand_tab? boolean
 ---@field indent_width? integer
+---@field margin? integer
 ---@field language? string
 ---@field highlight_query? string
 ---@field injection_query? string
@@ -73,6 +75,7 @@ function MajorMode.new(spec)
         tab_width = tw,
         expand_tab = spec.expand_tab or false,
         indent_width = spec.indent_width or tw,
+        margin = spec.margin,
         language = spec.language,
         highlight_query = spec.highlight_query,
         injection_query = spec.injection_query,
@@ -112,6 +115,7 @@ end
 ---@field tab_width integer (inherited)
 ---@field expand_tab boolean (inherited)
 ---@field indent_width integer (inherited)
+---@field margin integer|nil (inherited)
 ---@field language string|nil (inherited)
 ---@field highlight_query string|nil (inherited)
 ---@field injection_query string|nil (inherited)

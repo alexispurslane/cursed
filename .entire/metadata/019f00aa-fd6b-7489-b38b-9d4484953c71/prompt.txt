@@ -1,1 +1,5 @@
 let's create a "margin" feature in the rendering code that sets how wide the text will render, and when that's less than the available screen width, we center the vertical column containing the text within the window, although the text should still be left-aligned within that
+
+---
+
+can we make it so that majormodes have `margin` and it can override the global one

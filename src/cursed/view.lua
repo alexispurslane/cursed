@@ -776,10 +776,17 @@ function View:set_major_modes(modes)
         self.tab_width = last.tab_width
         self.expand_tab = last.expand_tab
         self.indent_width = last.indent_width
+        -- margin is an OPTIONAL override of the global config margin:
+        -- a mode that sets it wins; a mode that omits it falls back to
+        -- editor.margin (the global baseline), NOT a hardcoded constant
+        -- (unlike tab_width/indent_width, which have no global source).
+        self.margin = last.margin ~= nil and last.margin or (self.editor and self.editor.margin)
     else
         self.tab_width = 8
         self.expand_tab = false
         self.indent_width = 8
+        -- No active mode: restore the global config margin.
+        self.margin = self.editor and self.editor.margin
     end
     -- Rebuild the syntax highlighter from the highest-precedence mode
     -- that declares a tree-sitter language.
