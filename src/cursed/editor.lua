@@ -1378,6 +1378,15 @@ function Editor:render()
         local segs = view:highlight_segments(li, chunk_start, chunk_end)
         local dfg = ui("default_fg")
         local dbg = row_bg or ui("default_bg")
+        -- Focus backdrop: when the palette (M-x) is open, faint every
+        -- buffer fg via SGR dim (the `dim` attr bit). Backgrounds are
+        -- left alone so active-line/selection bg tints remain visible;
+        -- only the *text* recedes, matching the "dialog backdrop" look.
+        -- The modeline is painted separately and stays full-saturation.
+        local dim_mask = (mb and mb.palette) and tb.dim or 0
+        if dim_mask ~= 0 then
+            dfg = bit.bor(dfg, dim_mask)
+        end
         if segs == nil or #segs == 0 then
             term:print(gutter_width, row, chunk, dfg, dbg)
             return
@@ -1388,7 +1397,11 @@ function Editor:render()
                 term:print(gutter_width + painted, row, chunk:sub(painted + 1, s.cs), dfg, dbg)
             end
             if s.ce > s.cs then
-                term:print(gutter_width + s.cs, row, chunk:sub(s.cs + 1, s.ce), s.fg, dbg)
+                local seg_fg = s.fg
+                if dim_mask ~= 0 then
+                    seg_fg = bit.bor(seg_fg, dim_mask)
+                end
+                term:print(gutter_width + s.cs, row, chunk:sub(s.cs + 1, s.ce), seg_fg, dbg)
             end
             if s.ce > painted then
                 painted = s.ce
@@ -1611,6 +1624,12 @@ function Editor:render()
                 local is_active = (view:p().line == li)
                 local row_bg = is_active and ui("active_line_bg") or ui("default_bg")
                 local num_fg = is_active and ui("line_number_active") or ui("line_number")
+                -- Focus backdrop: faint the gutter numbers too so the
+                -- whole buffer region recedes behind the palette. The
+                -- tint is on fg only; row_bg (active-line bg) is kept.
+                if mb and mb.palette then
+                    num_fg = bit.bor(num_fg, tb.dim)
+                end
                 -- Pre-fill the entire row with row_bg so the active tint
                 -- spans the gutter, the text region, and the trailing
                 -- margin (paint_chunk + overlays paint on top of this).

@@ -51,3 +51,7 @@ when we're in palette mode, we still reserve lines at the bottom of the screen w
 ---
 
 alright, one other thing: the minibuffer in both palette and bottom mode need, if there are multiple completion options, the ability to draw a scroll bar on the far right. also, make sure we're using the same internal rendering for both, just at different sizes
+
+---
+
+can we use ghostty/kitty capabilities to tint everything but the palette?
