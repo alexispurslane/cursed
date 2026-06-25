@@ -67,3 +67,7 @@ it's beautiful! now, can we set up a way to set the default color scheme in init
 ---
 
 okay, what other beautifying stuff can we do?
+
+---
+
+we need to also darkent he background when the palette is opened

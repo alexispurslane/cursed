@@ -1381,30 +1381,40 @@ function Editor:render()
             v:_clamp_all_cursors()
         end
     end
-    term:clear(ui("default_fg"), ui("default_bg"))
+    -- Hoisted early (before the clear + paint helpers) so the focus
+    -- backdrop can consult mb.palette at clear time and so the paint
+    -- helpers can close over `mb` directly.
+    local mb = self.minibuffer
+
+    -- When the palette is open, the focus backdrop tints the whole
+    -- buffer region — including empty rows below the last line — so
+    -- clear with the black-blended bg instead of bright default_bg.
+    do
+        local clear_bg = ui("default_bg")
+        if mb and mb.palette then
+            clear_bg = blend(clear_bg, 0x000000, 195)
+        end
+        term:clear(ui("default_fg"), clear_bg)
+    end
     -- The hardware terminal caret is always hidden; the caret is drawn
     -- as a reverse-video cell (toggled on/off by the blink timer)
     -- wherever it should appear (main view + minibuffer).
     term:hide_cursor()
 
-    -- Hoisted before the paint helpers so they can close over `mb`
-    -- (the completion renderer reads mb._completions / _comp_index /
-    -- _comp_scroll directly).
-    local mb = self.minibuffer
-
-    --- Focus-backdrop tint: when the palette (M-x) is open, blend every
-    --- buffer-region fg AND bg toward default_bg so the code visibly
-    --- recedes behind the floating palette. fg blends ~60% toward bg
-    --- (clearly muted but still legible); bg blends ~25% (just enough
-    --- to darken, since most bgs are already dark). Returns the
-    --- originals unchanged when the palette isn't active. The modeline
-    --- is painted separately and stays full-saturation.
-    local dim_bg_color = ui("default_bg")
+    --- Focus-backdrop tint: when the palette (M-x) is open, darken the
+    --- buffer region toward TRUE BLACK (not default_bg) so the backdrop
+    --- reads as saturated OLED-dark rather than merely "dimmer". bg
+    --- blends ~75% toward 0x000000 — clearly darker than base00 on any
+    --- palette. fg blends ~65% toward 0x000000 so text recedes but
+    --- stays legible against the now-blacker bg. Returns the originals
+    --- unchanged when the palette isn't active. The modeline is painted
+    --- separately and stays full-saturation.
+    local BLACK = 0x000000
     local function focus_dim(fg, bg)
         if not (mb and mb.palette) then
             return fg, bg
         end
-        return blend(fg, dim_bg_color, 150), blend(bg, dim_bg_color, 60)
+        return blend(fg, BLACK, 165), blend(bg, BLACK, 195)
     end
 
     --- Paint a text chunk's base layer with syntax-highlight spans.
