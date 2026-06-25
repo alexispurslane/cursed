@@ -35,3 +35,7 @@ lua  \src
 ---
 
 the left, sorry, the *left*, I get mixed up
+
+---
+
+beautiful! now can we make the minibuffer always render in the center of the screen, as if it was a command pallette?
