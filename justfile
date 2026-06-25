@@ -86,7 +86,7 @@ compile-bytecode:
         ident="${modname//\./_}"
         header="{{BUILD_DIR}}/bytecode_${ident}.h"
         if [ ! -f "$header" ] || [ "$f" -nt "$header" ]; then
-            LUA_PATH="{{LUAJIT_SRC}}/?.lua" {{LUAJIT_BIN}} -b -n "$modname" "$f" "$header"
+            LUA_PATH="{{LUAJIT_SRC}}/?.lua" {{LUAJIT_BIN}} -b -g -n "$modname" "$f" "$header"
         fi
     done
 

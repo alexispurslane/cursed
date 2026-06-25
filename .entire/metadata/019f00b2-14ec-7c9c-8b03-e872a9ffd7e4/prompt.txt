@@ -1,0 +1,1 @@
+I get this error: `[string "cursed.view"]:0: attempt to perform arithmetic on a nil value` whenever I try to undo after deleting some text in a selection using delete or typing anything

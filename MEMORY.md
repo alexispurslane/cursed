@@ -6,4 +6,4 @@ so the agent can pick up context across sessions.
 
 ## Heavily Read
 
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/editor.lua (8 reads) — The matcher is space-terms as case-insensitive substrings — perfect, that's easy
+- src/cursed/editor.lua (10 reads) — The rendering is in editor.lua. Let me read the main render function.

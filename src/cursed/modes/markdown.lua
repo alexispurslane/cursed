@@ -161,7 +161,8 @@ return {
     extra_injected_grammars = {
         markdown_inline = MARKDOWN_INLINE_HIGHLIGHT_QUERY,
     },
-    tab_width = 2,
+    tab_width = 2,    margin = 72,
     expand_tab = true,
     indent_width = 2,
 }
+
