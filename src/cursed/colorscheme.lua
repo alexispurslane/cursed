@@ -115,6 +115,25 @@ local CONCEPT_SLOTS = {
     drop_bg = 0x0A, -- base0A: yellow bg for staged drop markers
     status_message = 0x0B, -- base0B: green informational messages
     status_error = 0x08, -- base08: red error messages
+    -- Modern chrome accents (palette-driven; each maps to a base slot).
+    -- active_line_bg tints the row under the primary cursor so the
+    -- user's eye lands on it — the single biggest "modern editor"
+    -- visual cue in a TUI. base01 is one step lighter than base00.
+    active_line_bg = 0x01,
+    -- indent_guide: dim vertical rules at tab-stop boundaries, drawn
+    -- over leading whitespace only.
+    indent_guide = 0x03,
+    -- modeline_mode_*: the left status segment, an accent (blue) bg
+    -- block carrying the active major-mode name. dark fg on accent.
+    modeline_mode_fg = 0x00,
+    modeline_mode_bg = 0x0D,
+    -- modeline_pos_*: the right-aligned position/percentage segment,
+    -- a muted bg with bright fg so it reads as secondary chrome.
+    modeline_pos_fg = 0x06,
+    modeline_pos_bg = 0x02,
+    -- border: thin separators — the minibuffer/completions top rule
+    -- and any future panel dividers.
+    border = 0x02,
 }
 
 -- Capture name → concept. Tree-sitter queries use the standard

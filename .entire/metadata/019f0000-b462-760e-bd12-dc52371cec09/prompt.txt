@@ -3,3 +3,7 @@ create a detailed readme for the current project based both comprehensively on t
 ---
 
 the wrap cursor bug is done fyi
+
+---
+
+is there a way we can make the editor *look* strikingly beautiful/modern with what we've got?

@@ -5,6 +5,7 @@
 
 local tb = require("cursed.tb")
 local ColorScheme = require("cursed.colorscheme")
+local bit = require("bit")
 local ffi = require("ffi")
 local pffi = require("cursed.posix_ffi")
 local c = pffi.C
@@ -1326,10 +1327,14 @@ function Editor:render()
     --- Falls back to a single plain-default print when highlighting is off
     --- or the chunk has no spans. Overlays (selection/cursor/drops) are
     --- painted afterwards by the caller and override these segments.
-    local function paint_chunk(view, li, row, gutter_width, chunk, chunk_start, chunk_end)
+    --- row_bg: background to paint text-region cells with, so the
+    --- active-line highlight carries through the syntax spans (which
+    --- would otherwise repaint with default_bg). Defaults to
+    --- default_bg for non-active rows.
+    local function paint_chunk(view, li, row, gutter_width, chunk, chunk_start, chunk_end, row_bg)
         local segs = view:highlight_segments(li, chunk_start, chunk_end)
         local dfg = ui("default_fg")
-        local dbg = ui("default_bg")
+        local dbg = row_bg or ui("default_bg")
         if segs == nil or #segs == 0 then
             term:print(gutter_width, row, chunk, dfg, dbg)
             return
@@ -1434,29 +1439,60 @@ function Editor:render()
 
         local content_len = #display_text
         local total_sub = view:wrap_rows(li)
+        -- Indent-guide columns (text-relative, 0-based) for this line:
+        -- one │ at the LAST whitespace cell of each indent level (i.e.
+        -- at ts-1, 2·ts-1, …). Placing the guide on the boundary cell
+        -- (ts, 2·ts, …) would paint over the first real character when
+        -- lead_w is an exact multiple of ts; g-1 stays within the
+        -- leading whitespace. Computed once per logical line; only the
+        -- first sub-row actually paints them (indentation lives at col 0).
+        local guide_cols = {}
+        do
+            local ts = view.tab_width
+            if ts and ts > 0 then
+                local lead_w, i = 0, 1
+                while i <= #display_text do
+                    local b = display_text:byte(i)
+                    if b == 32 then
+                        lead_w = lead_w + 1
+                    elseif b == 9 then
+                        lead_w = (math.floor(lead_w / ts) + 1) * ts
+                    else
+                        break
+                    end
+                    i = i + 1
+                end
+                local g = ts
+                while g <= lead_w do
+                    guide_cols[#guide_cols + 1] = g - 1
+                    g = g + ts
+                end
+            end
+        end
 
         -- Render sub-rows for this logical line
         while sub_row < total_sub and row <= max_y do
             local ok, err = pcall(function()
-                -- Line number on first sub-row, empty gutter on continuation rows
+                -- Active-line highlight: tint the whole row (gutter→edge)
+                -- when this logical line holds the primary cursor, and
+                -- brighten its line number. The single biggest "modern
+                -- editor" cue in a TUI.
+                local is_active = (view:p().line == li)
+                local row_bg = is_active and ui("active_line_bg") or ui("default_bg")
+                local num_fg = is_active and ui("line_number_active") or ui("line_number")
+                -- Pre-fill the entire row with row_bg so the active tint
+                -- spans the gutter, the text region, and the trailing
+                -- margin (paint_chunk + overlays paint on top of this).
+                term:print(0, row, string.rep(" ", w), row_bg, row_bg)
+                -- Gutter: line number on first sub-row, blank on wrapped
+                -- continuation rows. Painted on row_bg so the active tint
+                -- shows through the gutter.
                 if sub_row == 0 then
                     local line_num = tostring(li + 1)
                     local num_pad = string.rep(" ", gutter_width - 1 - #line_num)
-                    term:print(
-                        0,
-                        row,
-                        num_pad .. line_num .. " ",
-                        ui("line_number"),
-                        ui("default_bg")
-                    )
+                    term:print(0, row, num_pad .. line_num .. " ", num_fg, row_bg)
                 else
-                    term:print(
-                        0,
-                        row,
-                        string.rep(" ", gutter_width),
-                        ui("line_number"),
-                        ui("default_bg")
-                    )
+                    term:print(0, row, string.rep(" ", gutter_width), num_fg, row_bg)
                 end
 
                 -- Extract the sub-row's text chunk
@@ -1500,11 +1536,29 @@ function Editor:render()
 
                     if #merged == 0 then
                         -- Base layer only: syntax-highlighted spans.
-                        paint_chunk(view, li, row, gutter_width, chunk, chunk_start, chunk_end)
+                        paint_chunk(
+                            view,
+                            li,
+                            row,
+                            gutter_width,
+                            chunk,
+                            chunk_start,
+                            chunk_end,
+                            row_bg
+                        )
                     else
                         -- Base layer (highlight) first, then overlay each
                         -- selection run in reverse-video on top.
-                        paint_chunk(view, li, row, gutter_width, chunk, chunk_start, chunk_end)
+                        paint_chunk(
+                            view,
+                            li,
+                            row,
+                            gutter_width,
+                            chunk,
+                            chunk_start,
+                            chunk_end,
+                            row_bg
+                        )
                         for _, r in ipairs(merged) do
                             local rel_cs = r[1] - chunk_start
                             local rel_ce = r[2] - chunk_start
@@ -1515,14 +1569,43 @@ function Editor:render()
                                 rel_ce = #chunk
                             end
                             if rel_ce > rel_cs then
+                                -- Whitespace visualization inside the
+                                -- selection: spaces → middle dot (·),
+                                -- tabs → arrow (→). Makes trailing/leading
+                                -- whitespace visible exactly where the
+                                -- user is operating. Done display-only
+                                -- (the buffer is untouched).
+                                local sel_text =
+                                    chunk:sub(rel_cs + 1, rel_ce):gsub(" ", "·"):gsub("\t", "→")
                                 term:print(
                                     gutter_width + rel_cs,
                                     row,
-                                    chunk:sub(rel_cs + 1, rel_ce),
+                                    sel_text,
                                     ui("cursor_fg"),
                                     ui("selection_bg")
                                 )
                             end
+                        end
+                    end
+                end
+
+                -- Indent guides: faint │ at tab-stop boundaries inside
+                -- leading whitespace. Painted AFTER the text layer (which
+                -- would otherwise overwrite them with blank space cells)
+                -- but BEFORE the cursor overlay. Only on the first sub-row
+                -- (the only place indentation lives), and only for guides
+                -- that fall within this chunk's range.
+                if sub_row == 0 and #guide_cols > 0 then
+                    local guide_fg = ui("indent_guide")
+                    for _, g in ipairs(guide_cols) do
+                        if g >= chunk_start and g < chunk_end then
+                            term:print(
+                                gutter_width + (g - chunk_start),
+                                row,
+                                "│",
+                                guide_fg,
+                                row_bg
+                            )
                         end
                     end
                 end
@@ -1625,33 +1708,83 @@ function Editor:render()
         -- at the top of render), so there is nothing to position here.
     end
 
-    -- Modeline (at row h - footer_rows)
+    -- Modeline (at row h - footer_rows).
+    -- Segmented layout: three colored blocks separated by powerline
+    -- triangles, palette-driven so every theme recolors it for free.
+    --   [ MODE ]   filepath • info          [ position section ]
+    -- The middle fills with the base modeline bg; the right block is
+    -- a muted accent carrying L/C/pct so it reads as secondary chrome.
+    -- Transient status (read-char / search / arg / status_message)
+    -- overrides the middle section, leaving mode + position intact.
     local modeline_y = h - footer_rows
     local dirty = buf:is_dirty()
-    local modified = dirty and "*" or ""
+    --  (Unicode " BALL" U+25CF) is a cleaner "modified" mark than "*".
+    local modified = dirty and " ●" or ""
     local path = buf:filepath() or "[no file]"
     local rc_status = self:read_char_status()
-    local status = rc_status
-        or self.status_message
-        or string.format(
-            "%s%s | L%d C%d | %d%%",
-            path,
-            modified,
-            view:p().line + 1,
-            view:p().col + 1,
-            math.floor(view:p().line / math.max(1, line_count - 1) * 100)
-        )
-    -- Pad to full width so background + underline span the row
-    if #status < w then
-        status = status .. string.rep(" ", w - #status)
-    elseif #status > w then
-        status = status:sub(1, w)
-    end
-    local modeline_fg = ui("modeline_fg")
-    local modeline_bg = ui("modeline_bg")
-    term:print(0, modeline_y, status, modeline_fg, modeline_bg)
 
-    -- Minibuffer (starting at modeline_y + 1, when active)
+    -- Resolve the active major-mode name (top of the view's mode stack).
+    local mode_name = "fundamental"
+    if #view._major_modes > 0 then
+        mode_name = view._major_modes[#view._major_modes].name or mode_name
+    end
+
+    -- Colors.
+    local mode_fg = ui("modeline_mode_fg")
+    local mode_bg = ui("modeline_mode_bg")
+    local pos_fg = ui("modeline_pos_fg")
+    local pos_bg = ui("modeline_pos_bg")
+    local mid_fg = ui("modeline_fg")
+    local mid_bg = ui("modeline_bg")
+
+    -- Section icons (single-cell, widely-supported unicode — no Nerd
+    -- Font required). ◆ U+25C6, ▤ U+25A4, ⌖ U+2316.
+    local ICON_MODE = "◆"
+    local ICON_FILE = "▤"
+    local ICON_POS = "⌖"
+
+    -- Right segment: position + percentage, with a location icon.
+    local pct = math.floor(view:p().line / math.max(1, line_count - 1) * 100)
+    local pos_str =
+        string.format(" %s %d:%d  %d%% ", ICON_POS, view:p().line + 1, view:p().col + 1, pct)
+
+    -- Middle segment: transient status, else filepath + modified (with
+    -- a file icon on the path so it reads as a distinct section).
+    local mid_str = rc_status or self.status_message or (ICON_FILE .. " " .. path .. modified)
+
+    -- Pre-fill the row with mid_bg so the gap between mode and pos
+    -- blocks (and any trailing margin) is the modeline bg.
+    term:print(0, modeline_y, string.rep(" ", w), mid_fg, mid_bg)
+
+    -- Left block: " mode " in the mode accent, followed by a powerline
+    -- triangle (U+E0B0, ) whose fg is the mode bg and whose bg is the
+    -- mid bg — so the accent block visibly "bleeds" into the middle.
+    local mode_text = " " .. ICON_MODE .. " " .. mode_name .. " "
+    term:print(0, modeline_y, mode_text, mode_fg, mode_bg)
+    term:print(#mode_text, modeline_y, "", mode_bg, mid_bg)
+
+    -- Middle block: transient status or filepath+modified. Truncated
+    -- to the space between the left separator and the right block.
+    local right_w = #pos_str + 1 -- +1 for the leading separator triangle
+    local mid_max = w - #mode_text - 1 - right_w
+    if mid_max > 0 then
+        if #mid_str > mid_max then
+            mid_str = mid_str:sub(1, mid_max)
+        end
+        term:print(#mode_text + 1, modeline_y, mid_str, mid_fg, mid_bg)
+    end
+
+    -- Right block: a leading powerline triangle (fg = pos_bg, bg =
+    -- mid_bg) followed by the position text in the pos accent.
+    local pos_x = w - #pos_str
+    term:print(pos_x - 1, modeline_y, "", pos_bg, mid_bg)
+    term:print(pos_x, modeline_y, pos_str, pos_fg, pos_bg)
+
+    -- Minibuffer (starting at modeline_y + 1, when active).
+    -- The modeline's accent bg already separates it from the buffer;
+    -- no spare row for a border rule (footer_rows accounts for exactly
+    -- modeline + minibuffer + completions). The `border` concept stays
+    -- defined for future panel dividers.
     if mb and mb.active then
         local mb_view = mb.view
         local mb_buf = mb_view.buffer
@@ -1696,7 +1829,12 @@ function Editor:render()
             if #ch == 0 then
                 ch = " "
             end
-            term:print(cursor_col, cursor_row, ch, ui("cursor_fg"), ui("cursor_bg"))
+            -- Mode-aware caret: the minibuffer uses an underline BAR
+            -- (char in the cursor accent color + underline style bit)
+            -- so input contexts read distinctly from the main view's
+            -- reverse-video block caret.
+            local bar_fg = bit.bor(ui("cursor_bg"), tb.underline)
+            term:print(cursor_col, cursor_row, ch, bar_fg, ui("default_bg"))
         end
 
         -- Completions (below minibuffer input, vertical, max 5 visible)

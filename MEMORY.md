@@ -26,11 +26,11 @@ so the agent can pick up context across sessions.
 
 ## Gotchas & Errors
 
-- For any non-first wrapped row, `csub_col < chunk_start`, so the guard fails and the cursor never renders.
-- On any wrapped non-first sub-row, `csub_col < chunk_start`, so the guard failed and the caret cell was never painted → cursor vanished.
-- Validation failed for tool "edit": — Fix: The token lines are identical so the edit was redundant; I just need to change the long-bracket delimiters.
 - Could not find edits[1] in src/cursed/modes/toml.lua. The oldText must match exactly including all whitespace and newlines. — Fix: Now I also need to check whether any *other* query files contain a literal `]==]` or `]]` but not `]]`...
 - Net: "implementing predicates" is **not** blocked and **not** a library-upgrade problem — it's a contained, ~100-300 line feature depending on scope, against an API that's already cdef'd.
 - " You then filter the match (drop it if predicates fail), and use its captures.
 - ## One detail that matters for *us*
 - Could not find edits[1] in src/cursed/highlight_lane.lua. The oldText must match exactly including all whitespace and newlines.
+- ===== BUFFER METHODS =====
+- Could not find the exact text in /Users/alexispurslane/Development/scratch/cursed/docs/future-work-report.md. The old text must match exactly including all whitespace and newlines.
+- md` (both the §1/§2 listings and the cross-cutting section), noting the fix — the caret cell is now painted on wrapped non-first sub-rows (the original guard `csub_col < chunk_start` failed on any...
