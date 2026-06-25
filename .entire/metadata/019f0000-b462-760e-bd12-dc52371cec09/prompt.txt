@@ -23,3 +23,11 @@ I meant these: ◢/◣/◤/◥ (triangles)
 ---
 
 the triangle on the right, that's supposed to be contiguous with the language chunk, actually has like a space of background color between the chunk and it
+
+---
+
+it's like 
+
+```
+lua  \src
+```
