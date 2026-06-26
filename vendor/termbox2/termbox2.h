@@ -3825,6 +3825,13 @@ static int extract_esc_mouse(struct tb_event *event) {
                     return TB_ERR;
             }
 
+            // Mouse modifier bits (xterm button-encoding): bit2=Shift(4),
+            // bit3=Alt(8), bit4=Ctrl(16), bit5=Motion(32). termbox only
+            // surfaced Motion by default; decode the rest so Alt-click etc.
+            // are observable on mouse events (TB_MOD_SHIFT/ALT/CTRL).
+            if ((b & 4))  event->mod |= TB_MOD_SHIFT;
+            if ((b & 8))  event->mod |= TB_MOD_ALT;
+            if ((b & 16)) event->mod |= TB_MOD_CTRL;
             if ((b & 32) != 0) event->mod |= TB_MOD_MOTION;
 
             // the coord is 1,1 for upper left
@@ -3903,6 +3910,13 @@ static int extract_esc_mouse(struct tb_event *event) {
             // on xterm mouse release is signaled by lowercase m
             if (trail == 'm') event->key = TB_KEY_MOUSE_RELEASE;
 
+            // Mouse modifier bits (xterm SGR Cb): bit2=Shift(4),
+            // bit3=Alt(8), bit4=Ctrl(16), bit5=Motion(32). Decode the
+            // modifier bits termbox otherwise drops, so Alt-click (and
+            // shift/ctrl-click) are observable on mouse events.
+            if ((num[0] & 4))  event->mod |= TB_MOD_SHIFT;
+            if ((num[0] & 8))  event->mod |= TB_MOD_ALT;
+            if ((num[0] & 16)) event->mod |= TB_MOD_CTRL;
             if ((num[0] & 32) != 0) event->mod |= TB_MOD_MOTION;
 
             event->x = (num[1] - 1 < 0) ? 0 : num[1] - 1;

@@ -89,10 +89,13 @@ local function drain_inbox(editor, ss)
             )
 
             if orig_data ~= nil and orig_len > 0 then
+                local bench = require("cursed.bench")
                 local psize = tonumber(ffi.C.sysconf(shared._SC_PAGESIZE))
                 local orig_cap = bit.band(orig_len + psize - 1, bit.bnot(psize - 1))
 
+                local t_mmap = bench.now_us()
                 local buf = Buffer.from_mmap(orig_data, orig_len, orig_cap)
+                bench.span("main", "file_open build_lines", t_mmap, { len = orig_len })
                 -- Find the view waiting for this file load (file_loaded == false)
                 local target_view = nil
                 for _, v in ipairs(editor.views) do
@@ -103,14 +106,27 @@ local function drain_inbox(editor, ss)
                 end
                 if target_view then
                     local fp = target_view.buffer:filepath()
-                    target_view.buffer = buf
+                    target_view:set_buffer(buf, { loaded = true })
                     if fp then
                         buf:set_filepath(fp)
                     end
                     target_view.file_loaded = true
                     -- Activate major mode based on filepath
+                    local t_mode = bench.now_us()
                     if editor._config and fp then
                         target_view:activate_mode_for_filepath(fp, editor._config)
+                    end
+                    bench.span("main", "file_open activate_mode", t_mode, { path = fp })
+                    editor.event_system:emit("file_loaded", target_view, buf)
+                    -- Total wall time from Editor:open_file() to here
+                    if target_view._bench_open_t0 then
+                        bench.span(
+                            "main",
+                            "file_open TOTAL",
+                            target_view._bench_open_t0,
+                            { path = fp, len = orig_len }
+                        )
+                        target_view._bench_open_t0 = nil
                     end
                 end
             else
@@ -122,11 +138,27 @@ local function drain_inbox(editor, ss)
                     end
                 end
                 if target_view then
+                    local bench = require("cursed.bench")
                     target_view.file_loaded = true
                     -- Activate major mode based on filepath
                     local fp = target_view.buffer:filepath()
+                    local t_mode = bench.now_us()
                     if editor._config and fp then
                         target_view:activate_mode_for_filepath(fp, editor._config)
+                    end
+                    bench.span("main", "file_open activate_mode", t_mode, { path = fp })
+                    -- The (possibly empty) file is now "opened" even
+                    -- though no content buffer was swapped in.
+                    editor.event_system:emit("buffer_open", target_view.buffer, target_view)
+                    editor.event_system:emit("file_loaded", target_view, target_view.buffer)
+                    if target_view._bench_open_t0 then
+                        bench.span(
+                            "main",
+                            "file_open TOTAL (empty)",
+                            target_view._bench_open_t0,
+                            { path = fp }
+                        )
+                        target_view._bench_open_t0 = nil
                     end
                 end
             end
@@ -140,6 +172,7 @@ local function drain_inbox(editor, ss)
             for _, v in ipairs(editor.views) do
                 if not v.file_loaded then
                     v.file_loaded = true
+                    v._bench_open_t0 = nil
                     break
                 end
             end
@@ -156,6 +189,7 @@ local function drain_inbox(editor, ss)
                 for _, v in ipairs(editor.views) do
                     if v.buffer:filepath() == fp then
                         v.buffer:clear_dirty()
+                        editor.event_system:emit("buffer_saved", v.buffer, v)
                         break
                     end
                 end
@@ -666,6 +700,18 @@ local function main()
 
     local ss = shared.SharedState.from_global()
 
+    -- Register the inbox EVFILT_USER wakes BEFORE any MSG_FILE_LOAD is
+    -- pushed. The IO lane replies in well under a millisecond and
+    -- triggers EVFILT_USER on this kq; if the filter isn't registered
+    -- yet, the trigger is dropped and select() won't wake until the
+    -- 200ms watchdog — i.e. the "Loading..." flash. Registering early
+    -- makes main(kq_fd) readable the instant the reply arrives, so
+    -- select() returns immediately. (resizefd is added later, once
+    -- termbox is up; it has no ordering dependency.)
+    local main_kq = Kqueue.wrap(ss._ptr.main_kq_fd)
+    main_kq:add_wake(assert(tonumber(ss._ptr.inbox_io.wake_ident)))
+    main_kq:add_wake(assert(tonumber(ss._ptr.inbox_hl.wake_ident)))
+
     -- Expose the inbox_hl drain as an editor method so views can
     -- synchronously drain lane responses inline (the zero-flash
     -- sync-wait path in View:_hl_wait_response). The closure captures
@@ -687,6 +733,15 @@ local function main()
     -- `init.lua` against the global editor).
     -- ------------------------------------------------------------------
     require("cursed.editor_listeners").setup(editor)
+
+    -- Announce editor readiness. Fires AFTER init.lua (config.load, run
+    -- above) and default listeners are registered, so both user and
+    -- built-in `editor.event_system:on("editor_open", ...)` handlers
+    -- observe it. NOTE: the initial empty view's view_open fires earlier
+    -- (during Editor setup, before init.lua) and so is not observable by
+    -- init.lua listeners — hook editor_open (or iterate editor.views
+    -- there) for "on startup, walk every existing view" needs.
+    editor.event_system:emit("editor_open")
 
     -- Request file load(s) from IO lane. Every file given on the
     -- command line is opened in its own View/Buffer; views are added
@@ -717,6 +772,7 @@ local function main()
             nf:close()
         end
         view.buffer:set_filepath(tmp_path)
+        view._bench_open_t0 = require("cursed.bench").now_us()
         ss:push(ss._ptr.outbox_io, { type = shared.MSG_FILE_LOAD, ptr = tmp_path })
         log.info("main", "no file; opened temp", { path = tmp_path })
         log.info("main", "pushing FILE_LOAD", { path = tmp_path })
@@ -783,6 +839,7 @@ local function main()
                     end
 
                     cur_view.buffer:set_filepath(expanded)
+                    cur_view._bench_open_t0 = require("cursed.bench").now_us()
                     ss:push(ss._ptr.outbox_io, { type = shared.MSG_FILE_LOAD, ptr = expanded })
                     log.info("main", "pushing FILE_LOAD", { path = expanded })
                 end
@@ -834,17 +891,15 @@ local function main()
     -- We use select() instead of poll() because macOS poll() has broken
     -- behavior on /dev/tty (spurious POLLNVAL / persistent POLLIN).
     local ttyfd, resizefd = term:get_fds()
-    local main_kq = Kqueue.wrap(ss._ptr.main_kq_fd)
     main_kq:add_fd(resizefd)
-    main_kq:add_wake(assert(tonumber(ss._ptr.inbox_io.wake_ident)))
-    main_kq:add_wake(assert(tonumber(ss._ptr.inbox_hl.wake_ident)))
 
     local kq_fd = tonumber(ss._ptr.main_kq_fd)
 
-    -- Self-pipe for waking select() from request_quit().
-    -- select() can't detect kqueue EVFILT_USER triggers on the kqueue fd
-    -- (readability only appears after kevent() consumes events), so we
-    -- use a plain pipe that select() can reliably watch.
+    -- Self-pipe for waking select() from request_quit(). select() DOES
+    -- reliably watch the kqueue fd, but request_quit() wants a wake
+    -- primitive it can fire from arbitrary call sites (incl. async/signalled
+    -- contexts where calling kevent() directly would be unsafe); a plain
+    -- pipe write is async-signal-safe, so we route quit wakes through it.
     local wake_pipe = ffi.new("int[2]")
     pffi.C.pipe(wake_pipe)
     local wake_pipe_r = assert(tonumber(wake_pipe[0]), "pipe() failed")
@@ -873,6 +928,10 @@ local function main()
     local readfds = pffi.fd_set_new()
     ---@diagnostic disable-next-line: param-type-mismatch
     local maxfd = math.max(ttyfd, math.max(kq_fd, wake_pipe_r)) + 1
+
+    -- True while the left mouse button is held after a press, so motion
+    -- events extend the selection instead of relocating the cursor.
+    local mouse_drag = false
 
     -- Initial render (empty buffer; file load event will wake us via kq)
     editor:render()
@@ -955,14 +1014,15 @@ local function main()
             pffi.C.read(wake_pipe_r, drain_buf, 32)
         end
 
-        -- Unconditionally attempt a non-blocking inbox drain. macOS
-        -- select() does NOT reliably report kqueue-fd readability for
-        -- EVFILT_USER triggers (the same race request_quit works around
-        -- with a self-pipe), so a file-load reply pushed by the IO lane
-        -- before main entered select() can go undelivered until the 200ms
-        -- watchdog deadline — causing a spurious bail. ss:pop is safe to
-        -- call when the ring is empty, so draining here every iteration
-        -- closes the race without depending on select/kevent signalling.
+        -- Eager non-blocking inbox drain. select() reliably wakes on the
+        -- main kq_fd when an EVFILT_USER trigger fires (the inbox wakes are
+        -- registered before any MSG_FILE_LOAD is pushed, so no trigger is
+        -- ever dropped). This unconditional drain is defense-in-depth: it
+        -- shaves one loop-iteration of latency off a reply that lands in
+        -- the brief window between select() returning (e.g. for tty input)
+        -- and the kq event being consumed, and tolerates any future
+        -- change to the wake registration ordering. ss:pop is a no-op on
+        -- an empty ring, so this is cheap.
         drain_inbox(editor, ss)
         drain_hl_inbox(editor, ss)
 
@@ -1132,32 +1192,74 @@ local function main()
                     local mx = tonumber(ev.x)
                     local my = tonumber(ev.y)
 
-                    if key == tb.key_mouse_left then
-                        local mod = tonumber(ev.mod)
-                        local gw = math.max(3, #tostring(view_cur:line_count()) + 1)
-                        local line, col
-                        if mx >= gw then
-                            -- Convert click x/y to logical line + sub-col
-                            local cli, sub_row = view_cur:screen_row_to_line(view_cur.scroll_y + my)
-                            line = math.min(cli, view_cur:line_count() - 1)
-                            local sub_col = mx - gw
+                    -- Map a mouse (mx,my) to a buffer (line,col) using the
+                    -- same centered geometry Editor:render paints, so clicks
+                    -- land under the rendered glyph regardless of margin.
+                    local function mouse_to_pos()
+                        local w = term:width()
+                        local _, text_x = view_cur:text_geometry(w)
+                        local cli, sub_row = view_cur:screen_row_to_line(view_cur.scroll_y + my)
+                        local line = math.min(cli, view_cur:line_count() - 1)
+                        local col
+                        if mx >= text_x then
+                            local sub_col = mx - text_x
                             local byte_off = view_cur:wrap_byte_offset(line, sub_row, sub_col)
                             col = math.min(byte_off, view_cur:content_len(line))
                         else
-                            local cli, _ = view_cur:screen_row_to_line(view_cur.scroll_y + my)
-                            line = math.min(cli, view_cur:line_count() - 1)
+                            -- Gutter or left of the centered block: col 0.
                             col = 0
                         end
+                        return line, col
+                    end
+
+                    if key == tb.key_mouse_left then
+                        local mod = tonumber(ev.mod) or 0
+                        local is_motion = bit.band(mod, tb.mod_motion) ~= 0
+                        local line, col = mouse_to_pos()
                         ---@cast line integer
                         ---@cast col integer
-                        if mod and bit.band(mod, tb.mod_alt) ~= 0 then
-                            -- Alt-click: add a cursor at the click point.
+                        if is_motion then
+                            -- Drag (button held + motion): extend the
+                            -- selection by moving the primary cursor; the
+                            -- mark set on press stays anchored at the drag
+                            -- start. Ignored when no press began a drag
+                            -- (e.g. motion while Alt was held), so motion
+                            -- events never spawn extra cursors.
+                            if mouse_drag then
+                                local c = view_cur:p()
+                                c.line = line
+                                c.col = col
+                                view_cur:_clamp_cursor(c)
+                                view_cur:_set_goal_col(c.col)
+                            end
+                        elseif mod and bit.band(mod, tb.mod_alt) ~= 0 then
+                            -- Alt-click press: add a cursor at the click
+                            -- point. (Alt-drag is not specially handled.)
                             view_cur:add_cursor(line, col)
+                            view_cur:_set_goal_col(view_cur:p().col)
                         else
-                            -- Plain click: replace cursors with a single one.
+                            -- Press (start of a potential drag): place a
+                            -- single cursor and drop a mark at the same
+                            -- spot so an empty selection is ready. If the
+                            -- user doesn't drag, the release clears it so a
+                            -- plain click leaves no selection.
                             view_cur:set_single_cursor(line, col)
+                            view_cur:set_mark()
+                            mouse_drag = true
+                            view_cur:_set_goal_col(view_cur:p().col)
                         end
-                        view_cur:_set_goal_col(view_cur:p().col)
+                    elseif key == tb.key_mouse_release then
+                        -- End of a drag (or a plain click with no drag).
+                        -- A click that never moved leaves an empty
+                        -- selection (anchor == cursor); clear the mark so a
+                        -- plain click behaves as simple cursor placement.
+                        if mouse_drag then
+                            local c = view_cur:p()
+                            if c.anchor_line == c.line and c.anchor_col == c.col then
+                                view_cur:unset_mark()
+                            end
+                        end
+                        mouse_drag = false
                     elseif key == tb.key_mouse_wheel_up then
                         local text_rows = term:height() - editor:footer_rows()
                         view_cur:scroll_viewport(-3, text_rows)
@@ -1205,6 +1307,7 @@ local function main()
         editor:render()
     end
 
+    editor.event_system:emit("editor_close")
     term:shutdown()
     ss:stop()
 

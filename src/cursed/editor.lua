@@ -380,12 +380,44 @@ end
 -- View management
 ----------------------------------------------------------------------------------------------------
 
+--- Helper: emit focus/blur lifecycle events around an active-view
+--- change. Called by set_active_view once mutation is done.
+--- Emits (in order): view_blur(old), buffer_blur(old.buffer),
+--- view_focus(new), buffer_focus(new.buffer). Only fires when the
+--- actual focused view object changes (index shifts to the same view
+--- due to list removal are a no-op here).
+---@param old_view View|nil
+---@param new_view View|nil
+function Editor:_emit_focus_change(old_view, new_view)
+    if old_view == new_view then
+        return
+    end
+    local es = self.event_system
+    if old_view then
+        es:emit("view_blur", old_view)
+        if old_view.buffer then
+            es:emit("buffer_blur", old_view.buffer, old_view)
+        end
+    end
+    if new_view then
+        es:emit("view_focus", new_view)
+        if new_view.buffer then
+            es:emit("buffer_focus", new_view.buffer, new_view)
+        end
+    end
+end
+
 --- Set the active view index and rebuild the keybind trie
---- if the new view has a different mode.
+--- if the new view has a different mode. Also fires view_blur /
+--- buffer_blur (for the previously-active view) and view_focus /
+--- buffer_focus (for the newly-active view) when the focused view
+--- object actually changes.
 ---@param idx integer 1-based index into self.views
 function Editor:set_active_view(idx)
+    local old_view = self:current_view()
     self.active_view = idx
     self:rebuild_active_trie()
+    self:_emit_focus_change(old_view, self:current_view())
 end
 
 --- Get the active view.
@@ -398,6 +430,8 @@ function Editor:current_view()
 end
 
 --- Add a view to the editor and make it active.
+--- Fires view_open (and, via set_active_view, view_focus/buffer_focus
+--- for the new view plus view_blur/buffer_blur for the previous one).
 ---@param view View
 function Editor:add_view(view)
     view.editor = self
@@ -405,10 +439,15 @@ function Editor:add_view(view)
     table.insert(self.views, view)
     --    self.active_view = #self.views
     self:set_active_view(#self.views)
+    self.event_system:emit("view_open", view)
 end
 
 --- Close a view and fix up the active_view index.
 --- If the closed view was active, selects the nearest neighbor.
+--- Fires (in order): view_blur + buffer_blur for the doomed view if it
+--- was active, then buffer_close + view_close for the doomed view,
+--- then (via set_active_view) view_focus + buffer_focus for the
+--- neighbor that takes its place.
 ---@param view View
 function Editor:close_view(view)
     local idx = 0
@@ -421,6 +460,16 @@ function Editor:close_view(view)
     if idx == 0 then
         return
     end
+    -- If the doomed view is currently focused, blur it (and its buffer)
+    -- first so the close sequence reads blur→close→focus(neighbor).
+    if self:current_view() == view then
+        self:_emit_focus_change(view, nil)
+    end
+    local buf = view.buffer
+    if buf then
+        self.event_system:emit("buffer_close", buf, view)
+    end
+    self.event_system:emit("view_close", view)
     table.remove(self.views, idx)
     if #self.views == 0 then
         self:set_active_view(0)
@@ -466,6 +515,9 @@ end
 --- and requests the IO lane to load the file contents.
 ---@param filepath string raw path from the user (may contain ~, $ENV)
 function Editor:open_file(filepath)
+    local bench = require("cursed.bench")
+    local t0 = bench.now_us()
+
     local expanded = find_file.expand_path(filepath)
 
     -- Refuse to open directories
@@ -477,7 +529,10 @@ function Editor:open_file(filepath)
     local buf = Buffer.new()
     buf:set_filepath(expanded)
     local view = View.new(buf)
+    view._bench_open_t0 = t0 -- start of the whole open pipeline (main lane)
     self:add_view(view)
+
+    log.debug("editor", "open_file begin", { path = expanded })
 
     -- Request IO lane to load the file
     local ss = shared.SharedState.from_global()
@@ -1657,31 +1712,15 @@ function Editor:render()
     local line_count = buf:line_count()
     local max_y = h - footer_rows - 1
 
-    -- Gutter width
-    local gutter_width = math.max(3, #tostring(line_count) + 1)
+    -- Gutter width + centered text column. Centralized in View:text_geometry
+    -- so the mouse click→buffer mapping stays in lockstep with what's
+    -- painted here.
+    local gutter_width, text_x, text_width, block_x, block_w = view:text_geometry(w)
     local avail_text = w - gutter_width
     if avail_text <= 0 then
         term:present()
         return
     end
-
-    -- Margin: when set and narrower than the available text area, cap the
-    -- text render width at `margin` and center the resulting gutter + text
-    -- column within the window. Text stays left-aligned inside the column.
-    -- When margin is unset or the window is too narrow, fill the available
-    -- width with no centering (the historical behavior).
-    local margin = view.margin
-    local text_width, block_x, block_w
-    if margin and margin > 0 and margin < avail_text then
-        text_width = margin
-        block_w = gutter_width + text_width
-        block_x = math.floor((w - block_w) / 2)
-    else
-        text_width = avail_text
-        block_w = w
-        block_x = 0
-    end
-    local text_x = block_x + gutter_width
 
     -- Soft wrapping: set wrap_width to the text area width
     -- so the cache stays consistent with the current window size.

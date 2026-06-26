@@ -29,6 +29,8 @@ log.info("io_lane", "started")
 ----------------------------------------------------------------------------------------------------
 
 local function load_file(filepath, insert)
+    local bench = require("cursed.bench")
+    local t0 = bench.now_us()
     log.info("io_lane", "load_file begin", { path = filepath })
     local f = io.open(filepath, "rb")
     if f == nil then
@@ -75,6 +77,7 @@ local function load_file(filepath, insert)
         ptr = data,
         arg = file_size,
     })
+    bench.span("io_lane", "load_file mmap+send", t0, { path = filepath, size = file_size })
     log.info("io_lane", "load_file done", { path = filepath, size = file_size })
 
     return true

@@ -849,7 +849,10 @@ commands.execute_command = function(view, editor)
             if not ok then
                 editor.status_message = ("command error: %s"):format(tostring(result))
                 local ef = io.open("/tmp/cursed_err.log", "a")
-                if ef then ef:write(tostring(result) .. "\\n" .. debug.traceback("", 2) .. "\\n====\\n"); ef:close() end
+                if ef then
+                    ef:write(tostring(result) .. "\\n" .. debug.traceback("", 2) .. "\\n====\\n")
+                    ef:close()
+                end
             elseif result == "quit" then
                 editor:request_quit()
             end

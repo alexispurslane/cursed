@@ -83,6 +83,7 @@ local ffi = require("ffi")
 ---@field _hl_last_vstart integer|nil last viewport start byte we dispatched for
 ---@field _hl_last_vend integer|nil last viewport end byte we dispatched for
 ---@field _hl_last_gen integer|nil last buffer gen we dispatched an edit for (avoids repeat dispatch on every render when the edit was already sent)
+---@field _bench_open_t0 integer|nil wall-clock us at Editor:open_file() start; instrumentation for file-open latency (cleared on load)
 local View = {}
 View.__index = View
 
@@ -154,6 +155,43 @@ function View.new(buffer)
         _hl_last_vend = nil,
         _hl_last_gen = nil,
     }, View)
+end
+
+----------------------------------------------------------------------------------------------------
+-- Buffer attachment
+----------------------------------------------------------------------------------------------------
+
+--- Swap the buffer this view displays. Centralizes what was a raw
+--- `view.buffer = buf` assignment so the swap can fire
+--- `view_attach_buffer` (always, for every reassignment) and
+--- `buffer_open` (when the caller flags this as a freshly-loaded
+--- content buffer). Emits BEFORE swapping in `opts.silent=false` (the
+--- default) so handlers run against the still-current old buffer; the
+--- new buffer is the second payload.
+---
+--- Lifecycle mapping:
+---   view_attach_buffer  — fires on every swap (view, new_buf, old_buf)
+---   buffer_open         — fires only when opts.loaded == true (the
+---                         new buffer carries freshly-arriving file
+---                         content); payload (new_buf, view)
+---@param buf Buffer the buffer to attach
+---@param opts { loaded?: boolean, silent?: boolean }|nil
+function View:set_buffer(buf, opts)
+    opts = opts or {}
+    local es = self.editor and self.editor.event_system
+    local old = self.buffer
+    if buf == old then
+        return
+    end
+    if es and not opts.silent then
+        es:emit("view_attach_buffer", self, buf, old)
+    end
+    self.buffer = buf
+    if es and not opts.silent then
+        if opts.loaded then
+            es:emit("buffer_open", buf, self)
+        end
+    end
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -2074,6 +2112,36 @@ end
 ---@return integer
 function View:line_count()
     return self.buffer:line_count()
+end
+
+--- Compute the on-screen geometry of the text column for a given
+--- terminal width, mirroring exactly what Editor:render paints. When
+--- `view.margin` is set (and narrower than the available text area),
+--- the gutter + text column is centered within the window; otherwise
+--- the gutter sits at column 0 and text fills the rest. Centralized so
+--- the mouse click→buffer-coordinate mapping can't drift from render.
+---@param w integer terminal width (columns)
+---@return integer gutter_width, integer text_x, integer text_width, integer block_x, integer block_w
+function View:text_geometry(w)
+    local line_count = self.buffer:line_count()
+    local gutter_width = math.max(3, #tostring(line_count) + 1)
+    local avail_text = w - gutter_width
+    if avail_text <= 0 then
+        return gutter_width, 0, 0, 0, 0
+    end
+    local margin = self.margin
+    local text_width, block_x, block_w
+    if margin and margin > 0 and margin < avail_text then
+        text_width = margin
+        block_w = gutter_width + text_width
+        block_x = math.floor((w - block_w) / 2)
+    else
+        text_width = avail_text
+        block_w = w
+        block_x = 0
+    end
+    local text_x = block_x + gutter_width
+    return gutter_width, text_x, text_width, block_x, block_w
 end
 
 --- Count the number of characters between two positions.
@@ -4121,6 +4189,12 @@ function View:undo()
     -- Undo swaps buffer content wholesale; the cached spans (and the
     -- lane's retained old_tree) describe pre-undo text. Cold-requery
     -- the viewport so post-undo render shows correct syntax.
+    -- Also nuke the wrap cache: its staleness guard keys off
+    -- (undo.count + redo.count), which is INVARIANT under undo/redo
+    -- (an undo moves one group undo→redo, preserving the sum), so the
+    -- proactive check in ensure_wrap_cache would otherwise treat the
+    -- stale cache as fresh and index a now-too-short _wrap_rows → nil.
+    self:invalidate_wrap_cache()
     local c = self:p()
     local starts = self:_hl_line_starts()
     local byte = (starts[c.line + 1] or 0) + c.col
@@ -4133,6 +4207,9 @@ function View:redo()
         return false
     end
     self:clamp_cursor()
+    -- See View:undo: the wrap cache staleness guard is invariant under
+    -- undo/redo, so we must invalidate it explicitly here too.
+    self:invalidate_wrap_cache()
     local c = self:p()
     local starts = self:_hl_line_starts()
     local byte = (starts[c.line + 1] or 0) + c.col
