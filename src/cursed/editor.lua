@@ -1301,6 +1301,9 @@ function Editor:push_kill(text)
         kill_ring.ring[1] = kill_ring.ring[1] .. text
     else
         kill_ring:push(text)
+        -- Sync new kill to system clipboard (consecutive kills skip this
+        -- since they append to ring[1] here instead).
+        require("cursed.clipboard").set_if_different(text)
     end
     self._kill_called = true
 end

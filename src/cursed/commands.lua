@@ -9,6 +9,7 @@
 --- parser: e.g. "M-x goto line:42" passes the number 42 to the command.
 
 local kill_ring = require("cursed.kill_ring")
+local clipboard = require("cursed.clipboard")
 local completers = require("cursed.completers")
 local ColorScheme = require("cursed.colorscheme")
 local log = require("cursed.log")
@@ -260,6 +261,9 @@ commands.copy_region = function(view, editor)
     view:unset_mark()
     if #text > 0 then
         editor:push_kill(text)
+        -- Sync to system clipboard (non-blocking: clipboard module handles
+        -- the subprocess; silent failure is acceptable).
+        clipboard.set_if_different(text)
     end
 end
 
@@ -356,8 +360,16 @@ end
 commands.yank = function(view, editor)
     local text = kill_ring:top()
     if not text then
-        editor.status_message = "kill ring is empty"
-        return
+        -- Kill ring is empty: try the system clipboard (interprogram paste).
+        -- This mirrors Emacs' interprogram-paste-function so pasting from
+        -- outside the editor (browser, other apps) works from C-y.
+        text = clipboard.paste()
+        if not text or #text == 0 then
+            editor.status_message = "kill ring and system clipboard are empty"
+            return
+        end
+        -- Push onto kill ring so yank-pop works on the pasted text
+        kill_ring:push(text)
     end
     -- Delete selection if present
     view:delete_selection()
@@ -408,6 +420,26 @@ commands.yank_pop = function(view, editor)
     -- Update yank start for further M-y
     view:p().yank_line = insert_line
     view:p().yank_col = insert_col
+end
+
+--- Yank from the system clipboard instead of the kill ring.
+--- Pushes the clipboard content onto the kill ring so subsequent C-y
+--- yanks from it. Implements Emacs' C-M-y (meta-Shift-y).
+commands.clipboard_yank = function(view, editor)
+    local clipboard_text = clipboard.paste()
+    if not clipboard_text then
+        editor.status_message = "no system clipboard content"
+        return
+    end
+    if #clipboard_text == 0 then
+        editor.status_message = "system clipboard is empty"
+        return
+    end
+    -- Push onto kill ring so subsequent C-y yanks from it
+    editor:push_kill(clipboard_text)
+    -- Delete any selection, then insert
+    view:delete_selection()
+    view:insert_char(clipboard_text)
 end
 
 ----------------------------------------------------------------------------------------------------

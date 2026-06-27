@@ -152,6 +152,7 @@ return {
     -- Kill ring
     ["ctrl-y"] = "yank",
     ["alt-y"] = "yank_pop",
+    ["ctrl-shift-y"] = "clipboard_yank",
     ["alt-w"] = "copy_region",
     ["ctrl-x alt-w"] = "copy_sentence",
 
