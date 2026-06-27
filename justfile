@@ -125,6 +125,7 @@ compile-vendor mode="release":
         echo "vendored termbox2 not built — compiling"
         clang $CFLAGS -DMACOSX_DEPLOYMENT_TARGET={{MACOSX_DEPLOYMENT_TARGET}} \
             -DTB_OPT_ATTR_W=64 \
+            -DTB_OPT_EGC \
             -I{{VENDOR_DIR}}/termbox2 \
             -c {{VENDOR_DIR}}/termbox2/termbox2_impl.c -o {{BUILD_DIR}}/termbox2.o
     fi

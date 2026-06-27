@@ -2648,6 +2648,7 @@ int tb_print_ex(int x, int y, uintattr_t fg, uintattr_t bg, size_t *out_w,
     x_prev = x;
     if (out_w) *out_w = 0;
 
+    int prev_was_zwj = 0; // GB11: after U+200D, the next Extended_Pictographic continues the cluster
     while (*str) {
         rv = tb_utf8_char_to_unicode(&uni, str);
 
@@ -2664,6 +2665,7 @@ int tb_print_ex(int x, int y, uintattr_t fg, uintattr_t bg, size_t *out_w,
             x = ix;
             x_prev = x;
             y += 1;
+            prev_was_zwj = 0;
             continue;
         } else if (!tb_iswprint_ex(uni, &w)) {
             uni = 0xfffd; // replace non-printable with U+FFFD
@@ -2677,13 +2679,29 @@ int tb_print_ex(int x, int y, uintattr_t fg, uintattr_t bg, size_t *out_w,
                 if_err_return(rv, tb_extend_cell(x_prev, y, uni));
             }
         } else {
-            if (cellbuf_in_bounds(&global.back, x, y)) {
-                if_err_return(rv, tb_set_cell(x, y, uni, fg, bg));
+#ifdef TB_OPT_EGC
+            if (prev_was_zwj) {
+                // GB11 continuation: an Extended_Pictographic following a
+                // ZWJ extends the previous cell's grapheme cluster rather
+                // than starting a fresh cell, so the terminal can compose
+                // ZWJ families (e.g. 👨‍👩‍👧) into one glyph. We do NOT
+                // advance x: the cluster's width is resolved at render
+                // time via tb_cluster_width over the full ech array.
+                if (cellbuf_in_bounds(&global.back, x_prev, y)) {
+                    if_err_return(rv, tb_extend_cell(x_prev, y, uni));
+                }
+            } else
+#endif
+            {
+                if (cellbuf_in_bounds(&global.back, x, y)) {
+                    if_err_return(rv, tb_set_cell(x, y, uni, fg, bg));
+                }
+                x_prev = x;
+                x += w;
+                if (out_w) *out_w += w;
             }
-            x_prev = x;
-            x += w;
-            if (out_w) *out_w += w;
         }
+        prev_was_zwj = (uni == 0x200d);
     }
 
     return TB_OK;

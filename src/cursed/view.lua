@@ -5,6 +5,7 @@
 --- It does NOT mutate the buffer. Editing goes through Buffer methods,
 
 local ffi = require("ffi")
+local utf8 = require("cursed.utf8")
 --- which return the resulting cursor position; the View owns the
 --- forwarding to each cursor.
 ---
@@ -60,6 +61,9 @@ local ffi = require("ffi")
 ---@field _wrap_rows integer[]|nil cache: _wrap_rows[li+1] = number of screen rows for logical line li
 ---@field _wrap_cum integer[]|nil cache: _wrap_cum[li+1] = screen row where logical line li starts (0-based)
 ---@field _wrap_gen integer|nil cache generation counter (undo.count + redo.count)
+---@field _graph_cache table[]|nil cache: _graph_cache[li+1] = {byte_starts, widths, prefix, line_len} (parsed grapheme skeleton, stripped-of-newline text)
+---@field _graph_line_text string[]|nil cache: _graph_cache's source text (line w/o trailing newline) for slice-on-boundary rendering; nil if LRU-evicted while skeleton retained
+---@field _graph_gen integer|nil cache generation counter for the grapheme cache (mirrors _wrap_gen)
 ---@field _hl_lang string|nil currently configured language (intent only)
 ---@field _hl_query string|nil current query source (intent only)
 ---@field _hl_injection_query string|nil injection query source, for languages that inject other grammars into regions of the block tree (intent only)
@@ -137,6 +141,9 @@ function View.new(buffer)
         _wrap_rows = nil,
         _wrap_cum = nil,
         _wrap_gen = nil,
+        _graph_cache = nil,
+        _graph_line_text = nil,
+        _graph_gen = nil,
         _hl_lang = nil,
         _hl_query = nil,
         _hl_view_id = view_id,
@@ -217,7 +224,7 @@ function View:make_cursor(line, col)
     return {
         line = line,
         col = col,
-        goal_col = col,
+        goal_col = self:byte_to_col(line, col),
         visual_col = nil,
         anchor_line = nil,
         anchor_col = nil,
@@ -291,10 +298,10 @@ end
 --- The wrap path of move_line is the only code that intentionally
 --- preserves visual_col — it does NOT call this setter.
 --- Also cancels any in-progress yank-pop cycle on the primary cursor.
----@param col integer
+---@param col integer 0-based byte offset
 function View:_set_goal_col(col)
     local c = self.cursors[1]
-    c.goal_col = col
+    c.goal_col = self:byte_to_col(c.line, col)
     c.visual_col = nil
     c.yank_line = nil
     c.yank_col = nil
@@ -302,10 +309,10 @@ end
 
 --- Set the goal column on every cursor (used when a motion/edit
 --- applies uniformly to all cursors, e.g. clamp_cursor after undo).
----@param col integer
+---@param col integer 0-based byte offset
 function View:_set_goal_col_all(col)
     for _, c in ipairs(self.cursors) do
-        c.goal_col = col
+        c.goal_col = self:byte_to_col(c.line, col)
         c.visual_col = nil
         c.yank_line = nil
         c.yank_col = nil
@@ -772,6 +779,13 @@ function View:batch_edit(breaks_group, fn)
         }
         self:_hl_record_edit(hl_edits, hl_crossed_newline, frames)
     end
+
+    -- The renderer reads line text + grapheme runs from the per-line
+    -- grapheme cache (even in no-wrap mode). The cache's own staleness
+    -- guard keys off (undo.count + redo.count), which is INVARIANT
+    -- across keystrokes in an open edit group — so without this explicit
+    -- invalidate, the rendered text would lag the cursor mid-group.
+    self:invalidate_graph_cache()
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -2197,23 +2211,50 @@ end
 ----------------------------------------------------------------------------------------------------
 
 --- Compute the number of screen rows a logical line occupies with soft wrapping.
+--- Walks grapheme display widths (via the per-line grapheme cache) so wide
+--- CJK/emoji glyphs consume 2 columns and zero-width combinings consume 0,
+--- rather than the old `ceil(bytes / wrap_width)` which assumed 1 byte = 1 col.
 ---@param li integer 0-based line index
 ---@return integer
 function View:wrap_rows(li)
     if not self.wrap_width or self.wrap_width <= 0 then
         return 1
     end
-    local len = self:content_len(li)
-    if len == 0 then
+    local _, widths, _, _ = self:_graph(li)
+    local w = self.wrap_width
+    -- Count rows by tracking the running display column; each grapheme
+    -- either fits on the current row (col + gw <= w) or starts a new row.
+    -- A grapheme wider than `w` is forced onto its own row (it overflows
+    -- but never wraps mid-glyph).
+    if #widths == 0 then
         return 1
     end
-    return math.ceil(len / self.wrap_width)
+    local rows, col = 1, 0
+    for i = 1, #widths do
+        local gw = widths[i]
+        if col + gw > w then
+            rows = rows + 1
+            col = gw
+            -- A grapheme wider than the wrap width still occupies one row
+            -- of its own; col may exceed w but that's the degenerate case.
+            if col > w then
+                col = 0
+                -- Leave the over-wide grapheme alone on its row; next one starts fresh.
+            end
+        else
+            col = col + gw
+        end
+    end
+    return rows
 end
 
 --- Invalidate the wrap cache (call when buffer content changes or wrap_width changes).
 function View:invalidate_wrap_cache()
     self._wrap_rows = nil
     self._wrap_cum = nil
+    self._graph_cache = nil
+    self._graph_line_text = nil
+    self._graph_gen = nil
     -- Invalidate the auto-scroll guard: a wrap reflow (resize or edit)
     -- can shift the cursor's screen row even though its logical (line,
     -- col) is unchanged, so the guard's stored position no longer proves
@@ -2221,6 +2262,139 @@ function View:invalidate_wrap_cache()
     -- scroll_to_cursor re-centers on the cursor after the reflow.
     self._scroll_guard_line = nil
     self._scroll_guard_col = nil
+end
+
+--- Invalidate ONLY the per-line grapheme cache (not the wrap cache).
+--- Called after every buffer mutation (batch_edit) so the renderer —
+--- which reads line text + grapheme runs from this cache even in
+--- no-wrap mode — never displays pre-edit text. The staleness guard in
+--- `ensure_graph_gen` keys off (undo.count + redo.count), but an open
+--- edit group leaves that sum invariant across consecutive keystrokes,
+--- so the cache would otherwise go stale mid-group and the rendered
+--- text would lag the cursor. Cheap (just nils tables; rebuild is lazy).
+function View:invalidate_graph_cache()
+    self._graph_cache = nil
+    self._graph_line_text = nil
+    self._graph_gen = nil
+end
+
+----------------------------------------------------------------------------------------------------
+-- Per-line grapheme cache
+----------------------------------------------------------------------------------------------------
+-- Mirrors _wrap_rows / _wrap_gen: lazily parses each line into a grapheme
+-- skeleton (byte_starts / widths / prefix) on first access, invalidated on
+-- the undo+redo generation counter. The skeleton is the View's single
+-- source of truth for byte↔display-column and grapheme-cluster navigation
+-- (cursor motion, wrap math, mouse clicks, render slicing all query it).
+-- `line_len` is cached per line alongside the skeleton so past-end queries
+-- don't re-call buffer:line_len().
+
+--- Proactively drop the grapheme cache if the buffer was edited since the
+--- last build. Called by every accessor before reading the cache.
+local function ensure_graph_gen(view)
+    local gen = tonumber(view.buffer._ptr.undo.count) + tonumber(view.buffer._ptr.redo.count)
+    if view._graph_gen ~= gen then
+        view._graph_cache = nil
+        view._graph_line_text = nil
+        view._graph_gen = gen
+    end
+end
+
+--- Get (or build lazily) the parsed grapheme skeleton for logical line `li`.
+--- The skeleton is computed from the line text WITHOUT its trailing newline
+--- (the renderer/motion code never wants the newline in a cluster).
+--- Returns `byte_starts, widths, prefix, line_len` — the three tables
+--- documented in `cursed.utf8.parse_line`, plus `line_len` (byte length of
+--- the stripped text) for past-end queries.
+---@param li integer 0-based line index
+---@return integer[] byte_starts
+---@return integer[] widths
+---@return integer[] prefix
+---@return integer line_len
+function View:_graph(li)
+    ensure_graph_gen(self)
+    local cache = self._graph_cache
+    if cache == nil then
+        cache = {}
+        self._graph_cache = cache
+    end
+    local entry = cache[li + 1]
+    if entry ~= nil then
+        return entry.byte_starts, entry.widths, entry.prefix, entry.line_len
+    end
+    local text = self.buffer:line_text(li)
+    -- Strip the trailing newline (every line carries one; see buffer model).
+    if #text > 0 and text:byte(#text) == 10 then
+        text = text:sub(1, #text - 1)
+    end
+    local bs, w, p = utf8.parse_line(text)
+    entry = { byte_starts = bs, widths = w, prefix = p, line_len = #text }
+    cache[li + 1] = entry
+    -- Also retain the stripped text for the renderer (slice-on-grapheme).
+    local tc = self._graph_line_text
+    if tc == nil then
+        tc = {}
+        self._graph_line_text = tc
+    end
+    tc[li + 1] = text
+    return bs, w, p, entry.line_len
+end
+
+--- Get the cached stripped line text (without trailing newline). This is
+--- the same string the skeleton was parsed from, so byte offsets line up.
+---@param li integer 0-based line index
+---@return string
+function View:_line_text_stripped(li)
+    ensure_graph_gen(self)
+    local tc = self._graph_line_text
+    if tc == nil or tc[li + 1] == nil then
+        -- Force the skeleton build, which also populates the text cache.
+        self:_graph(li)
+        tc = self._graph_line_text
+    end
+    return tc and tc[li + 1] or ""
+end
+
+--- Total display width of a line (column just past its last grapheme).
+---@param li integer 0-based line index
+---@return integer
+function View:line_display_width(li)
+    local _, w, p, _ = self:_graph(li)
+    return utf8.line_width(p, w)
+end
+
+--- Display column (0-based) of a byte offset within a line.
+--- A byte offset equal to the line's content length maps to the line's
+--- total display width (past the last grapheme).
+---@param li integer 0-based line index
+---@param b integer 0-based byte offset
+---@return integer
+function View:byte_to_col(li, b)
+    local bs, w, p, ll = self:_graph(li)
+    return utf8.byte_to_col(bs, p, w, b, ll)
+end
+
+--- Byte offset (0-based) of a display column within a line.
+--- Columns inside a wide grapheme snap to that grapheme's start byte
+--- (so the cursor never lands mid-codepoint). Past-end columns clamp
+--- to the line's content length.
+---@param li integer 0-based line index
+---@param col integer 0-based display column
+---@return integer
+function View:col_to_byte(li, col)
+    local bs, w, p, ll = self:_graph(li)
+    return utf8.col_to_byte(bs, p, w, col, ll)
+end
+
+--- Advance `n` graphemes from byte offset `b`, clamped to line bounds.
+--- `n` may be negative. Returns the byte offset of the resulting boundary.
+---@param li integer 0-based line index
+---@param b integer 0-based starting byte offset
+---@param n integer signed grapheme count
+---@return integer
+function View:advance_grapheme(li, b, n)
+    local bs, _, _, ll = self:_graph(li)
+    return utf8.advance_grapheme(bs, b, n, ll)
 end
 
 --- Rebuild the wrap cache from scratch.
@@ -2314,32 +2488,207 @@ function View:total_screen_rows()
     return total
 end
 
+--- Compute the display width of the LAST sub-row of a wrapped line.
+--- (The last row may be shorter than `wrap_width`; we need it to clamp
+--- vertical-move targets so the cursor doesn't sit past line content.)
+--- Walks grapheme widths; returns 0 for an empty line.
+---@param li integer 0-based line index
+---@param expected_sub_row integer sanity-check sub-row index (currently unused)
+---@return integer
+function View:_last_sub_row_width(li, expected_sub_row)
+    local _, widths, _, _ = self:_graph(li)
+    local w = self.wrap_width
+    if #widths == 0 then
+        return 0
+    end
+    local col = 0
+    for i = 1, #widths do
+        local gw = widths[i]
+        if col + gw > w and col > 0 then
+            -- This grapheme starts a new row. If it's over-wide, it gets
+            -- its own row alone and the NEXT grapheme starts yet another
+            -- fresh row; otherwise we just wrap normally.
+            col = gw
+        else
+            col = col + gw
+        end
+    end
+    return col
+end
+
 --- Return the byte offset within a logical line for a given sub-row and column.
---- In a wrapped display, the cursor's byte position is sub_row * wrap_width + sub_col.
+--- Walks grapheme display widths: each sub-row holds as many graphemes as fit
+--- in `wrap_width` display columns. `sub_col` is a display column WITHIN that
+--- sub-row. Returns the byte offset of the grapheme boundary at or just
+--- before `sub_col` (so a click inside a wide glyph snaps to its start byte).
 ---@param li integer 0-based line index
 ---@param sub_row integer 0-based sub-row within the wrapped line
 ---@param sub_col integer 0-based column within the sub-row
 ---@return integer byte_offset 0-based byte offset within the line
 function View:wrap_byte_offset(li, sub_row, sub_col)
     if not self.wrap_width or self.wrap_width <= 0 then
-        return sub_col
+        -- No wrap: a display column maps directly to a byte via the
+        -- grapheme cache (wide-glyph mid-column snaps to start byte).
+        return self:col_to_byte(li, sub_col)
     end
-    return sub_row * self.wrap_width + sub_col
+    local bs, widths, _, ll = self:_graph(li)
+    local w = self.wrap_width
+    local row, col = 0, 0
+    for i = 1, #widths do
+        local gw = widths[i]
+        local over_wide = gw > w
+        if col + gw > w and col > 0 then
+            -- Wrap to the next row before this grapheme.
+            row = row + 1
+            col = 0
+        end
+        if row == sub_row and col + gw > sub_col then
+            -- sub_col falls inside (or exactly at the start of) this grapheme.
+            return bs[i] - 1
+        end
+        if row > sub_row then
+            -- We've passed the target row without hitting sub_col; the
+            -- target column sits past this row's content. Return the
+            -- line's content length (end of the line).
+            return ll
+        end
+        if over_wide then
+            -- Over-wide grapheme occupies its row alone; next grapheme
+            -- starts a fresh row.
+            if row == sub_row then
+                return bs[i] - 1
+            end
+            row = row + 1
+            col = 0
+        else
+            col = col + gw
+        end
+    end
+    return ll
 end
 
 --- Return the sub-row and sub-col for a byte offset within a wrapped line.
+--- `sub_col` is a display column (0-based) within the sub-row; a byte offset
+--- at a grapheme start maps to that grapheme's column. Past-end maps to the
+--- last sub-row at the column just past the last grapheme that fits.
 ---@param li integer 0-based line index
 ---@param byte_offset integer 0-based byte offset
 ---@return integer sub_row
 ---@return integer sub_col
 function View:wrap_sub_position(li, byte_offset)
     if not self.wrap_width or self.wrap_width <= 0 then
-        return 0, byte_offset
+        -- No wrap: sub_col is the byte's DISPLAY column (not the byte itself,
+        -- so wide glyphs report their start col and mid-cluster bytes snap to
+        -- the containing grapheme's col).
+        return 0, self:byte_to_col(li, byte_offset)
     end
+    local bs, widths, _, _ = self:_graph(li)
     local w = self.wrap_width
-    local sub_row = math.floor(byte_offset / w)
-    local sub_col = byte_offset % w
-    return sub_row, sub_col
+    local ng = #bs
+    if ng == 0 then
+        return 0, 0
+    end
+    -- Locate the grapheme that contains `byte_offset`: the last grapheme
+    -- whose 1-based start byte <= target (target = byte_offset + 1).
+    local target = byte_offset + 1
+    local lo, hi, gi = 1, ng, ng
+    while lo <= hi do
+        local mid = math.floor((lo + hi) / 2)
+        if bs[mid] <= target then
+            gi = mid
+            lo = mid + 1
+        else
+            hi = mid - 1
+        end
+    end
+    -- Walk to that grapheme, tracking sub-row and sub-col.
+    local row, col = 0, 0
+    for i = 1, gi do
+        local gw = widths[i]
+        local over_wide = gw > w
+        if col + gw > w and col > 0 then
+            row = row + 1
+            col = 0
+        end
+        if i == gi then
+            return row, col
+        end
+        if over_wide then
+            row = row + 1
+            col = 0
+        else
+            col = col + gw
+        end
+    end
+    -- byte_offset is past the last grapheme: report the tail of the
+    -- final row (the column just past the line's last grapheme).
+    row, col = 0, 0
+    for i = 1, ng do
+        local gw = widths[i]
+        if col + gw > w and col > 0 then
+            row = row + 1
+            col = 0
+        end
+        if gw > w then
+            row = row + 1
+            col = 0
+        else
+            col = col + gw
+        end
+    end
+    return row, col
+end
+
+--- Enumerate the grapheme runs that make up a single screen sub-row.
+--- Each entry is `{ byte_start, byte_end, col, width }` where:
+---   * `byte_start`/`byte_end` are 1-based byte indices into the line's
+---     stripped text suitable for `string.sub`;
+---   * `col` is the 0-based DISPLAY column (within the sub-row) at which
+---     the grapheme starts;
+---   * `width` is the grapheme's display width (cells).
+--- Used by the renderer to emit per-grapheme cells at correct columns
+--- instead of indexing the line by byte offset.
+---@param li integer 0-based line index
+---@param sub_row integer 0-based sub-row
+---@return table runs `{byte_start, byte_end, col, width}`
+---@return integer row_width total display width consumed by this sub-row
+function View:sub_row_runs(li, sub_row)
+    local bs, widths, _, ll = self:_graph(li)
+    local runs = {}
+    if #widths == 0 then
+        return runs, 0
+    end
+    local w = self.wrap_width or ll
+    local row, col = 0, 0
+    local row_w = 0
+    for i = 1, #widths do
+        local gw = widths[i]
+        local over_wide = gw > w
+        if col + gw > w and col > 0 then
+            row = row + 1
+            col = 0
+        end
+        if row == sub_row then
+            local bstart = bs[i]
+            local bend = (i + 1 <= #bs) and (bs[i + 1] - 1) or ll
+            runs[#runs + 1] = {
+                byte_start = bstart,
+                byte_end = bend,
+                col = col,
+                width = gw,
+            }
+            row_w = col + gw
+        elseif row > sub_row then
+            break
+        end
+        if over_wide then
+            row = row + 1
+            col = 0
+        else
+            col = col + gw
+        end
+    end
+    return runs, row_w
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -2648,17 +2997,55 @@ function View:delete_char(n)
         return
     end
     local buf = self.buffer
+    -- Grapheme-aware deletion for single-step deletes (the keystroke
+    -- case): instead of deleting a fixed byte count, delete to the
+    -- next/previous GRAPHENE boundary. This keeps multi-codepoint
+    -- clusters (combining marks, ZWJ families, flag pairs) intact —
+    -- backspacing over a base char also removes its combining marks,
+    -- and a ZWJ family vanishes as one unit rather than leaving an
+    -- orphaned ZWJ or trailing emoji behind. Larger magnitudes
+    -- (universal-arg repeats, programmatic callers) keep byte-count
+    -- semantics for back-compat with the existing delete translator.
+    --
+    -- Defensive snap: a cursor can end up mid-cluster via programmatic
+    -- add_cursor / a stale byte offset (real motion always lands on
+    -- boundaries). Snap the delete origin to a grapheme boundary in
+    -- the direction of travel so the whole containing cluster is
+    -- removed rather than split: forward for backspace (deletes the
+    -- cluster the cursor sits inside), back to the cluster start for
+    -- forward-delete (deletes the cluster ahead whole).
+    local function snap_origin(c)
+        if not (n == 1 or n == -1) then
+            return c.col
+        end
+        local cluster_start = self:col_to_byte(c.line, self:byte_to_col(c.line, c.col))
+        if cluster_start >= c.col then
+            return c.col -- already on a boundary
+        end
+        if n < 0 then
+            return self:advance_grapheme(c.line, cluster_start, 1) -- cluster end
+        end
+        return cluster_start -- cluster start
+    end
+    local function eff_n_for(c)
+        if not (n == 1 or n == -1) then
+            return n
+        end
+        local origin = snap_origin(c)
+        return self:advance_grapheme(c.line, origin, n) - origin
+    end
     -- Aggregate will_join across cursors: any structural delete breaks
     -- the group. Preserves single-cursor semantics exactly (N=1 →
     -- "any joins" == "the one joins").
     local any_join = false
     for _, c in ipairs(self.cursors) do
         local content_len = buf:line_len(c.line) - 1
+        local eff_n = eff_n_for(c)
         local will_join
         if n > 0 then
-            will_join = c.col + n > content_len
+            will_join = c.col + eff_n > content_len
         else
-            will_join = c.col + n < 0
+            will_join = c.col + eff_n < 0
         end
         if will_join then
             any_join = true
@@ -2666,20 +3053,22 @@ function View:delete_char(n)
         end
     end
     self:batch_edit(any_join, function(c)
+        local eff_n = eff_n_for(c)
+        local origin = snap_origin(c)
         -- Compute the pre-edit region end BEFORE the buffer mutates,
         -- since _delete_char_impl walks a changing line_count.
-        local el, ec = delete_region_end(buf, c.line, c.col, n)
-        local rl, rc = buf:delete_char(c.line, c.col, n)
+        local el, ec = delete_region_end(buf, c.line, origin, eff_n)
+        local rl, rc = buf:delete_char(c.line, origin, eff_n)
         -- Normalize so the returned region is [start, end) half-open with
         -- start = min(cursor pre-edit point, region end) and end = the
         -- other. For forward deletes cursor pos is the start; for backward
         -- deletes the region end (below the cursor) is the start.
         local sl, sc
         if n > 0 then
-            sl, sc = c.line, c.col
+            sl, sc = c.line, origin
         else
             sl, sc = el, ec
-            el, ec = c.line, c.col
+            el, ec = c.line, origin
         end
         return sl, sc, rl, rc, { el, ec }
     end)
@@ -2704,23 +3093,27 @@ function View:move_char(n)
 
         while remaining > 0 do
             local content_len = buf:line_len(line) - 1
-
+            local moved
             if forward then
-                local available = content_len - col
-                if available > 0 then
-                    local step = math.min(remaining, available)
-                    col = col + step
-                    remaining = remaining - step
+                if col < content_len then
+                    col = self:advance_grapheme(line, col, 1)
+                    moved = 1
+                else
+                    moved = 0
                 end
             else
                 if col > 0 then
-                    local step = math.min(remaining, col)
-                    col = col - step
-                    remaining = remaining - step
+                    col = self:advance_grapheme(line, col, -1)
+                    moved = 1
+                else
+                    moved = 0
                 end
             end
 
-            if remaining > 0 then
+            remaining = remaining - moved
+
+            if remaining > 0 and moved == 0 then
+                -- Cross a line boundary.
                 if forward and line < buf:line_count() - 1 then
                     line = line + 1
                     col = 0
@@ -2732,7 +3125,7 @@ function View:move_char(n)
                 else
                     c.line = line
                     c.col = col
-                    c.goal_col = col
+                    c.goal_col = self:byte_to_col(line, col)
                     c.visual_col = nil
                     c.yank_line = nil
                     c.yank_col = nil
@@ -2743,7 +3136,7 @@ function View:move_char(n)
 
         c.line = line
         c.col = col
-        c.goal_col = col
+        c.goal_col = self:byte_to_col(line, col)
         c.visual_col = nil
         c.yank_line = nil
         c.yank_col = nil
@@ -2788,8 +3181,9 @@ function View:move_line(n)
             local total = self:total_screen_rows()
             if target_screen >= total then
                 c.line = line_count - 1
-                c.col = buf:line_len(line_count - 1) - 1
-                c.goal_col = c.col
+                local end_byte = buf:line_len(line_count - 1) - 1
+                c.col = end_byte
+                c.goal_col = self:byte_to_col(line_count - 1, end_byte)
                 c.visual_col = nil
                 c.yank_line = nil
                 c.yank_col = nil
@@ -2798,15 +3192,20 @@ function View:move_line(n)
             local li, sub_row = self:screen_row_to_line(target_screen)
             c.line = li
             local content_len = self:content_len(li)
-            -- Target visual column within the sub-row
-            local sub_col
-            if sub_row < self:wrap_rows(li) - 1 then
-                sub_col = math.min(visual_goal, self.wrap_width - 1)
+            -- Last sub-row? Compute its actual display width by walking
+            -- grapheme widths (we can't subtract bytes from wrap_width —
+            -- wide glyphs make bytes != columns).
+            local total_sub = self:wrap_rows(li)
+            local last_row_width
+            if sub_row == total_sub - 1 then
+                -- Width of the final sub-row = (line's total display width)
+                -- minus the columns consumed by all earlier sub-rows. Walk
+                -- the graphemes to find where sub_row starts.
+                last_row_width = self:_last_sub_row_width(li, sub_row)
             else
-                -- Last sub-row: width is the remainder
-                local last_row_width = content_len - sub_row * self.wrap_width
-                sub_col = math.min(visual_goal, math.max(0, last_row_width))
+                last_row_width = self.wrap_width
             end
+            local sub_col = math.min(visual_goal, math.max(0, last_row_width))
             local byte_off = self:wrap_byte_offset(li, sub_row, sub_col)
             -- Clamp to actual content length
             c.col = math.min(byte_off, content_len)
@@ -2830,8 +3229,9 @@ function View:move_line(n)
             return nil, "start of document"
         elseif target >= line_count then
             c.line = line_count - 1
-            c.col = buf:line_len(line_count - 1) - 1
-            c.goal_col = c.col
+            local end_byte = buf:line_len(line_count - 1) - 1
+            c.col = end_byte
+            c.goal_col = self:byte_to_col(line_count - 1, end_byte)
             c.visual_col = nil
             c.yank_line = nil
             c.yank_col = nil
@@ -2839,7 +3239,12 @@ function View:move_line(n)
         end
 
         c.line = target
-        c.col = math.min(c.goal_col, buf:line_len(target) - 1)
+        -- goal_col is a display column; snap to a grapheme boundary
+        -- on the target line via col_to_byte so we never land mid-codepoint.
+        local line_len = buf:line_len(target) - 1
+        local max_col = self:byte_to_col(target, line_len)
+        local goal = math.min(c.goal_col, max_col)
+        c.col = self:col_to_byte(target, goal)
         return true
     end)
 end
@@ -2857,8 +3262,9 @@ end
 
 function View:move_line_end()
     return self:each_cursor(function(c)
-        c.col = self.buffer:line_len(c.line) - 1
-        c.goal_col = c.col
+        local content_len = self.buffer:line_len(c.line) - 1
+        c.col = content_len
+        c.goal_col = self:byte_to_col(c.line, content_len)
         c.visual_col = nil
         c.yank_line = nil
         c.yank_col = nil
@@ -3992,7 +4398,7 @@ function View:move_word(n, obj_name)
                 c.col = sc
             end
         end
-        c.goal_col = c.col
+        c.goal_col = self:byte_to_col(c.line, c.col)
         c.visual_col = nil
         c.yank_line = nil
         c.yank_col = nil
@@ -4003,15 +4409,17 @@ end
 function View:cursor_left()
     return self:each_cursor(function(c)
         if c.col > 0 then
-            c.col = c.col - 1
-            c.goal_col = c.col
+            -- Step one grapheme cluster backward so the caret never lands
+            -- between a base char and its combining marks / ZWJ sequence.
+            c.col = self:advance_grapheme(c.line, c.col, -1)
+            c.goal_col = self:byte_to_col(c.line, c.col)
             c.visual_col = nil
             c.yank_line = nil
             c.yank_col = nil
         elseif c.line > 0 then
             c.line = c.line - 1
             c.col = self:content_len(c.line)
-            c.goal_col = c.col
+            c.goal_col = self:byte_to_col(c.line, c.col)
             c.visual_col = nil
             c.yank_line = nil
             c.yank_col = nil
@@ -4024,8 +4432,10 @@ function View:cursor_right()
     return self:each_cursor(function(c)
         local dl = self:content_len(c.line)
         if c.col < dl then
-            c.col = c.col + 1
-            c.goal_col = c.col
+            -- Step one grapheme cluster forward (skips zero-width combining
+            -- marks / ZWJ continuations so the caret stops on the next base).
+            c.col = self:advance_grapheme(c.line, c.col, 1)
+            c.goal_col = self:byte_to_col(c.line, c.col)
             c.visual_col = nil
             c.yank_line = nil
             c.yank_col = nil
@@ -4045,7 +4455,10 @@ function View:cursor_up()
     return self:each_cursor(function(c)
         if c.line > 0 then
             c.line = c.line - 1
-            c.col = math.min(c.goal_col, self:content_len(c.line))
+            local content_len = self:content_len(c.line)
+            local max_col = self:byte_to_col(c.line, content_len)
+            local goal = math.min(c.goal_col, max_col)
+            c.col = self:col_to_byte(c.line, goal)
         end
         return true
     end)
@@ -4055,7 +4468,10 @@ function View:cursor_down()
     return self:each_cursor(function(c)
         if c.line < self:line_count() - 1 then
             c.line = c.line + 1
-            c.col = math.min(c.goal_col, self:content_len(c.line))
+            local content_len = self:content_len(c.line)
+            local max_col = self:byte_to_col(c.line, content_len)
+            local goal = math.min(c.goal_col, max_col)
+            c.col = self:col_to_byte(c.line, goal)
         end
         return true
     end)
@@ -4228,7 +4644,7 @@ function View:clamp_cursor()
         if c.col > cl then
             c.col = cl
         end
-        c.goal_col = c.col
+        c.goal_col = self:byte_to_col(c.line, c.col)
         c.visual_col = nil
         c.yank_line = nil
         c.yank_col = nil

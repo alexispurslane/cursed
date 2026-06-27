@@ -7,19 +7,16 @@ so the agent can pick up context across sessions.
 ## Key Decisions
 
 - Let me restructure so motion events never add cursors:
+- I feel like we should make everything UTF-8 robust (both cursor, rendering, wrap math, and moving around / measuring distances in buffers) before it's too late
+- Refactoring all three to use `if/else` instead of goto:
 
 ## Gotchas & Errors
 
-- the `tab_width = 2, margin = 72` line is in `@-`'s version), so the check was already failing before I did anything.
-- This looks like a broken/partial autotools state, unrelated to my changes (it's a build artifact dir, not tracked by `@-`).
 - The self-pipe's stated rationale ("select can't detect EVFILT_USER") is false, but that's out of scope to restructure.
 - So `select()` never saw the kq_fd become readable and blocked until the 200ms file-load watchdog, after which a band-aid unconditional drain finally picked up the (long-since-ready) reply.
-
-## Heavily Read
-
-- src/main.lua (11 reads) — Now let me rewrite the mouse handler block. Let me view the full current block o
-- src/cursed/editor.lua (4 reads) — Now let me see the render code in detail around the margin/centering:
-- src/cursed/view.lua (6 reads) — Let me look at the View.new and fields, and the term module for width:
-- src/cursed/commands.lua (4 reads) — Let me verify with a keyboard-driven multi-cursor (avoids mouse timing flakiness
-- src/cursed/default_keybindings.lua (3 reads) — Let me look at how Escape is dispatched in the key loop (there are special-case 
-- vendor/termbox2/termbox2.h (3 reads) — **Root cause found.** termbox2's SGR/1006 mouse decoder only extracts the `MOTIO
+- Could not find the exact text in src/cursed/utf8.lua. The old text must match exactly including all whitespace and newlines.
+- 29 passed, 0 failed — Fix: The closure captures `bs, p, w, ll` — all should be ints/arrays.
+- But the test is failing with `got=4 want=2`.
+- The wrap_test failure is in my TEST's mini-`M()` helper which still has the outdated `wrap_rows` arithmetic that doesn't match the real View — line 47 calls `byte_to_col(0)` on the ZWJ-family string.
+- FAIL CJK byte_to_col(4)//中2: got=3 want=4 — Fix: My test asserted `byte_to_col(4)` should be 4, but byte 4 (0-based) is the 2nd byte of the 1st 中 (mid-cluster) → col 1.
+- Validation failed for tool "edit":

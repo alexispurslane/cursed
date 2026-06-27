@@ -1507,35 +1507,46 @@ function Editor:render()
     --- active-line highlight carries through the syntax spans (which
     --- would otherwise repaint with default_bg). Defaults to
     --- default_bg for non-active rows.
-    local function paint_chunk(view, li, row, text_x, chunk, chunk_start, chunk_end, row_bg)
+    --- Paint a single grapheme run's base layer with syntax spans.
+    --- `run` is an entry from `View:sub_row_runs`: it carries the run's
+    --- 1-based byte range into `line_text` and the 0-based DISPLAY
+    --- column (within the sub-row) where it starts. We emit the whole
+    --- run's slice at `text_x + run.col`; syntax spans that intersect
+    --- the run are overlaid on top at the same display column (a span
+    --- never crosses a grapheme boundary, so any intersecting span is
+    --- fully contained in the run). Wide / combining glyphs are printed
+    --- as a single `term:print` so termbox advances the correct number
+    --- of cells for us.
+    --- row_bg: background to paint text-region cells with, so the
+    --- active-line highlight carries through syntax spans.
+    local function paint_run(view, li, row, text_x, line_text, run, row_bg)
+        local chunk_start = run.byte_start - 1
+        local chunk_end = run.byte_end
         local segs = view:highlight_segments(li, chunk_start, chunk_end)
         local dfg = ui("default_fg")
         local dbg = row_bg or ui("default_bg")
-        -- Focus backdrop: when the palette is open, blend fg+bg toward
-        -- default_bg so the buffer recedes behind the floating box.
         dfg, dbg = focus_dim(dfg, dbg)
+        local chunk = line_text:sub(run.byte_start, run.byte_end)
+        local x = text_x + run.col
         if segs == nil or #segs == 0 then
-            term:print(text_x, row, chunk, dfg, dbg)
+            term:print(x, row, chunk, dfg, dbg)
             return
         end
         local painted = 0 -- byte offset within chunk already painted
         for _, s in ipairs(segs) do
             if s.cs > painted then
-                term:print(text_x + painted, row, chunk:sub(painted + 1, s.cs), dfg, dbg)
+                term:print(x, row, chunk:sub(painted + 1, s.cs), dfg, dbg)
             end
             if s.ce > s.cs then
-                local seg_fg = s.fg
-                -- Per-span fg also gets the focus tint; bg is the row's
-                -- dbg (already dimmed above).
-                seg_fg = focus_dim(seg_fg, dbg)
-                term:print(text_x + s.cs, row, chunk:sub(s.cs + 1, s.ce), seg_fg, dbg)
+                local seg_fg = focus_dim(s.fg, dbg)
+                term:print(x, row, chunk:sub(s.cs + 1, s.ce), seg_fg, dbg)
             end
             if s.ce > painted then
                 painted = s.ce
             end
         end
         if painted < #chunk then
-            term:print(text_x + painted, row, chunk:sub(painted + 1), dfg, dbg)
+            term:print(x, row, chunk:sub(painted + 1), dfg, dbg)
         end
     end
 
@@ -1770,11 +1781,8 @@ function Editor:render()
     local row = 0
     local li, sub_row = view:screen_row_to_line(view.scroll_y)
     while row <= max_y and li < line_count do
-        local line_text = buf:line_text(li)
+        local line_text = view:_line_text_stripped(li)
         local display_text = line_text
-        if #display_text > 0 and display_text:byte(#display_text) == 10 then
-            display_text = display_text:sub(1, #display_text - 1)
-        end
 
         local content_len = #display_text
         local total_sub = view:wrap_rows(li)
@@ -1843,15 +1851,27 @@ function Editor:render()
                     term:print(block_x, row, string.rep(" ", gutter_width), num_fg, row_bg)
                 end
 
-                -- Extract the sub-row's text chunk
-                local chunk_start = sub_row * text_width
-                local chunk_end = math.min(chunk_start + text_width, content_len)
-                local chunk = display_text:sub(chunk_start + 1, chunk_end)
-                if chunk_start < content_len then
+                -- Extract the sub-row's grapheme runs: each run carries its
+                -- 0-based DISPLAY column (within the sub-row), its 1-based
+                -- byte range into `line_text`, and its display width. We
+                -- emit one term:print per run at text_x+run.col so wide /
+                -- combining / ZWJ-cluster glyphs advance the correct number
+                -- of terminal cells (termbox knows about wide glyphs).
+                local runs, row_w = view:sub_row_runs(li, sub_row)
+                local chunk_start -- sub-row's first byte (0-based), set below
+                local chunk_end -- sub-row's last-after byte (0-based)
+                if #runs > 0 then
+                    chunk_start = runs[1].byte_start - 1
+                    chunk_end = runs[#runs].byte_end
+                else
+                    chunk_start = 0
+                    chunk_end = 0
+                end
+                if #runs > 0 then
                     -- Selection rendering: build the union of selected
-                    -- column ranges for THIS chunk across ALL cursors
+                    -- byte ranges for THIS sub-row across ALL cursors
                     -- (multi-cursor selections render together).
-                    -- sel_runs: list of {cs, ce} clamped to this chunk,
+                    -- sel_runs: list of {cs, ce} clamped to this sub-row,
                     -- then merged for overlapping spans.
                     local sel_runs = {}
                     for rsl, rsc, rel, rec in view:selection_ranges() do
@@ -1882,62 +1902,67 @@ function Editor:render()
                         end
                     end
 
-                    if #merged == 0 then
-                        -- Base layer only: syntax-highlighted spans.
-                        paint_chunk(view, li, row, text_x, chunk, chunk_start, chunk_end, row_bg)
-                    else
-                        -- Base layer (highlight) first, then overlay each
-                        -- selection run in reverse-video on top.
-                        paint_chunk(view, li, row, text_x, chunk, chunk_start, chunk_end, row_bg)
-                        for _, r in ipairs(merged) do
-                            local rel_cs = r[1] - chunk_start
-                            local rel_ce = r[2] - chunk_start
-                            if rel_cs < 0 then
-                                rel_cs = 0
-                            end
-                            if rel_ce > #chunk then
-                                rel_ce = #chunk
-                            end
-                            if rel_ce > rel_cs then
-                                -- Whitespace visualization inside the
-                                -- selection: spaces → middle dot (·),
-                                -- tabs → arrow (→), and a ↵ (U+21B5)
-                                -- shown at end-of-line when the
-                                -- selection reaches the line's trailing
-                                -- newline. Makes trailing/leading
-                                -- whitespace and line-spanning
-                                -- selections visible exactly where the
-                                -- user is operating. Buffer is untouched.
-                                local sel_text =
-                                    chunk:sub(rel_cs + 1, rel_ce):gsub(" ", "·"):gsub("\t", "→")
-                                term:print(
-                                    text_x + rel_cs,
-                                    row,
-                                    sel_text,
-                                    ui("cursor_fg"),
-                                    ui("selection_bg")
-                                )
-                                -- Newline marker: this run reaches the
-                                -- last cell of the line's last sub-row
-                                -- AND the original line had a trailing
-                                -- newline → the selection includes EOL,
-                                -- so draw ↵ one cell past content.
-                                if
-                                    rel_ce == #chunk
-                                    and chunk_end >= content_len
-                                    and #line_text > 0
-                                    and line_text:byte(#line_text) == 10
-                                then
-                                    local nl_x = text_x + rel_ce
-                                    if nl_x < w then
+                    -- Base layer: paint every grapheme run.
+                    for _, run in ipairs(runs) do
+                        paint_run(view, li, row, text_x, line_text, run, row_bg)
+                    end
+
+                    -- Selection overlay (reverse-video). Marked bytes map
+                    -- to graphemically-aligned display columns via byte_to_col.
+                    for _, r in ipairs(merged) do
+                        -- byte range within sub-row -> display columns
+                        local dcs = view:byte_to_col(li, r[1]) - view:byte_to_col(li, chunk_start)
+                        local dce = view:byte_to_col(li, r[2]) - view:byte_to_col(li, chunk_start)
+                        if dcs < 0 then
+                            dcs = 0
+                        end
+                        if dce > row_w then
+                            dce = row_w
+                        end
+                        if dce > dcs then
+                            -- Paint each grapheme run that intersects the
+                            -- selection range at that run's OWN display
+                            -- column (run.col). Advancing a running x here
+                            -- would drift past non-selected runs sitting
+                            -- before the selection start, drawing the
+                            -- reversed text at the wrong column.
+                            for _, run in ipairs(runs) do
+                                if run.byte_end > r[1] and run.byte_start <= r[2] then
+                                    local s = math.max(run.byte_start, r[1] + 1)
+                                    local e = math.min(run.byte_end, r[2])
+                                    if e >= s then
+                                        local sel_text =
+                                            line_text:sub(s, e):gsub(" ", "·"):gsub("\t", "→")
                                         term:print(
-                                            nl_x,
+                                            text_x + run.col,
                                             row,
-                                            "↵",
+                                            sel_text,
                                             ui("cursor_fg"),
                                             ui("selection_bg")
                                         )
                                     end
+                                end
+                            end
+                            -- Newline marker: this run reaches the
+                            -- last cell of the line's last sub-row AND
+                            -- the original line had a trailing newline
+                            -- → the selection includes EOL, so draw ↵ one
+                            -- cell past content.
+                            if
+                                r[2] >= chunk_end
+                                and chunk_end >= content_len
+                                and #line_text > 0
+                                and buf:line_text(li):byte(-1) == 10
+                            then
+                                local nl_x = text_x + row_w
+                                if nl_x < w then
+                                    term:print(
+                                        nl_x,
+                                        row,
+                                        "↵",
+                                        ui("cursor_fg"),
+                                        ui("selection_bg")
+                                    )
                                 end
                             end
                         end
@@ -1949,47 +1974,48 @@ function Editor:render()
                 -- would otherwise overwrite them with blank space cells)
                 -- but BEFORE the cursor overlay. Only on the first sub-row
                 -- (the only place indentation lives), and only for guides
-                -- that fall within this chunk's range.
+                -- that fall within this sub-row's display-column range.
                 if sub_row == 0 and #guide_cols > 0 then
                     local guide_fg = ui("indent_guide")
                     for _, g in ipairs(guide_cols) do
-                        if g >= chunk_start and g < chunk_end then
-                            term:print(text_x + (g - chunk_start), row, "│", guide_fg, row_bg)
+                        if g < row_w then
+                            term:print(text_x + g, row, "│", guide_fg, row_bg)
                         end
                     end
                 end
 
                 -- Cursor overlay: paint every cursor whose position
                 -- falls in THIS sub-row as a reverse-video cell of the
-                -- underlying character (or a blank when the cursor is at
-                -- end-of-content or on an empty line). Runs OUTSIDE the
-                -- chunk-content guard so a cursor on an empty line (no
-                -- chunk text) still renders. Symmetric across primary and
-                -- secondary cursors.
+                -- underlying grapheme (or a blank when the cursor sits
+                -- past end-of-content / on an empty line). Runs OUTSIDE
+                -- the runs-guard so a cursor on an empty line still
+                -- renders. c.col is a byte offset; translate to the
+                -- sub-row's display column via byte_to_col so the
+                -- caret lands on the correct cell for wide glyphs.
                 for _, c in ipairs(view.cursors) do
                     if self._blink_on and c.line == li then
-                        -- Only the sub_row is needed from wrap math to
-                        -- decide WHICH row this cursor paints on; the
-                        -- column must be the ABSOLUTE byte offset
-                        -- (c.col), not the relative sub-col, because
-                        -- chunk_start/chunk_end/rel below all work in
-                        -- absolute line bytes. Using the sub-col here
-                        -- (#0: the cursor vanished on every wrapped,
-                        -- non-first sub-row because sub-col <
-                        -- chunk_start failed the range guard).
                         local csub_row = select(1, view:wrap_sub_position(li, c.col))
                         if csub_row == sub_row then
-                            local ccs = c.col
-                            -- Allow the cursor to sit at chunk_end (one
-                            -- past the last char of the chunk/line) for
-                            -- end-of-content cursors.
-                            if ccs >= chunk_start and ccs <= chunk_end then
-                                local rel = ccs - chunk_start
-                                local ch = chunk:sub(rel + 1, rel + 1)
-                                if #ch == 0 then
-                                    ch = " "
+                            local ccol = view:byte_to_col(li, c.col)
+                                - view:byte_to_col(li, chunk_start)
+                            if ccol < 0 then
+                                ccol = 0
+                            end
+                            -- Allow the cursor to sit one cell past the
+                            -- last grapheme for end-of-content cursors.
+                            if ccol <= row_w then
+                                local ch = " "
+                                -- Find the grapheme run covering c.col.
+                                for _, run in ipairs(runs) do
+                                    if
+                                        c.col + 1 >= run.byte_start
+                                        and c.col + 1 <= run.byte_end
+                                    then
+                                        ch = line_text:sub(run.byte_start, run.byte_end)
+                                        break
+                                    end
                                 end
-                                term:print(text_x + rel, row, ch, ui("cursor_fg"), ui("cursor_bg"))
+                                term:print(text_x + ccol, row, ch, ui("cursor_fg"), ui("cursor_bg"))
                             end
                         end
                     end
@@ -1998,23 +2024,29 @@ function Editor:render()
                 -- Pending-drop markers (drop mode staged by
                 -- add_cursor_here before commit_pending_cursors).
                 -- Painted with a yellow BACKGROUND so the user can see
-                -- where the staged drops are while the primary caret
-                -- moves around to drop more. Also runs on empty lines
-                -- (see cursor overlay above).
+                -- where the staged drops are. Same display-column
+                -- mapping as the active-cursor overlay above.
                 for _, c in ipairs(view.pending_cursors) do
                     if c.line == li then
-                        -- See the active-cursor overlay above: use c.col
-                        -- (absolute) not the relative sub-col.
                         local csub_row = select(1, view:wrap_sub_position(li, c.col))
                         if csub_row == sub_row then
-                            local ccs = c.col
-                            if ccs >= chunk_start and ccs <= chunk_end then
-                                local rel = ccs - chunk_start
-                                local ch = chunk:sub(rel + 1, rel + 1)
-                                if #ch == 0 then
-                                    ch = " "
+                            local ccol = view:byte_to_col(li, c.col)
+                                - view:byte_to_col(li, chunk_start)
+                            if ccol < 0 then
+                                ccol = 0
+                            end
+                            if ccol <= row_w then
+                                local ch = " "
+                                for _, run in ipairs(runs) do
+                                    if
+                                        c.col + 1 >= run.byte_start
+                                        and c.col + 1 <= run.byte_end
+                                    then
+                                        ch = line_text:sub(run.byte_start, run.byte_end)
+                                        break
+                                    end
                                 end
-                                term:print(text_x + rel, row, ch, ui("cursor_fg"), ui("drop_bg"))
+                                term:print(text_x + ccol, row, ch, ui("cursor_fg"), ui("drop_bg"))
                             end
                         end
                     end
