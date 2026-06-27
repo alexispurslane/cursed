@@ -350,6 +350,7 @@ end
 ---@field _last_scroll_li integer|nil anchor line of current view at last render
 ---@field _last_scroll_sub_row integer|nil anchor sub-row of current view at last render
 ---@field _last_line_count integer|nil line count of current view at last render
+---@field _last_file_loaded boolean|nil file_loaded state of current view at last render
 local Editor = {}
 Editor.__index = Editor
 
@@ -414,6 +415,7 @@ function Editor.new(term)
         _last_scroll_li = nil,
         _last_scroll_sub_row = nil,
         _last_line_count = nil,
+        _last_file_loaded = nil,
     }, Editor)
     editor.event_system = EventSystem.new(editor)
     editor.overlays = OverlayManager.new(editor)
@@ -463,7 +465,7 @@ end
 function Editor:_min_cursor_screen_row()
     local mcsr_t0 = profile.now_us()
     local view = self:current_view()
-    if view == nil then
+    if view == nil or view.buffer:line_count() == 0 then
         return 0
     end
     local min_row ---@type integer|nil
@@ -2020,6 +2022,7 @@ function Editor:render()
         local cur_lc = view.buffer:line_count()
         line_count_changed = self._last_line_count ~= nil and cur_lc ~= self._last_line_count
     end
+    local file_loaded_changed = view ~= nil and self._last_file_loaded ~= view.file_loaded
     if
         self._last_w ~= nil
         and (
@@ -2028,6 +2031,7 @@ function Editor:render()
             or footer_rows ~= self._last_footer_rows
             or palette_active ~= self._last_palette
             or line_count_changed
+            or file_loaded_changed
             or (
                 view
                 and (
@@ -2322,6 +2326,7 @@ function Editor:render()
         self._last_scroll_li = view and view.scroll_li or nil
         self._last_scroll_sub_row = view and view.scroll_sub_row or nil
         self._last_line_count = view and view.buffer:line_count() or nil
+        self._last_file_loaded = view and view.file_loaded or nil
         self._damage_start_row = nil
     end
 

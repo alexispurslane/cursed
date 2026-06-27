@@ -152,7 +152,10 @@ return {
     -- Kill ring
     ["ctrl-y"] = "yank",
     ["alt-y"] = "yank_pop",
-    ["ctrl-shift-y"] = "clipboard_yank",
+    -- ctrl-shift-y: termbox delivers ctrl+y (0x19) with TB_MOD_SHIFT set,
+    -- producing token "shift-ctrl-y" which parse_chord cannot handle
+    -- (shift-prefixed components must be named keys, not ctrl-letter combos).
+    -- Not bound by default; set in init.lua if desired.
     ["alt-w"] = "copy_region",
     ["ctrl-x alt-w"] = "copy_sentence",
 
