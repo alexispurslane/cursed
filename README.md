@@ -1,6 +1,6 @@
 # Cursed
 
-![Cursed Editor](.Screenshot\ 2026-06-27\ at\ 1.39.50\ PM.png)
+![Cursed Editor](screenshots-hero.png)
 
 *The CURSed EDitor*
 
@@ -33,15 +33,15 @@ Most of the editor concepts --- and keybindings --- are derived from Emacs, but 
 
 ### Multiple Cursors
 
-![Multiple Cursors](./Screenshot\ 2026-06-27\ at\ 1.40.43\ PM.png)
+![Multiple Cursors](screenshots-multicursor.png)
 
 ### Minibuffer Completion
 
-![Minibuffer Completion](./Screenshot\ 2026-06-27\ at\ 1.41.42\ PM.png)
+![Minibuffer Completion](screenshots-minibuffer.png)
 
 ### Live Editing
 
-![Live Editing](./Screenshot\ 2026-06-27\ at\ 1.40.28\ PM.png)
+![Live Editing](screenshots-live-editing.png)
 
 ## Installing
 
