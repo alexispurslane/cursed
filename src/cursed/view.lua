@@ -2138,7 +2138,7 @@ end
 ---@return integer gutter_width, integer text_x, integer text_width, integer block_x, integer block_w
 function View:text_geometry(w)
     local line_count = self.buffer:line_count()
-    local gutter_width = math.max(3, #tostring(line_count) + 1)
+    local gutter_width = math.max(3, #tostring(line_count) + 3) -- 1-col left margin + number + 2-col right margin
     local avail_text = w - gutter_width
     if avail_text <= 0 then
         return gutter_width, 0, 0, 0, 0

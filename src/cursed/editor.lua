@@ -18,6 +18,7 @@ local find_file = require("cursed.find_file")
 local kill_ring = require("cursed.kill_ring")
 local completers = require("cursed.completers")
 local keybind = require("cursed.keybind")
+local OverlayManager = require("cursed.overlay")
 local log = require("cursed.log")
 
 --- Resolve a UI chrome color from the active colorscheme.
@@ -120,6 +121,132 @@ local function truncate_cells(s, max)
 end
 
 ----------------------------------------------------------------------------------------------------
+-- Modeline segments (#5/#9 extensible modeline).
+--
+-- The modeline is decomposed into an ordered list of SEGMENTS a user can
+-- override/extend via `editor.modeline_segments`. Each segment is:
+--   {
+--     bg   = <concept name string | base16 slot int 0x0N>,  -- segment bg color
+--     format = function(editor, view) -> string,              -- text to show
+--     fill  = boolean?,                                        -- absorb slack space
+--     fg    = <concept name string | base16 slot int>?,        -- optional text color
+--                                                                  override (else auto)
+--   }
+-- A segment whose format returns "" and isn't `fill` is skipped (no block,
+-- no separators) — lets a section elide itself (e.g. no transient status).
+--
+-- SEPARATORS are fully automatic: ONE triangle per boundary between
+-- survivor segments, direction alternating (◣ ◢ ◣ ◢ …) so adjacent
+-- accent blocks fold into a zigzag (foo \ bar / baz \ end). Colors are
+-- derived from the two adjacent segments' bg colors (no spec field):
+--   • ◣ (lower-left filled, even boundary): fg = left.bg,  bg = right.bg
+--   • ◢ (lower-right filled, odd boundary):  fg = right.bg, bg = left.bg
+-- Both are lower triangles whose slant alternates, producing the fold.
+--
+-- TEXT color is auto-detected from the segment bg's luminance: a dark bg
+-- gets base06 (bright), a light bg gets base00 (blackest) — pos-style
+-- brightness on every accent. `fg` overrides auto-detection (escape hatch
+-- for 256-color terminals where luminance from a palette index is wrong).
+--
+-- LAYOUT: available = w − Σ(text widths) − (N−1 separators). `available`
+-- is split evenly among `fill` segments (remainder distributed
+-- left→right). Non-fill segments render at exactly their text width (any
+-- padding is baked into the format string). When text overflows the row,
+-- fill segments get 0 extra and text clips off-screen.
+----------------------------------------------------------------------------------------------------
+
+--- Resolve a segment `bg`/`fg` spec to a termbox color int.
+--- Accepts a colorscheme concept name string (resolved through the active
+--- scheme's concept→slot map, so theme tweaks + user remaps apply) OR a
+--- raw base16 slot int (0x00..0x0F). Returns the active scheme's color
+--- for that slot (or default fg/bg when no scheme is active yet).
+---@param spec string|integer concept name or base16 slot
+---@param fallback integer color int when spec/resolution fails
+---@return integer color
+local function resolve_seg_color(spec, fallback)
+    if spec == nil then
+        return fallback
+    end
+    local scheme = ColorScheme.active
+    if scheme == nil then
+        return fallback
+    end
+    if type(spec) == "number" then
+        return scheme:slot_color(spec)
+    end
+    ---@cast spec string
+    return scheme:color(spec)
+end
+
+--- Relative luminance of a truecolor attr (0xRRGGBB, style bits ignored).
+---@param color integer
+---@return number 0..1
+local function luminance(color)
+    local c = bit.band(color, 0xFFFFFF)
+    local r = bit.band(bit.rshift(c, 16), 0xFF) / 255
+    local g = bit.band(bit.rshift(c, 8), 0xFF) / 255
+    local b = bit.band(c, 0xFF) / 255
+    return 0.299 * r + 0.587 * g + 0.114 * b
+end
+
+--- Auto-pick a segment's text color from its bg lightness.
+--- Dark bg → base06 (bright); light bg → base00 (blackest). In 256-color
+--- mode the resolved color is a palette index not RGB, so luminance is
+--- unreliable — callers should set segment `fg` to pin it there.
+---@param scheme ColorScheme
+---@param bg_color integer resolved bg color int
+---@return integer text color int
+local function auto_text_color(scheme, bg_color)
+    local text_slot
+    if scheme.truecolor and luminance(bg_color) > 0.5 then
+        text_slot = 0x00 -- base00: blackest on a light bg
+    else
+        text_slot = 0x06 -- base06: bright on a dark bg
+    end
+    return scheme:slot_color(text_slot)
+end
+
+--- The built-in modeline segment set: reproduces the historic segmented
+--- modeline (◆ mode ◣ ▤ filepath ● … ◢ ⌖ pos) via the generic segment
+--- path. `editor.modeline_segments` is seeded from this table in
+--- Editor.new; init.lua / M-: can reassign, reorder, or append.
+---@type table[]
+local DEFAULT_MODELINE_SEGMENTS = {
+    {
+        bg = "modeline_mode_bg",
+        fill = false,
+        format = function(editor, view)
+            local mode_name = "fundamental"
+            if #view._major_modes > 0 then
+                mode_name = view._major_modes[#view._major_modes].name or mode_name
+            end
+            return " ◆ " .. mode_name .. " "
+        end,
+    },
+    {
+        bg = "modeline_bg",
+        fill = true,
+        format = function(editor, view)
+            local buf = view.buffer
+            local dirty = buf:is_dirty()
+            local modified = dirty and " ●" or ""
+            local path = buf:filepath() or "[no file]"
+            local rc = editor:read_char_status()
+            return rc or editor.status_message or ("▤ " .. path .. modified)
+        end,
+    },
+    {
+        bg = "modeline_pos_bg",
+        fill = false,
+        format = function(editor, view)
+            local line_count = view:line_count()
+            local pct = math.floor(view:p().line / math.max(1, line_count - 1) * 100)
+            return string.format(" ⌖ %d:%d  %d%% ", view:p().line + 1, view:p().col + 1, pct)
+        end,
+    },
+}
+
+----------------------------------------------------------------------------------------------------
 -- Pretty printer for eval output
 ----------------------------------------------------------------------------------------------------
 
@@ -207,6 +334,8 @@ end
 ---@field _blink_on boolean caret visible (drawn) this blink phase
 ---@field _blink_next_us integer deadline (us) of next on/off toggle; 0 = uninitialized
 ---@field event_system EventSystem central event hub (pre/post-command, mode_enter/exit, ring-buffer, ...)
+---@field overlays OverlayManager screen-space overlay layer (file-anchored + floating)
+---@field modeline_segments table[] ordered modeline segment specs (bg/format/fill/fg)
 ---@field _last_command string|nil name of the most recently dispatched command (Emacs `last-command`)
 ---@field _command_before_this string|nil the command before the most recent one (Emacs `command-before-this`)
 ---@field _last_complex_command { name: string, universal_args: table }|nil most recent command invoked with universal args (for repeat-complex-command)
@@ -248,6 +377,8 @@ function Editor.new(term)
         _base_keybindings = {},
         _active_trie = nil,
         _chord_for_command = {},
+        overlays = nil, -- OverlayManager singleton (set below)
+        modeline_segments = nil, -- segment spec list (seeded from DEFAULT_MODELINE_SEGMENTS below)
         _digit_active = false,
         _digit_value = 0,
         _digit_negative = false,
@@ -264,6 +395,11 @@ function Editor.new(term)
         _last_complex_command = nil, -- most recent command-with-args, for repeat-complex-command
     }, Editor)
     editor.event_system = EventSystem.new(editor)
+    editor.overlays = OverlayManager.new(editor)
+    editor.modeline_segments = {}
+    for _, seg in ipairs(DEFAULT_MODELINE_SEGMENTS) do
+        editor.modeline_segments[#editor.modeline_segments + 1] = seg
+    end
     return editor
 end
 
@@ -1539,6 +1675,128 @@ function Editor:footer_rows()
 end
 
 ----------------------------------------------------------------------------------------------------
+-- Modeline rendering (segment-based; see DEFAULT_MODELINE_SEGMENTS for the spec).
+----------------------------------------------------------------------------------------------------
+
+--- Render the modeline row into the overlay sink `fp` at row `y`.
+--- Evaluates each segment's format fn, resolves bg/text colors, lays out
+--- fill segments, and draws the alternating auto-separators. Skips segments
+--- whose format returns "" and aren't `fill`. No-op before a scheme is loaded.
+---@param view View the focused view
+---@param w integer terminal width
+---@param y integer screen row for the modeline
+---@param fp function float-print sink (x, y, text, fg, bg) from the overlay manager
+function Editor:render_modeline(view, w, y, fp)
+    local scheme = ColorScheme.active
+    if scheme == nil or self.modeline_segments == nil then
+        return
+    end
+
+    -- 1. Evaluate formats → survivors. A segment with empty text and
+    --    non-fill elides entirely (no block, no separators).
+    local segs = {}
+    for _, spec in ipairs(self.modeline_segments) do
+        local text = spec.format(self, view)
+        if text == nil then
+            text = ""
+        end
+        local is_fill = spec.fill == true
+        if text ~= "" or is_fill then
+            segs[#segs + 1] = {
+                text = text,
+                fill = is_fill,
+                w = cell_len(text),
+                bg_spec = spec.bg,
+                fg_spec = spec.fg,
+            }
+        end
+    end
+    local n = #segs
+    if n == 0 then
+        return
+    end
+
+    -- 2. Resolve colors: bg from spec; text = spec.fg override or
+    --    auto-detected from bg luminance (dark bg → base06, light → base00).
+    for _, s in ipairs(segs) do
+        s.bg_color = resolve_seg_color(s.bg_spec, ui("modeline_bg"))
+        if s.fg_spec ~= nil then
+            s.fg_color = resolve_seg_color(s.fg_spec, ui("modeline_fg"))
+        else
+            s.fg_color = auto_text_color(scheme, s.bg_color)
+        end
+    end
+
+    -- 3. Layout. available space = w − Σ(text widths) − (N−1 separators).
+    --    Split `available` evenly among `fill` segments; remainder →
+    --    leftmost fills first.
+    local seps = n - 1
+    local text_total = 0
+    local fill_count = 0
+    for _, s in ipairs(segs) do
+        text_total = text_total + s.w
+        if s.fill then
+            fill_count = fill_count + 1
+        end
+    end
+    local available = w - text_total - seps
+    if available < 0 then
+        available = 0
+    end
+    local pad_each = 0
+    local remainder = 0
+    if fill_count > 0 then
+        pad_each = math.floor(available / fill_count)
+        remainder = available - pad_each * fill_count
+    end
+
+    -- 4. Paint, left → right. Each segment: bg block of its allocation
+    --    (spaces), then the text overdrawn at the start, then a separator
+    --    cell (unless last). Separator glyph alternates ◣ / ◢ and its colors
+    --    are derived from the two adjacent segments' bg colors.
+    local x = 0
+    for i, s in ipairs(segs) do
+        local extra = 0
+        if s.fill then
+            extra = pad_each
+            if remainder > 0 then
+                extra = extra + 1
+                remainder = remainder - 1
+            end
+        end
+        local alloc = s.w + extra
+        if alloc < 1 then
+            alloc = s.w > 0 and s.w or 1
+        end
+        -- Truncate text to its allocation when it overflows (available was
+        -- clamped to 0, so a non-fill segment wider than the row clips).
+        local text = s.text
+        if s.w > alloc then
+            text = truncate_cells(text, alloc)
+        end
+        -- bg block fill for the whole allocation.
+        fp(x, y, string.rep(" ", alloc), s.fg_color, s.bg_color)
+        -- text overdrawn at the start.
+        if text ~= "" then
+            fp(x, y, text, s.fg_color, s.bg_color)
+        end
+        x = x + alloc
+        -- Separator at the boundary between segs[i] and segs[i+1].
+        if i < n then
+            local rbg = segs[i + 1].bg_color
+            if (i - 1) % 2 == 0 then
+                -- Even boundary (0-based): ◣ lower-left, fg = left bg, bg = right bg.
+                fp(x, y, "◣", s.bg_color, rbg)
+            else
+                -- Odd boundary: ◢ lower-right, fg = right bg, bg = left bg.
+                fp(x, y, "◢", rbg, s.bg_color)
+            end
+            x = x + 1
+        end
+    end
+end
+
+----------------------------------------------------------------------------------------------------
 -- Rendering
 ----------------------------------------------------------------------------------------------------
 
@@ -1560,6 +1818,21 @@ function Editor:render()
     -- backdrop can consult mb.palette at clear time and so the paint
     -- helpers can close over `mb` directly.
     local mb = self.minibuffer
+
+    -- Overlay frame: snapshot the view being rendered + clear the overlay
+    -- queues. `view` is hoisted above the paint helpers so begin_frame runs
+    -- before any chrome registers, and so `fp` (the float-print sink the
+    -- chrome closures capture) is defined alongside the other paint helpers.
+    local view = self:current_view()
+    local ov = self.overlays
+    ov:begin_frame(view)
+    --- Float-print sink: route chrome (modeline / minibuffer / completions)
+    --- through the overlay manager so it composes with extension overlays
+    --- in a single z-ordered flush. `fp(x,y,text,fg,bg)` is the screen-space
+    --- overlay equivalent of `term:print` — same signature, deferred paint.
+    local function fp(x, y, text, fg, bg)
+        ov:put_float(x, y, text, fg, bg)
+    end
 
     -- When the palette is open, the focus backdrop tints the whole
     -- buffer region — including empty rows below the last line — so
@@ -1688,7 +1961,7 @@ function Editor:render()
                     if cur and matched_style then
                         fg = bit.bor(fg, matched_style)
                     end
-                    term:print(sx, cy, sub, fg, bg_p)
+                    fp(sx, cy, sub, fg, bg_p)
                     sx = sx + cell_len(sub)
                 end
                 run_start = i
@@ -1748,25 +2021,25 @@ function Editor:render()
                 -- Full-width reverse-video bar: fill the row with the
                 -- selection bg first, then print text + meta on top so
                 -- the highlight is contiguous across the gap.
-                term:print(x, row, string.rep(" ", list_w), cur_fg, cur_bg)
+                fp(x, row, string.rep(" ", list_w), cur_fg, cur_bg)
                 local mset = match_byte_set(text, query)
                 if next(mset) then
                     print_highlighted(x, row, text, accent_fg, cur_fg, cur_bg, mset, tb.bold)
                 else
-                    term:print(x, row, text, cur_fg, cur_bg)
+                    fp(x, row, text, cur_fg, cur_bg)
                 end
                 if meta and meta_col + cell_len(meta) <= list_w then
-                    term:print(x + meta_col, row, meta, cur_fg, cur_bg)
+                    fp(x + meta_col, row, meta, cur_fg, cur_bg)
                 end
             else
                 local mset = match_byte_set(text, query)
                 if next(mset) then
                     print_highlighted(x, row, text, bright_fg, dim_fg, bg, mset, tb.bold)
                 else
-                    term:print(x, row, text, norm_fg, bg)
+                    fp(x, row, text, norm_fg, bg)
                 end
                 if meta and meta_col + cell_len(meta) <= list_w then
-                    term:print(x + meta_col, row, meta, meta_fg, bg)
+                    fp(x + meta_col, row, meta, meta_fg, bg)
                 end
             end
         end
@@ -1787,7 +2060,7 @@ function Editor:render()
             end
             for i = 0, n - 1 do
                 local on_thumb = i >= thumb_top and i < thumb_top + thumb_size
-                term:print(
+                fp(
                     sb_col,
                     y + i,
                     on_thumb and "█" or "│",
@@ -1798,7 +2071,6 @@ function Editor:render()
         end
     end
 
-    local view = self:current_view()
     -- Footer rows: modeline + optional completions row + minibuffer/eval
     local footer_rows = self:footer_rows()
     local has_completions = mb and mb.active and mb.completion and #mb._completions > 0
@@ -1807,7 +2079,9 @@ function Editor:render()
         local msg = "Loading..."
         local x = math.floor(w / 2) - math.floor(#msg / 2)
         local y = math.floor(h / 2)
-        term:print(x, y, msg, ui("default_fg"), ui("default_bg"))
+        fp(x, y, msg, ui("default_fg"), ui("default_bg"))
+        ov:emit_render()
+        ov:flush()
         term:present()
         return
     end
@@ -1937,9 +2211,11 @@ function Editor:render()
                 -- continuation rows. Painted on row_bg so the active tint
                 -- shows through the gutter.
                 if sub_row == 0 then
+                    -- 1-col left margin + right-aligned number + 2-col right margin.
                     local line_num = tostring(li + 1)
-                    local num_pad = string.rep(" ", gutter_width - 1 - #line_num)
-                    term:print(block_x, row, num_pad .. line_num .. " ", num_fg, row_bg)
+                    local digits = gutter_width - 3
+                    local num_pad = string.rep(" ", digits - #line_num)
+                    term:print(block_x, row, " " .. num_pad .. line_num .. "  ", num_fg, row_bg)
                 else
                     term:print(block_x, row, string.rep(" ", gutter_width), num_fg, row_bg)
                 end
@@ -2030,7 +2306,7 @@ function Editor:render()
                                             text_x + run.col,
                                             row,
                                             sel_text,
-                                            ui("cursor_fg"),
+                                            ui("selection_fg"),
                                             ui("selection_bg")
                                         )
                                     end
@@ -2053,7 +2329,7 @@ function Editor:render()
                                         nl_x,
                                         row,
                                         "↵",
-                                        ui("cursor_fg"),
+                                        ui("selection_fg"),
                                         ui("selection_bg")
                                     )
                                 end
@@ -2170,77 +2446,13 @@ function Editor:render()
         -- at the top of render), so there is nothing to position here.
     end
 
-    -- Modeline (at row h - footer_rows).
-    -- Segmented layout: three colored blocks separated by triangle
-    -- separators (◣ ◢, U+25E3 / U+25E2), palette-driven so every theme
-    -- recolors it for free. Each section carries a single-cell unicode
-    -- icon: ◆ mode, ▤ file, ⌖ position. Transient status (read-char /
-    -- search / arg / status_message) replaces the middle section,
-    -- keeping mode + pos. Pure core unicode — no Nerd Font required.
+    -- Modeline (at row h - footer_rows). Delegated to the segmented
+    -- renderer (Editor:render_modeline) so users can override/reorder/
+    -- append sections via `editor.modeline_segments`. Separators are
+    -- auto-calculated (alternating ◢/◣) with colors derived from adjacent
+    -- segment bg colors; text color is auto-detected from bg luminance.
     local modeline_y = h - footer_rows
-    local dirty = buf:is_dirty()
-    --  (Unicode " BALL" U+25CF) is a cleaner "modified" mark than "*".
-    local modified = dirty and " ●" or ""
-    local path = buf:filepath() or "[no file]"
-    local rc_status = self:read_char_status()
-
-    -- Resolve the active major-mode name (top of the view's mode stack).
-    local mode_name = "fundamental"
-    if #view._major_modes > 0 then
-        mode_name = view._major_modes[#view._major_modes].name or mode_name
-    end
-
-    -- Colors.
-    local mode_fg = ui("modeline_mode_fg")
-    local mode_bg = ui("modeline_mode_bg")
-    local pos_fg = ui("modeline_pos_fg")
-    local pos_bg = ui("modeline_pos_bg")
-    local mid_fg = ui("modeline_fg")
-    local mid_bg = ui("modeline_bg")
-
-    -- Section icons (single-cell, widely-supported unicode — no Nerd
-    -- Font required). ◆ U+25C6, ▤ U+25A4, ⌖ U+2316.
-    local ICON_MODE = "◆"
-    local ICON_FILE = "▤"
-    local ICON_POS = "⌖"
-
-    -- Right segment: position + percentage, with a location icon.
-    local pct = math.floor(view:p().line / math.max(1, line_count - 1) * 100)
-    local pos_str =
-        string.format(" %s %d:%d  %d%% ", ICON_POS, view:p().line + 1, view:p().col + 1, pct)
-
-    -- Middle segment: transient status, else filepath + modified (with
-    -- a file icon on the path so it reads as a distinct section).
-    local mid_str = rc_status or self.status_message or (ICON_FILE .. " " .. path .. modified)
-
-    -- Pre-fill the row with mid_bg so the gap between mode and pos
-    -- blocks (and any trailing margin) is the modeline bg.
-    term:print(0, modeline_y, string.rep(" ", w), mid_fg, mid_bg)
-
-    -- Left block: " ◆ mode " in the mode accent, followed by a
-    -- triangle separator (◣ U+25E3) whose fg is the mode bg and
-    -- whose bg is the mid bg — so the accent edge visibly "bleeds"
-    -- into the middle. Core unicode (Geometric Shapes): no Nerd Font.
-    local mode_text = " " .. ICON_MODE .. " " .. mode_name .. " "
-    local mode_w = cell_len(mode_text)
-    term:print(0, modeline_y, mode_text, mode_fg, mode_bg)
-    term:print(mode_w, modeline_y, "◣", mode_bg, mid_bg)
-
-    -- Middle block: transient status or filepath+modified. Truncated
-    -- to the space between the left separator and the right block.
-    local right_w = cell_len(pos_str) + 1 -- +1 for the leading separator
-    local mid_max = w - mode_w - 1 - right_w
-    if mid_max > 0 then
-        mid_str = truncate_cells(mid_str, mid_max)
-        term:print(mode_w + 1, modeline_y, mid_str, mid_fg, mid_bg)
-    end
-
-    -- Right block: a leading triangle separator (◢ U+25E2, fg =
-    -- pos_bg / bg = mid_bg) followed by the position text in the pos
-    -- accent. Same core-unicode-only constraint.
-    local pos_x = w - cell_len(pos_str)
-    term:print(pos_x - 1, modeline_y, "◢", pos_bg, mid_bg)
-    term:print(pos_x, modeline_y, pos_str, pos_fg, pos_bg)
+    self:render_modeline(view, w, modeline_y, fp)
 
     -- Minibuffer — inline bottom strip (search, find-file, read-char,
     -- query-replace, …). NOT used for M-x, which renders as a centered
@@ -2264,11 +2476,11 @@ function Editor:render()
             local row = line_offset + li
             if li == 0 then
                 -- First line: prompt + text
-                term:print(0, row, prompt, ui("minibuffer_prompt"), ui("default_bg"))
-                term:print(#prompt, row, line_text, ui("minibuffer_text"), ui("default_bg"))
+                fp(0, row, prompt, ui("minibuffer_prompt"), ui("default_bg"))
+                fp(#prompt, row, line_text, ui("minibuffer_text"), ui("default_bg"))
             else
                 -- Subsequent lines: full width
-                term:print(0, row, line_text, ui("minibuffer_text"), ui("default_bg"))
+                fp(0, row, line_text, ui("minibuffer_text"), ui("default_bg"))
             end
         end
 
@@ -2297,7 +2509,7 @@ function Editor:render()
             -- so input contexts read distinctly from the main view's
             -- reverse-video block caret.
             local bar_fg = bit.bor(ui("cursor_bg"), tb.underline)
-            term:print(cursor_col, cursor_row, ch, bar_fg, ui("default_bg"))
+            fp(cursor_col, cursor_row, ch, bar_fg, ui("default_bg"))
         end
 
         -- Completions: shared renderer (inline geometry — full width,
@@ -2344,22 +2556,22 @@ function Editor:render()
         -- Clear the box interior with default_bg so it floats over the
         -- buffer cleanly.
         for r = 0, box_h - 1 do
-            term:print(box_x, box_y + r, string.rep(" ", box_w), bg, bg)
+            fp(box_x, box_y + r, string.rep(" ", box_w), bg, bg)
         end
 
         -- Top border: ╭─...─╮
-        term:print(box_x, box_y, "╭" .. string.rep("─", box_w - 2) .. "╮", border_fg, bg)
+        fp(box_x, box_y, "╭" .. string.rep("─", box_w - 2) .. "╮", border_fg, bg)
 
         -- Input row: prompt + text.
         local input_y = box_y + 1
-        term:print(box_x + 1, input_y, prompt, prompt_fg, bg)
+        fp(box_x + 1, input_y, prompt, prompt_fg, bg)
         do
             local lt = mb_buf:line_text(0)
             if #lt > 0 and lt:byte(#lt) == 10 then
                 lt = lt:sub(1, #lt - 1)
             end
             local max_text = box_w - 2 - prompt_w
-            term:print(box_x + 1 + prompt_w, input_y, truncate_cells(lt, max_text), text_fg, bg)
+            fp(box_x + 1 + prompt_w, input_y, truncate_cells(lt, max_text), text_fg, bg)
         end
 
         -- Caret (underline bar, same as inline minibuffer).
@@ -2376,7 +2588,7 @@ function Editor:render()
                     ch = " "
                 end
                 local bar_fg = bit.bor(ui("cursor_bg"), tb.underline)
-                term:print(cursor_col, input_y, ch, bar_fg, bg)
+                fp(cursor_col, input_y, ch, bar_fg, bg)
             end
         end
 
@@ -2387,19 +2599,15 @@ function Editor:render()
         end
 
         -- Bottom border: ╰─...─╯
-        term:print(
-            box_x,
-            box_y + box_h - 1,
-            "╰" .. string.rep("─", box_w - 2) .. "╯",
-            border_fg,
-            bg
-        )
+        fp(box_x, box_y + box_h - 1, "╰" .. string.rep("─", box_w - 2) .. "╯", border_fg, bg)
     -- Eval result (in minibuffer row when not active)
     elseif self._eval_result then
         local eval_row = modeline_y + 1
-        term:print(0, eval_row, "=> " .. self._eval_result, ui("status_message"), ui("default_bg"))
+        fp(0, eval_row, "=> " .. self._eval_result, ui("status_message"), ui("default_bg"))
     end
 
+    ov:emit_render()
+    ov:flush()
     term:present()
 end
 

@@ -112,6 +112,7 @@ local CONCEPT_SLOTS = {
     cursor_fg = 0x00, -- base00: bg-colored text under the cursor
     cursor_bg = 0x05, -- base05: fg-colored cursor block (reverse video)
     selection_bg = 0x02, -- base02: selection / highlight background
+    selection_fg = 0x06, -- base06: bright text over the dark selection bg (legible)
     drop_bg = 0x0A, -- base0A: yellow bg for staged drop markers
     status_message = 0x0B, -- base0B: green informational messages
     status_error = 0x08, -- base08: red error messages
@@ -329,6 +330,7 @@ end
 ---@field truecolor boolean whether slots are 0xRRGGBB (true) or 256-index (false)
 ---@field active ColorScheme|nil the currently-loaded scheme (set by main.lua / load-theme)
 ---@field color fun(self: ColorScheme, concept: string): integer
+---@field slot_color fun(self: ColorScheme, slot: integer): integer
 ---@field resolve_capture fun(self: ColorScheme, capture: string): integer
 
 --- Resolve a base slot to its termbox color int (no style bits).
