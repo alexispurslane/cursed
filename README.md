@@ -31,7 +31,7 @@ Most of the editor concepts --- and keybindings --- are derived from Emacs, but 
 
 ## Screenshots
 
-### Multiple Cursors
+### Live Editing
 
 ![Multiple Cursors](screenshots-multicursor.png)
 
@@ -39,7 +39,7 @@ Most of the editor concepts --- and keybindings --- are derived from Emacs, but 
 
 ![Minibuffer Completion](screenshots-minibuffer.png)
 
-### Live Editing
+### Multiple Cursors
 
 ![Live Editing](screenshots-live-editing.png)
 
@@ -118,6 +118,7 @@ just clean-vendor # also rebuild vendored LuaJIT / tree-sitter-lib from scratch
 ```
 
 Build artifacts land entirely in `build/`; nothing outside the repo is touched except `~/.config/cursed/` at runtime.
+
 
 
 
