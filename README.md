@@ -1,5 +1,7 @@
 # Cursed
 
+![Cursed Editor](Screenshot\ 2026-06-27\ at\ 1.39.50\ PM.png)
+
 *The CURSed EDitor*
 
 This is a simple, vibe-coded (but architected in-detail, with huge attention to performance, coherent architecture, maintainability, and extensibility) attempt to build my personal vision of an Emacs 2.0 using LuaJIT+CFFI. Use at your own risk.
@@ -26,6 +28,20 @@ Most of the editor concepts --- and keybindings --- are derived from Emacs, but 
 - Full mouse and clipboard support out of the box.
 - Due to Lua's greater speed, the *entire editor*, besides a minimal C wrapper that only exists to boot the compiled bytecode in a way that allows for a standalone executable, and manage the threads and ring buffers, can be implemented in Lua. This takes Emacs's idea of being implemented in a scripting language with a C core to the extreme: even the display code can be overridden.
 - Tree-sitter grammars are provided with the editor, compiled statically into the binary with the default bytecode. This provides stability --- no more surprise version conflicts. We provide Rust, YAML, TOML, Bash, Markdown, Go, Python, Lua, C, and JSON highlighting out of the box, with nested syntax highlighting supported for all queries, and implemented by default for Markdown code fences.
+
+## Screenshots
+
+### Multiple Cursors
+
+![Multiple Cursors](Screenshot\ 2026-06-27\ at\ 1.40.43\ PM.png)
+
+### Minibuffer Completion
+
+![Minibuffer Completion](Screenshot\ 2026-06-27\ at\ 1.41.42\ PM.png)
+
+### Live Editing
+
+![Live Editing](Screenshot\ 2026-06-27\ at\ 1.40.28\ PM.png)
 
 ## Installing
 
