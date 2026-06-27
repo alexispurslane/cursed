@@ -3445,7 +3445,18 @@ function View:delete_char(n)
             return n
         end
         local origin = snap_origin(c)
-        return self:advance_grapheme(c.line, origin, n) - origin
+        local eff = self:advance_grapheme(c.line, origin, n) - origin
+        if eff == 0 then
+            -- We're sitting on a line boundary in the direction of
+            -- travel (backspace at col 0, forward-delete at end of
+            -- line): advance_grapheme clamps to the line and yields 0,
+            -- which would turn this into a no-op and break cross-line
+            -- deletion (joining with the neighbor line). Fall back to
+            -- plain byte-count semantics so _delete_char_impl walks
+            -- across the newline via join_lines.
+            return n
+        end
+        return eff
     end
     -- Aggregate will_join across cursors: any structural delete breaks
     -- the group. Preserves single-cursor semantics exactly (N=1 →
