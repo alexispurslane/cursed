@@ -26,19 +26,18 @@ local log = require("cursed.log")
 
 local Config = require("cursed.config")
 
---- Build the base keybind trie and extract the __printable handler.
---- Merges default keybindings with global overrides from init.lua.
----@param config Config loaded user configuration
----@return table trie
----@return function|nil printable_fn
----@return table<string, string|function> base_keybindings flat chord→action map
----@return table<string, string> chord_for_command reverse map command_name→formatted chord
-local function build_keybind_trie(config)
+--- Prime the editor's base keybindings from the defaults table.
+--- Separates the __printable handler and stores the base bindings,
+--- then rebuilds the base trie. Called BEFORE Config.load() so that
+--- init.lua (and any `editor:global_set_key` it issues) operates on a
+--- fully-initialized editor and is applied for real rather than
+--- clobbered by a later trie build. The returned `config.keybindings`
+--- table is applied on top via `editor:global_set_key` after load.
+---@param editor Editor the editor to prime
+local function prime_default_keybindings(editor)
+    local defaults = require("cursed.default_keybindings")
     local bindings = {}
     local printable_fn ---@type function?
-    local defaults = require("cursed.default_keybindings")
-
-    -- Merge defaults
     for chord, func in pairs(defaults) do
         if chord == "__printable" then
             ---@cast func function
@@ -47,23 +46,11 @@ local function build_keybind_trie(config)
             bindings[chord] = func
         end
     end
-
-    -- Merge global keybinding overrides from init.lua
-    for chord, action in pairs(config.keybindings) do
-        if chord == "__printable" then
-            if type(action) == "function" then
-                printable_fn = action
-            end
-        else
-            bindings[chord] = action
-        end
-    end
-
-    -- Build the reverse command_name→chord map from the FINAL merged
-    -- bindings so displayed shortcuts reflect base + global overrides.
-    local chord_for_command = keybind.build_chord_for_command(bindings)
-
-    return keybind.Trie.build(bindings), printable_fn, bindings, chord_for_command
+    editor._base_keybindings = bindings
+    editor._printable_fn = printable_fn
+    editor:rebuild_base_trie()
+    editor._active_trie = editor._base_trie
+    editor._chord_for_command = keybind.build_chord_for_command(bindings)
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -647,14 +634,18 @@ local function main()
     log.info("main", "initial view created")
 
     log.info("main", "loading config and keybindings")
+    -- Prime default keybindings on the editor BEFORE Config.load() so
+    -- init.lua (and any `editor:global_set_key` it issues) runs against
+    -- a fully-initialized editor and is applied for real rather than
+    -- clobbered by a later trie build.
+    prime_default_keybindings(editor)
     local config = Config.load()
-    local trie, printable_fn, base_keybindings, chord_for_command = build_keybind_trie(config)
-    editor._base_trie = trie
-    editor._active_trie = trie
-    editor._base_keybindings = base_keybindings
-    editor._chord_for_command = chord_for_command
-    editor._printable_fn = printable_fn
     editor._config = config
+    -- Apply init.lua's returned `keybindings` table on top via the same
+    -- live path (`__printable` override handled there too).
+    for chord, action in pairs(config.keybindings) do
+        editor:global_set_key(chord, action)
+    end
     -- Margin: global config applied to every view at load. The initial
     -- view is added before config loads, so backfill it here; views
     -- added later (find-file, etc.) inherit via Editor:add_view.

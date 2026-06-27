@@ -17,6 +17,7 @@ local shared = require("cursed.shared")
 local find_file = require("cursed.find_file")
 local kill_ring = require("cursed.kill_ring")
 local completers = require("cursed.completers")
+local keybind = require("cursed.keybind")
 local log = require("cursed.log")
 
 --- Resolve a UI chrome color from the active colorscheme.
@@ -327,7 +328,6 @@ end
 --- Rebuild the active keybind trie by merging the active view's mode
 --- keybindings on top of the base trie. Called when the mode changes.
 function Editor:rebuild_active_trie()
-    local keybind = require("cursed.keybind")
     local view = self:focused_view()
     if view and #view._major_modes > 0 then
         -- Merge: start from a copy of base keybindings, then overlay each mode in order
@@ -351,6 +351,99 @@ function Editor:rebuild_active_trie()
         self._chord_for_command = keybind.build_chord_for_command(self._base_keybindings)
     end
     self._trie_changed = true
+end
+
+----------------------------------------------------------------------------------------------------
+-- Keybinding convenience API (#5).
+--
+-- Emacs-style ergonomic wrappers over the trie-rebuild path. A keymap
+-- is already just a Lua table (chord → command-name|function); these
+-- methods make binding LIVE — they mutate the base/mode keybinding
+-- tables and rebuild the tries immediately, so they work from M-:,
+-- `editor.event_system` listeners, extension packages, AND init.lua
+-- (the default keybindings are primed on the editor BEFORE init.lua
+-- runs, so `editor:global_set_key` in init.lua is applied for real,
+-- not clobbered by a later trie build).
+----------------------------------------------------------------------------------------------------
+
+--- Rebuild the base keybind trie (no mode overlays) from
+--- `_base_keybindings`. Called after `global_set_key` mutates the base
+--- bindings. (`rebuild_active_trie` rebuilds `_active_trie` from base +
+--- active modes; in the no-mode branch it aliases `_base_trie`, so this
+--- must stay fresh.)
+function Editor:rebuild_base_trie()
+    self._base_trie = keybind.Trie.build(self._base_keybindings)
+end
+
+--- Bind a key chord globally (Emacs `global-set-key`). `action` is either
+--- a command name (string, resolved from the commands table at dispatch
+--- time) or a `function(view, editor, ...)`. The chord is validated
+--- eagerly so a typo surfaces now, not on first press. Rebuilds the
+--- base + active tries immediately.
+---@param chord string chord specifier ("ctrl-x ctrl-s", "alt-:", "f5", …)
+---@param action string|function command name or function
+function Editor:global_set_key(chord, action)
+    if self._base_keybindings == nil then
+        error(
+            "editor:global_set_key: keybindings not yet initialized (call after startup prime)",
+            2
+        )
+    end
+    if chord == "__printable" then
+        if type(action) == "function" then
+            self._printable_fn = action
+        end
+        return
+    end
+    local tokens, err = keybind.parse_chord(chord)
+    if not tokens then
+        error(("editor:global_set_key: bad chord %q: %s"):format(chord, err or "?"), 2)
+    end
+    self._base_keybindings[chord] = action
+    self:rebuild_base_trie()
+    self:rebuild_active_trie()
+end
+
+--- Bind a key chord in a specific major mode (Emacs `define-key`).
+--- `mode` is either a MajorMode object (e.g. `modes.lua`) or a mode name
+--- string (resolved against `config.modes`). Mutates the mode template's
+--- `keybindings` (instances delegate via `__index` so active views pick
+--- it up), invalidates the mode's cached trie, and rebuilds the active
+--- trie. No-op effect on views whose active mode stack doesn't include
+--- `mode` until the mode is next activated.
+---@param mode MajorMode|string the mode whose keymap to extend
+---@param chord string chord specifier
+---@param action string|function command name or function
+function Editor:define_key(mode, chord, action)
+    local mode_obj = mode
+    if type(mode) == "string" then
+        mode_obj = self._config and self._config.modes[mode]
+        if mode_obj == nil then
+            error(("editor:define_key: unknown mode %q"):format(mode), 2)
+        end
+    end
+    local tokens, err = keybind.parse_chord(chord)
+    if not tokens then
+        error(("editor:define_key: bad chord %q: %s"):format(chord, err or "?"), 2)
+    end
+    mode_obj.keybindings = mode_obj.keybindings or {}
+    mode_obj.keybindings[chord] = action
+    mode_obj._trie = nil -- invalidate cached trie; rebuilt on next :trie()
+    self:rebuild_active_trie()
+end
+
+--- Register a named command (Emacs `defun`-equivalent for the command
+--- table). After registration the function is invocable via M-x by name
+--- (spaces allowed, case-insensitive) and bindable by string in
+--- `global_set_key` / `define_key`. Names normalize the same way
+--- `commands.lookup` does (spaces → underscores, lowercased) so M-x
+--- round-trips. The command also appears in M-x completion.
+---@param name string command name (snake_case or with spaces)
+---@param fn function(view, editor, ...) command implementation
+function Editor:define_command(name, fn)
+    local commands = require("cursed.commands")
+    local key = name:gsub(" ", "_"):lower()
+    commands[key] = fn
 end
 
 --- Schedule a function to run incrementally on the main thread.
