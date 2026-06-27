@@ -35,6 +35,7 @@ local log = require("cursed.log")
 ---@field visual_col integer|nil remembered visual column for vertical nav when wrapping; was last_visual_col
 ---@field anchor_line integer|nil 0-based line index of selection anchor (was mark_line); nil = no selection
 ---@field anchor_col integer|nil 0-based byte offset of selection anchor (was mark_col)
+---@field anchor_transient boolean|nil true when the anchor was initiated by a shift+motion (shift-select); a plain motion drops it. nil/false = a sticky mark (set via set_mark / C-space) that survives plain motions.
 ---@field yank_line integer|nil start line of last yank (for yank-pop); was _yank_line
 ---@field yank_col integer|nil start col of last yank (for yank-pop); was _yank_col
 ---@field shadow_undo integer|nil undo.count at anchor creation time (for undo-in-selection)
@@ -129,6 +130,7 @@ function View.new(buffer)
         visual_col = nil,
         anchor_line = nil,
         anchor_col = nil,
+        anchor_transient = nil,
         yank_line = nil,
         yank_col = nil,
         shadow_undo = nil,
@@ -247,6 +249,7 @@ function View:make_cursor(line, col)
         visual_col = nil,
         anchor_line = nil,
         anchor_col = nil,
+        anchor_transient = nil,
         yank_line = nil,
         yank_col = nil,
         shadow_undo = nil,
@@ -391,6 +394,22 @@ local function close_edit_for_motion(view)
         view.buffer:end_edit()
     end
     for _, c in ipairs(view.cursors) do
+        -- A plain motion ends an active shift-select gesture: drop any
+        -- TRANSIENT anchor so the cursor stops extending the selection.
+        -- Skipped when `editor._extend` is set (a `*_select` command is
+        -- running its motion — the anchor it just placed must survive
+        -- and extend). A STICKY anchor (set_mark / C-space) is always
+        -- kept so the Emacs C-space -> move -> kill flow still works.
+        -- This guarded drop is the ONLY selection logic a plain motion
+        -- performs — it never initializes or extends.
+        local editor = view.editor
+        if not (editor and editor._extend) and c.anchor_line ~= nil and c.anchor_transient then
+            c.anchor_line = nil
+            c.anchor_col = nil
+            c.anchor_transient = nil
+            c.shadow_undo = nil
+            c.shadow_redo = nil
+        end
         c.yank_line = nil
         c.yank_col = nil
     end
@@ -441,6 +460,41 @@ local function delete_region_end(buf, line, col, n)
         end
     end
     return cl, cc
+end
+
+--- Begin a shift-select motion: for every cursor, decide whether to
+--- EXTEND an existing selection or RESET the anchor to the cursor:
+---   • no anchor           → drop a TRANSIENT one at the cursor (start)
+---   • TRANSIENT anchor    → RESET it to the cursor (each shifted motion
+---                           selects only its own range — no cross-motion
+---                           extension between shift gestures)
+---   • STICKY anchor       → KEEP it (a manually-set mark / C-space is
+---                           extended by the shift+motion, so the user's
+---                           explicit mark is honored as the selection
+---                           origin and the move grows it)
+--- `_extend` (set true by the calling command) then suppresses the
+--- transient-anchor drop in close_edit_for_motion for this one gesture
+--- so a just-set/re-set anchor survives the move. A plain motion (no
+--- _extend) drops a transient selection (but keeps a sticky mark).
+--- Called ONLY by the `*_select` commands; plain motions never EXTEND
+--- or INIT a selection (they only DROP a transient one).
+function View:_begin_shift_select()
+    local u = tonumber(self.buffer._ptr.undo.count)
+    local r = tonumber(self.buffer._ptr.redo.count)
+    for _, c in ipairs(self.cursors) do
+        -- Keep a STICKY (manually-set) anchor so the shift+motion extends
+        -- the existing selection from it. Otherwise (no anchor, or a
+        -- transient one from a prior shift gesture) (re-)anchor at the
+        -- cursor so this motion selects exactly [cursor, landing].
+        local extend = c.anchor_line ~= nil and not c.anchor_transient
+        if not extend then
+            c.anchor_line = c.line
+            c.anchor_col = c.col
+            c.anchor_transient = true
+            c.shadow_undo = u
+            c.shadow_redo = r
+        end
+    end
 end
 
 --- Iterate a motion over every cursor.
@@ -3112,6 +3166,9 @@ function View:set_mark()
     local c = self:p()
     c.anchor_line = c.line
     c.anchor_col = c.col
+    -- C-space marks are sticky: they survive plain motions (which only
+    -- drop a TRANSIENT shift-selection).
+    c.anchor_transient = false
     -- Snapshot undo/redo counts for undo-in-selection
     c.shadow_undo = tonumber(self.buffer._ptr.undo.count)
     c.shadow_redo = tonumber(self.buffer._ptr.redo.count)
@@ -3124,6 +3181,7 @@ function View:set_mark_all()
     for _, c in ipairs(self.cursors) do
         c.anchor_line = c.line
         c.anchor_col = c.col
+        c.anchor_transient = false
         c.shadow_undo = u
         c.shadow_redo = r
     end
@@ -3134,6 +3192,7 @@ function View:unset_mark_all()
     for _, c in ipairs(self.cursors) do
         c.anchor_line = nil
         c.anchor_col = nil
+        c.anchor_transient = nil
         c.shadow_undo = nil
         c.shadow_redo = nil
     end
@@ -3143,6 +3202,7 @@ function View:unset_mark()
     local c = self:p()
     c.anchor_line = nil
     c.anchor_col = nil
+    c.anchor_transient = nil
     c.shadow_undo = nil
     c.shadow_redo = nil
 end

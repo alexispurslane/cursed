@@ -298,6 +298,11 @@ end
 local function process_key(editor, view, trie, key_state, key_node, token, ev, printable_fn)
     local modified = keybind.is_modified(ev)
     local in_chord = #key_state > 0
+    -- `_extend` is set true by a `*_select` command before it runs its
+    -- motion, so the motion's transient-anchor drop is suppressed for
+    -- that one gesture. Reset every keypress so it can't leak into a
+    -- later plain motion (which must drop a shift-selection).
+    editor._extend = false
 
     -- Determine if this is a printable character
     local is_printable = false

@@ -44,6 +44,19 @@ return {
     ["ctrl-n"] = "next_line",
     ["down"] = "arrow_down",
 
+    -- Shift-select (move-and-select): arrow / home / end keys are the
+    -- only motions terminals carry a distinct Shift modifier for reliably
+    -- (named keys arrive as full CSI sequences with modifier params).
+    -- ctrl-b/f/p/n shift folds into the control byte, so their select
+    -- variants are defined (commands.forward_char_select, …) but not
+    -- bound — bind them in init.lua on a CSI-u / kitty-keyboard terminal.
+    ["shift-left"] = "backward_char_select",
+    ["shift-right"] = "forward_char_select",
+    ["shift-up"] = "arrow_up_select",
+    ["shift-down"] = "arrow_down_select",
+    ["shift-home"] = "move_line_start_select",
+    ["shift-end"] = "move_line_end_select",
+
     -- Page navigation
     ["alt-v"] = "scroll_down",
     ["pageup"] = "scroll_down",
@@ -83,9 +96,24 @@ return {
     ["alt-s"] = "forward_subsentence",
     ["alt-S"] = "backward_subsentence",
 
-    -- Bigword (whitespace-delimited words: M-F / M-B)
-    ["alt-F"] = "forward_bigword",
-    ["alt-B"] = "backward_bigword",
+    -- Bigword (whitespace-delimited words). Formerly on alt-F/alt-B,
+    -- but those capital chords are now word-select (shift+alt+f/b):
+    -- for a letter key shift IS capitalization, so alt-F can't mean
+    -- both. Bigword moves under the ctrl-x M-f / ctrl-x M-b prefix to
+    -- keep the M-f word-family mnemonic while freeing the capitals.
+    ["ctrl-x alt-f"] = "forward_bigword",
+    ["ctrl-x alt-b"] = "backward_bigword",
+
+    -- Shift-select for alt-letter motions. For a letter key shift IS
+    -- the capitalization, so `shift+alt+e` arrives as `alt-E` — bindable
+    -- only to capital chords that are otherwise free. M-E / M-A were
+    -- unused (sentence select); M-F / M-B were bigword, now freed above
+    -- and bound to word select. (Subsentence alt-S stays backward_
+    -- subsentence — no free capital chord for it.)
+    ["alt-E"] = "forward_sentence_select",
+    ["alt-A"] = "backward_sentence_select",
+    ["alt-F"] = "forward_word_select",
+    ["alt-B"] = "backward_word_select",
 
     -- Paragraphs (Emacs: M-{ forward, M-} backward; note swapped here
     -- because M-{ and M-} require shift which lands on {[} on most layouts)

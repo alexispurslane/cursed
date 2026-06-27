@@ -338,6 +338,7 @@ end
 ---@field overlays OverlayManager screen-space overlay layer (file-anchored + floating)
 ---@field modeline_segments table[] ordered modeline segment specs (bg/format/fill/fg)
 ---@field _last_command string|nil name of the most recently dispatched command (Emacs `last-command`)
+---@field _extend boolean true while a `*_select` command is running its motion, so the motion's transient-anchor drop (close_edit_for_motion) is suppressed and the shift-selection extends instead of being cleared
 ---@field _command_before_this string|nil the command before the most recent one (Emacs `command-before-this`)
 ---@field _last_complex_command { name: string, universal_args: table }|nil most recent command invoked with universal args (for repeat-complex-command)
 ---@field _exit_code integer exit code surfaced by async tasks
@@ -404,6 +405,7 @@ function Editor.new(term)
         _config = nil,
         _blink_on = true, -- caret visible (drawn) this phase
         _last_command = nil, -- most recent dispatched command name
+        _extend = false, -- true while a `*_select` command runs (suppressed transient-anchor drop)
         _command_before_this = nil, -- command before the most recent
         _last_complex_command = nil, -- most recent command-with-args, for repeat-complex-command
         _damage_start_row = 0, -- full damage on first render

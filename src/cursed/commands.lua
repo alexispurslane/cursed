@@ -93,6 +93,175 @@ commands.next_line = function(view, _editor, ...)
     view:move_line(n)
 end
 
+----------------------------------------------------------------------------------------------------
+-- Shift-select motion variants.
+--
+-- Each sets `editor._extend = true` and calls `view:_begin_shift_select()`
+-- (which, for every cursor with no anchor, drops a TRANSIENT one at the
+-- cursor — leaving an existing anchor untouched so the move EXTENDS it),
+-- then runs the corresponding plain motion. `_extend` suppresses the
+-- transient-anchor drop in close_edit_for_motion for this one gesture.
+-- A plain motion (no _extend) DROPS a transient shift-selection (but
+-- keeps a sticky C-space mark) so the cursor doesn't drag the far end.
+--
+-- Bound by default to the shifted chords terminals deliver
+-- faithfully: arrow / home / end keys (named keys carry a real Shift
+-- bit, distinct from their unshifted form). For alt-letter motions
+-- (word M-f/M-b, sentence M-e/M-a) shift EQUALS capitalization, so
+-- `shift+alt+e` arrives as `alt-E` — bindable only where that capital
+-- chord is free (alt-E/alt-A are; alt-F/alt-B collide with bigword).
+----------------------------------------------------------------------------------------------------
+
+commands.forward_char_select = function(view, editor, ...)
+    local n = repeat_count(...)
+    editor._extend = true
+    view:_begin_shift_select()
+    view:move_char(n)
+end
+
+commands.backward_char_select = function(view, editor, ...)
+    local n = repeat_count(...)
+    editor._extend = true
+    view:_begin_shift_select()
+    view:move_char(-n)
+end
+
+commands.next_line_select = function(view, editor, ...)
+    local n = repeat_count(...)
+    editor._extend = true
+    view:_begin_shift_select()
+    view:move_line(n)
+end
+
+commands.previous_line_select = function(view, editor, ...)
+    local n = repeat_count(...)
+    editor._extend = true
+    view:_begin_shift_select()
+    view:move_line(-n)
+end
+
+commands.arrow_up_select = function(view, editor)
+    local mb = editor.minibuffer
+    if mb and mb.active and mb.completion and #mb._completions > 0 then
+        mb:comp_up()
+        return
+    end
+    commands.previous_line_select(view, editor)
+end
+
+commands.arrow_down_select = function(view, editor)
+    local mb = editor.minibuffer
+    if mb and mb.active and mb.completion and #mb._completions > 0 then
+        mb:comp_down()
+        return
+    end
+    commands.next_line_select(view, editor)
+end
+
+commands.move_line_start_select = function(view, editor, ...)
+    local flag = ...
+    editor._extend = true
+    view:_begin_shift_select()
+    if flag == false then
+        view:move_line_end()
+    else
+        view:move_line_start()
+    end
+end
+
+commands.move_line_end_select = function(view, editor, ...)
+    local flag = ...
+    editor._extend = true
+    view:_begin_shift_select()
+    if flag == false then
+        view:move_line_start()
+    else
+        view:move_line_end()
+    end
+end
+
+commands.forward_word_select = function(view, editor, ...)
+    local n = repeat_count(...)
+    editor._extend = true
+    view:_begin_shift_select()
+    view:move_word(n, "word")
+end
+
+commands.backward_word_select = function(view, editor, ...)
+    local n = repeat_count(...)
+    editor._extend = true
+    view:_begin_shift_select()
+    view:move_word(-n, "word")
+end
+
+commands.forward_bigword_select = function(view, editor, ...)
+    local n = repeat_count(...)
+    editor._extend = true
+    view:_begin_shift_select()
+    view:move_word(n, "bigword")
+end
+
+commands.backward_bigword_select = function(view, editor, ...)
+    local n = repeat_count(...)
+    editor._extend = true
+    view:_begin_shift_select()
+    view:move_word(-n, "bigword")
+end
+
+commands.forward_sentence_select = function(view, editor, ...)
+    editor._extend = true
+    view:_begin_shift_select()
+    return view:move_word(math.abs(repeat_count(...)), "sentence")
+end
+
+commands.backward_sentence_select = function(view, editor, ...)
+    editor._extend = true
+    view:_begin_shift_select()
+    return view:move_word(-math.abs(repeat_count(...)), "sentence")
+end
+
+commands.forward_subsentence_select = function(view, editor, ...)
+    editor._extend = true
+    view:_begin_shift_select()
+    return view:move_word(math.abs(repeat_count(...)), "subsentence")
+end
+
+commands.backward_subsentence_select = function(view, editor, ...)
+    editor._extend = true
+    view:_begin_shift_select()
+    return view:move_word(-math.abs(repeat_count(...)), "subsentence")
+end
+
+commands.beginning_of_buffer_select = function(view, editor, ...)
+    local flag = ...
+    editor._extend = true
+    view:_begin_shift_select()
+    if flag == false then
+        view:p().line = view:line_count() - 1
+        view:p().col = view:content_len(view:p().line)
+        view:_set_goal_col(view:p().col)
+    else
+        view:p().line = 0
+        view:p().col = 0
+        view:_set_goal_col(0)
+    end
+end
+
+commands.end_of_buffer_select = function(view, editor, ...)
+    local flag = ...
+    editor._extend = true
+    view:_begin_shift_select()
+    if flag == false then
+        view:p().line = 0
+        view:p().col = 0
+        view:_set_goal_col(0)
+    else
+        view:p().line = view:line_count() - 1
+        view:p().col = view:content_len(view:p().line)
+        view:_set_goal_col(view:p().col)
+    end
+end
+
 commands.scroll_down = function(view, editor, ...)
     local n = repeat_count(...)
     local page_size = editor.term:height() - editor:footer_rows()
