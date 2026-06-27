@@ -19,6 +19,7 @@ local Buffer = require("cursed.buffer").Buffer
 local ColorScheme = require("cursed.colorscheme")
 local find_file = require("cursed.find_file")
 local log = require("cursed.log")
+local profile = require("cursed.profile")
 
 ----------------------------------------------------------------------------------------------------
 -- Keybind building (config-aware)
@@ -275,11 +276,11 @@ end
 --- ESC/Alt disambiguation timeout in milliseconds.
 local ESC_TIMEOUT_MS = 50
 
---- Wall-clock microseconds, for cursor-blink timing in the main loop.
+--- Wall-clock microseconds, for select() timeout math in the main loop.
+local main_now_tv = ffi.new("struct timeval[1]")
 local function now_us()
-    local tv = ffi.new("struct timeval[1]")
-    pffi.C.gettimeofday(tv, nil)
-    return tonumber(tv[0].tv_sec) * 1000000 + tonumber(tv[0].tv_usec)
+    pffi.C.gettimeofday(main_now_tv, nil)
+    return tonumber(main_now_tv[0].tv_sec) * 1000000 + tonumber(main_now_tv[0].tv_usec)
 end
 
 --- Process a key event token through the chord trie and editing logic.
@@ -948,6 +949,7 @@ local function main()
 
     -- Main loop: select(ttyfd, kq_fd, wake_pipe_r), then dispatch
     while ss:running() do
+        local loop_t0 = profile.now_us()
         -- Zero and rebuild fd_set each iteration (select mutates it)
         ffi.fill(readfds, 128, 0)
         pffi.fd_set_set(readfds, ttyfd)
@@ -1005,8 +1007,10 @@ local function main()
         -- and the kq event being consumed, and tolerates any future
         -- change to the wake registration ordering. ss:pop is a no-op on
         -- an empty ring, so this is cheap.
+        local drain_t0 = profile.now_us()
         drain_inbox(editor, ss)
         drain_hl_inbox(editor, ss)
+        profile.span("main", "drain_inbox", drain_t0)
 
         -- File-load watchdog: re-check pending loads after the inbox
         -- drain above (a MSG_FILE_LOADED/MSG_FILE_ERROR may have just
@@ -1040,6 +1044,8 @@ local function main()
         -- leak into the main view.
         local mb_was_active = editor.minibuffer and editor.minibuffer.active
         local had_input = false
+        local key_count = 0
+        local keys_t0 = profile.now_us()
         repeat
             mb_was_active = editor.minibuffer and editor.minibuffer.active
             local ev = term:peek_event(0)
@@ -1047,6 +1053,7 @@ local function main()
                 break
             end
             had_input = true
+            key_count = key_count + 1
 
             local view_cur = editor:current_view()
             local focused_view = editor:focused_view()
@@ -1175,7 +1182,8 @@ local function main()
                     local function mouse_to_pos()
                         local w = term:width()
                         local _, text_x = view_cur:text_geometry(w)
-                        local cli, sub_row = view_cur:screen_row_to_line(view_cur.scroll_y + my)
+                        ---@cast my integer
+                        local cli, sub_row = view_cur:viewport_line_at_row(my)
                         local line = math.min(cli, view_cur:line_count() - 1)
                         local col
                         if mx >= text_x then
@@ -1269,6 +1277,7 @@ local function main()
             end
             ::continue_drain::
         until editor._quit_requested or #key_state == 0
+        profile.span("main", "process_keys", keys_t0, { count = key_count })
         -- When in a chord (prefix matched), stop draining — we need
         -- select() to wait for the next key with a timeout, in case
         -- it hasn't arrived on the tty yet. When quit was requested
@@ -1293,14 +1302,21 @@ local function main()
         if had_input then
             editor:reset_blink()
         end
+        local tasks_t0 = profile.now_us()
         editor:tick_background_tasks()
+        profile.span("main", "tick_background_tasks", tasks_t0)
 
         -- Update view and render only after processing input/wake
         local cur_view = editor:current_view()
         if cur_view then
+            local scroll_t0 = profile.now_us()
             cur_view:scroll_to_cursor(term:height() - (editor:footer_rows() - 1))
+            profile.span("main", "scroll_to_cursor", scroll_t0)
         end
+        local render_t0 = profile.now_us()
         editor:render()
+        profile.span("main", "render", render_t0)
+        profile.span("main", "loop_iter", loop_t0)
     end
 
     editor.event_system:emit("editor_close")

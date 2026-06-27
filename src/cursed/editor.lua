@@ -20,6 +20,7 @@ local completers = require("cursed.completers")
 local keybind = require("cursed.keybind")
 local OverlayManager = require("cursed.overlay")
 local log = require("cursed.log")
+local profile = require("cursed.profile")
 
 --- Resolve a UI chrome color from the active colorscheme.
 --- UI concepts (line_number, modeline_fg, cursor_bg, …) live in the
@@ -346,7 +347,8 @@ end
 ---@field _last_h integer|nil terminal height observed at last render
 ---@field _last_footer_rows integer|nil footer rows observed at last render
 ---@field _last_palette boolean|nil palette (M-x) active at last render
----@field _last_scroll_y integer|nil scroll offset of current view at last render
+---@field _last_scroll_li integer|nil anchor line of current view at last render
+---@field _last_scroll_sub_row integer|nil anchor sub-row of current view at last render
 ---@field _last_line_count integer|nil line count of current view at last render
 local Editor = {}
 Editor.__index = Editor
@@ -409,7 +411,8 @@ function Editor.new(term)
         _last_h = nil,
         _last_footer_rows = nil,
         _last_palette = nil,
-        _last_scroll_y = nil,
+        _last_scroll_li = nil,
+        _last_scroll_sub_row = nil,
         _last_line_count = nil,
     }, Editor)
     editor.event_system = EventSystem.new(editor)
@@ -439,6 +442,18 @@ function Editor:request_full_damage()
     self._damage_start_row = 0
 end
 
+--- Compute the screen row of a buffer position relative to the current
+-- viewport. Helper for `_min_cursor_screen_row`; kept at module level
+-- so it JIT-compiles instead of allocating a closure per render.
+---@param view View
+---@param line integer
+---@param col integer
+---@return integer row
+local function cursor_screen_row(view, line, col)
+    local sub_row, _ = view:wrap_sub_position(line, col)
+    return view:viewport_row_for_line(line, sub_row)
+end
+
 --- Compute the topmost viewport row that may contain visual state
 -- (cursor, selection anchor, or pending drop). Rendering from this row
 -- downward covers cursor moves, selection changes, blink toggles, and
@@ -446,27 +461,29 @@ end
 -- so the old cursor/selection cells are also erased.
 ---@return integer viewport row (0-based); 0 if derrived value is negative
 function Editor:_min_cursor_screen_row()
+    local mcsr_t0 = profile.now_us()
     local view = self:current_view()
     if view == nil then
         return 0
     end
     local min_row ---@type integer|nil
-    local function consider(line, col)
-        local sub_row = select(1, view:wrap_sub_position(line, col))
-        local doc_row = view:line_to_screen_row(line) + sub_row
-        local row = doc_row - view.scroll_y
+    for _, c in ipairs(view.cursors) do
+        local row = cursor_screen_row(view, c.line, c.col)
         if min_row == nil or row < min_row then
             min_row = row
         end
-    end
-    for _, c in ipairs(view.cursors) do
-        consider(c.line, c.col)
         if c.anchor_line then
-            consider(c.anchor_line, c.anchor_col)
+            row = cursor_screen_row(view, c.anchor_line, c.anchor_col)
+            if row < min_row then
+                min_row = row
+            end
         end
     end
     for _, c in ipairs(view.pending_cursors) do
-        consider(c.line, c.col)
+        local row = cursor_screen_row(view, c.line, c.col)
+        if min_row == nil or row < min_row then
+            min_row = row
+        end
     end
     if min_row == nil then
         return 0
@@ -474,6 +491,7 @@ function Editor:_min_cursor_screen_row()
     if min_row < 0 then
         return 0
     end
+    profile.span("editor", "_min_cursor_screen_row", mcsr_t0)
     return min_row
 end
 
@@ -489,10 +507,10 @@ end
 -- and only blinks after a half-period of idleness.
 local BLINK_HALF_US = 530000
 
+local now_tv = ffi.new("struct timeval[1]")
 local function now_us()
-    local tv = ffi.new("struct timeval[1]")
-    pffi.C.gettimeofday(tv, nil)
-    return tonumber(tv[0].tv_sec) * 1000000 + tonumber(tv[0].tv_usec)
+    pffi.C.gettimeofday(now_tv, nil)
+    return tonumber(now_tv[0].tv_sec) * 1000000 + tonumber(now_tv[0].tv_usec)
 end
 
 --- Schedule the next cursor-blink toggle. The task inverts `_blink_on`
@@ -1945,6 +1963,7 @@ end
 
 --- Render the entire viewport.
 function Editor:render()
+    local render_t0 = profile.now_us()
     local term = self.term
     local w = term:width()
     local h = term:height()
@@ -2006,7 +2025,13 @@ function Editor:render()
             or footer_rows ~= self._last_footer_rows
             or palette_active ~= self._last_palette
             or line_count_changed
-            or (view and view.scroll_y ~= self._last_scroll_y)
+            or (
+                view
+                and (
+                    view.scroll_li ~= self._last_scroll_li
+                    or view.scroll_sub_row ~= self._last_scroll_sub_row
+                )
+            )
         )
     then
         damage_start_row = 0
@@ -2070,34 +2095,51 @@ function Editor:render()
     --- of cells for us.
     --- row_bg: background to paint text-region cells with, so the
     --- active-line highlight carries through syntax spans.
-    local function paint_run(view, li, row, text_x, line_text, run, row_bg)
+    local t_hlseg, t_termprint = 0, 0
+    local function paint_run(view, li, row, text_x, line_text, run, row_bg, line_segs)
         local chunk_start = run.byte_start - 1
         local chunk_end = run.byte_end
-        local segs = view:highlight_segments(li, chunk_start, chunk_end)
         local dfg = ui("default_fg")
         local dbg = row_bg or ui("default_bg")
         dfg, dbg = focus_dim(dfg, dbg)
         local chunk = line_text:sub(run.byte_start, run.byte_end)
         local x = text_x + run.col
-        if segs == nil or #segs == 0 then
-            term:print(x, row, chunk, dfg, dbg)
+        local tp = function(...)
+            local tp0 = profile.now_us()
+            term:print(...)
+            t_termprint = t_termprint + (profile.now_us() - tp0)
+        end
+        if line_segs == nil or #line_segs == 0 then
+            tp(x, row, chunk, dfg, dbg)
             return
         end
         local painted = 0 -- byte offset within chunk already painted
-        for _, s in ipairs(segs) do
-            if s.cs > painted then
-                term:print(x, row, chunk:sub(painted + 1, s.cs), dfg, dbg)
+        for _, s in ipairs(line_segs) do
+            -- s.cs/s.ce are line-relative bytes (0-based, [start, end)).
+            -- Filter to this run's [chunk_start, chunk_end] and translate
+            -- to run-relative offsets.
+            if s.ce > chunk_start and s.cs < chunk_end then
+                local cs = math.max(s.cs, chunk_start) - chunk_start
+                local ce = math.min(s.ce, chunk_end) - chunk_start
+                if cs > painted then
+                    tp(x, row, chunk:sub(painted + 1, cs), dfg, dbg)
+                end
+                if ce > cs then
+                    local seg_fg = focus_dim(s.fg, dbg)
+                    tp(x, row, chunk:sub(cs + 1, ce), seg_fg, dbg)
+                end
+                if ce > painted then
+                    painted = ce
+                end
             end
-            if s.ce > s.cs then
-                local seg_fg = focus_dim(s.fg, dbg)
-                term:print(x, row, chunk:sub(s.cs + 1, s.ce), seg_fg, dbg)
-            end
-            if s.ce > painted then
-                painted = s.ce
+            -- segs are pre-sorted by start byte, so once we're past
+            -- the chunk, we can stop early.
+            if s.cs >= chunk_end then
+                break
             end
         end
         if painted < #chunk then
-            term:print(x, row, chunk:sub(painted + 1), dfg, dbg)
+            tp(x, row, chunk:sub(painted + 1), dfg, dbg)
         end
     end
 
@@ -2259,13 +2301,23 @@ function Editor:render()
     -- Footer rows: modeline + optional completions row + minibuffer/eval
     local has_completions = mb and mb.active and mb.completion and #mb._completions > 0
 
-    local function finish_damage_state()
+    --- Persist the render damage state for next frame.
+    ---@param cur_min_cursor_row integer
+    function Editor:_finish_damage_state(
+        cur_min_cursor_row,
+        w,
+        h,
+        footer_rows,
+        palette_active,
+        view
+    )
         self._last_min_cursor_row = cur_min_cursor_row
         self._last_w = w
         self._last_h = h
         self._last_footer_rows = footer_rows
         self._last_palette = palette_active
-        self._last_scroll_y = view and view.scroll_y or nil
+        self._last_scroll_li = view and view.scroll_li or nil
+        self._last_scroll_sub_row = view and view.scroll_sub_row or nil
         self._last_line_count = view and view.buffer:line_count() or nil
         self._damage_start_row = nil
     end
@@ -2277,7 +2329,8 @@ function Editor:render()
         fp(x, y, msg, ui("default_fg"), ui("default_bg"))
         ov:emit_render()
         ov:flush()
-        finish_damage_state()
+        self:_finish_damage_state(cur_min_cursor_row, w, h, footer_rows, palette_active, view)
+        profile.span("editor", "render_total", render_t0)
         term:present()
         return
     end
@@ -2292,7 +2345,8 @@ function Editor:render()
     local gutter_width, text_x, text_width, block_x, block_w = view:text_geometry(w)
     local avail_text = w - gutter_width
     if avail_text <= 0 then
-        finish_damage_state()
+        self:_finish_damage_state(cur_min_cursor_row, w, h, footer_rows, palette_active, view)
+        profile.span("editor", "render_total", render_t0)
         term:present()
         return
     end
@@ -2319,20 +2373,24 @@ function Editor:render()
         view:scroll_to_cursor(h - footer_rows + 1, true)
     end
 
-    -- Render visible lines (screen-row based)
-    -- Clamp scroll_y so we never start past the document
-    local total_screen = view:total_screen_rows()
-    local max_scroll = math.max(0, total_screen - (max_y + 1))
-    if view.scroll_y > max_scroll then
-        view.scroll_y = max_scroll
-    end
-
+    -- Render visible lines (line-anchored, viewport-local)
     -- Notify the highlighter of the visible viewport's byte range so its
     -- lazy dispatcher (View:_hl_tick) can queue queries for absent buckets.
+    -- vstart/vend come from a forward walk of `max_y` rows from the
+    -- anchor — O(viewport), no full wrap-cache prefix build — so opening
+    -- or jumping anywhere in a big file parses ~viewport-depth of lines.
+    local vstart_li, vend_li
     do
-        local vstart_li, _ = view:screen_row_to_line(view.scroll_y)
-        local vend_li, _ =
-            view:screen_row_to_line(math.min(view.scroll_y + max_y, math.max(total_screen - 1, 0)))
+        vstart_li = view.scroll_li or 0
+        local sub = view.scroll_sub_row or 0
+        local li = vstart_li
+        local filled = (view:wrap_rows(li) or 1) - sub
+        vend_li = li
+        while filled <= max_y and li < line_count - 1 do
+            li = li + 1
+            filled = filled + (view:wrap_rows(li) or 1)
+            vend_li = li
+        end
         local starts = view:_hl_line_starts()
         local vstart_byte = starts[vstart_li + 1] or 0
         local vend_byte = (starts[vend_li + 2] or starts[#starts] or 0)
@@ -2342,14 +2400,52 @@ function Editor:render()
         view:_hl_notify_viewport(vstart_byte, vend_byte)
     end
 
-    local row = damage_start_row
-    local li, sub_row = view:screen_row_to_line(view.scroll_y + row)
+    local rows_t0 = profile.now_us()
+    local t_strip, t_wraprows, t_subruns, t_paint, t_body = 0, 0, 0, 0, 0
+    local sub_count = 0
+    -- Seed at the anchor and walk forward `damage_start_row` rows so the
+    -- partial-rerender path starts at the right (li, sub). These walked
+    -- rows are screen rows 0..(damage_start_row-1) which are UNCHANGED by
+    -- this partial redraw and must be preserved — so drawing resumes at
+    -- screen row `walked`, NOT row 0. (Drawing at row 0 here would paint
+    -- the cursor's line at the top of the screen, making it look like the
+    -- viewport snapped the cursor to the top — the bug this fixes.)
+    local li = view.scroll_li or 0
+    local sub_row = view.scroll_sub_row or 0
+    local remaining = damage_start_row
+    while remaining > 0 and li < line_count do
+        local rows = view:wrap_rows(li) or 1
+        local avail = rows - 1 - sub_row
+        if remaining <= avail then
+            sub_row = sub_row + remaining
+            remaining = 0
+        else
+            remaining = remaining - avail - 1
+            li = li + 1
+            sub_row = 0
+        end
+    end
+    local row = damage_start_row - remaining
+    _ = vstart_li -- (kept for future diagnostics)
     while row <= max_y and li < line_count do
+        local a = profile.now_us()
         local line_text = view:_line_text_stripped(li)
+        t_strip = t_strip + (profile.now_us() - a)
         local display_text = line_text
 
         local content_len = #display_text
+        -- Resolve syntax-highlight segments ONCE per logical line
+        -- (line-relative byte ranges), then have each grapheme run
+        -- filter that single list. The old path called
+        -- highlight_segments per-run (~95 calls/row on long Rust
+        -- lines → ~4.6k calls/frame, the dominant render cost).
+        local hs_t0 = profile.now_us()
+        local line_segs = view:highlight_segments(li, 0, content_len)
+        t_hlseg = t_hlseg + (profile.now_us() - hs_t0)
+        local b = profile.now_us()
         local total_sub = view:wrap_rows(li)
+        t_wraprows = t_wraprows + (profile.now_us() - b)
+        t_wraprows = t_wraprows + (profile.now_us() - b)
         -- Indent-guide columns (text-relative, 0-based) for this line:
         -- one │ at the LAST whitespace cell of each indent level (i.e.
         -- at ts-1, 2·ts-1, …). Placing the guide on the boundary cell
@@ -2383,6 +2479,8 @@ function Editor:render()
 
         -- Render sub-rows for this logical line
         while sub_row < total_sub and row <= max_y do
+            sub_count = sub_count + 1
+            local body_t0 = profile.now_us()
             local ok, err = pcall(function()
                 -- Active-line highlight: tint the whole row (gutter→edge)
                 -- when this logical line holds the primary cursor, and
@@ -2423,7 +2521,9 @@ function Editor:render()
                 -- emit one term:print per run at text_x+run.col so wide /
                 -- combining / ZWJ-cluster glyphs advance the correct number
                 -- of terminal cells (termbox knows about wide glyphs).
+                local runs_t0 = profile.now_us()
                 local runs, row_w = view:sub_row_runs(li, sub_row)
+                t_subruns = t_subruns + (profile.now_us() - runs_t0)
                 local chunk_start -- sub-row's first byte (0-based), set below
                 local chunk_end -- sub-row's last-after byte (0-based)
                 if #runs > 0 then
@@ -2469,9 +2569,11 @@ function Editor:render()
                     end
 
                     -- Base layer: paint every grapheme run.
+                    local paint_t0 = profile.now_us()
                     for _, run in ipairs(runs) do
-                        paint_run(view, li, row, text_x, line_text, run, row_bg)
+                        paint_run(view, li, row, text_x, line_text, run, row_bg, line_segs)
                     end
+                    t_paint = t_paint + (profile.now_us() - paint_t0)
 
                     -- Selection overlay (reverse-video). Marked bytes map
                     -- to graphemically-aligned display columns via byte_to_col.
@@ -2618,6 +2720,7 @@ function Editor:render()
                     end
                 end
             end)
+            t_body = t_body + (profile.now_us() - body_t0)
             if not ok then
                 log.error(
                     "editor",
@@ -2634,6 +2737,14 @@ function Editor:render()
         li = li + 1
         sub_row = 0
     end
+    profile.report("editor", "row_strip", t_strip)
+    profile.report("editor", "row_wraprows", t_wraprows)
+    profile.report("editor", "row_subruns", t_subruns, { sub_rows = sub_count })
+    profile.report("editor", "row_paint", t_paint)
+    profile.report("editor", "row_hlseg", t_hlseg)
+    profile.report("editor", "row_termprint", t_termprint)
+    profile.report("editor", "row_body", t_body)
+    profile.span("editor", "row_loop", rows_t0)
 
     -- Cursor (only in main view when minibuffer is inactive)
     if not (mb and mb.active) then
@@ -2805,7 +2916,8 @@ function Editor:render()
 
     ov:emit_render()
     ov:flush()
-    finish_damage_state()
+    self:_finish_damage_state(cur_min_cursor_row, w, h, footer_rows, palette_active, view)
+    profile.span("editor", "render_total", render_t0)
     term:present()
 end
 

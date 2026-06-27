@@ -105,9 +105,8 @@ function OverlayManager:file_to_screen(line, col)
     if line < 0 or line >= view:line_count() then
         return nil
     end
-    local line_row = view:line_to_screen_row(line)
     local sub_row, sub_col = view:wrap_sub_position(line, col)
-    local sy = line_row + sub_row - view.scroll_y
+    local sy = view:viewport_row_for_line(line, sub_row)
     if sy < 0 or sy > g.max_y then
         return nil
     end
@@ -134,7 +133,7 @@ function OverlayManager:screen_to_file(sx, sy)
     if sy < 0 or sy > g.max_y then
         return nil
     end
-    local li, sub_row = view:screen_row_to_line(view.scroll_y + sy)
+    local li, sub_row = view:viewport_line_at_row(sy)
     local line = math.min(li, view:line_count() - 1)
     if line < 0 then
         line = 0

@@ -6,6 +6,8 @@
 
 local ffi = require("ffi")
 local utf8 = require("cursed.utf8")
+local profile = require("cursed.profile")
+local log = require("cursed.log")
 --- which return the resulting cursor position; the View owns the
 --- forwarding to each cursor.
 ---
@@ -47,7 +49,14 @@ local utf8 = require("cursed.utf8")
 ---@field editor Editor|nil back-reference for keybindings that need it
 ---@field cursors Cursor[] active cursors; cursors[1] is the primary
 ---@field pending_cursors Cursor[] positions staged by add-cursor-here before "go" promotes them
----@field scroll_y integer vertical scroll offset in screen rows
+---@field scroll_li integer 0-based logical line index at the top of the viewport (anchor)
+---@field scroll_sub_row integer 0-based sub-row within scroll_li shown at the viewport top
+---  Line-anchored scroll model: the viewport is positioned by which
+---  (line, sub_row) sits at its top, NOT by an absolute screen-row
+---  offset. This avoids building the entire wrap-cache prefix to
+---  position the viewport anywhere in the document (which made
+---  jump-to-EOF cost ~240ms on 37k-line files). All positioning is
+---  O(viewport) local walks via the _viewport_* helpers below.
 ---@field _recenter_state integer 0=middle, 1=top, 2=bottom (cycles on C-l)
 ---@field _scroll_guard_line integer|nil primary-cursor line last auto-scrolled for; nil = force next
 ---@field _scroll_guard_col integer|nil primary-cursor col last auto-scrolled for; nil = force next
@@ -60,6 +69,9 @@ local utf8 = require("cursed.utf8")
 ---@field margin integer|nil max text render width; when the window is wider, the text column (gutter + text) is centered within it
 ---@field _wrap_rows integer[]|nil cache: _wrap_rows[li+1] = number of screen rows for logical line li
 ---@field _wrap_cum integer[]|nil cache: _wrap_cum[li+1] = screen row where logical line li starts (0-based)
+---@field _wrap_built integer|nil count of lines (1-based) built into the wrap cache so far (lazy forward build)
+---@field _wrap_end integer|nil total screen rows of all built lines (start row of the first unbuilt line)
+---@field _wrap_total integer|nil cached total screen rows once the cache is fully built (nil otherwise)
 ---@field _wrap_gen integer|nil cache generation counter (undo.count + redo.count)
 ---@field _graph_cache table[]|nil cache: _graph_cache[li+1] = {byte_starts, widths, prefix, line_len} (parsed grapheme skeleton, stripped-of-newline text)
 ---@field _graph_line_text string[]|nil cache: _graph_cache's source text (line w/o trailing newline) for slice-on-boundary rendering; nil if LRU-evicted while skeleton retained
@@ -127,7 +139,8 @@ function View.new(buffer)
         editor = nil,
         cursors = { cursor },
         pending_cursors = {},
-        scroll_y = 0,
+        scroll_li = 0,
+        scroll_sub_row = 0,
         _recenter_state = 0,
         _scroll_guard_line = nil,
         _scroll_guard_col = nil,
@@ -140,6 +153,9 @@ function View.new(buffer)
         margin = nil,
         _wrap_rows = nil,
         _wrap_cum = nil,
+        _wrap_built = nil,
+        _wrap_end = nil,
+        _wrap_total = nil,
         _wrap_gen = nil,
         _graph_cache = nil,
         _graph_line_text = nil,
@@ -2002,6 +2018,25 @@ function View:_hl_install_spans(
     end
     self._hl_in_flight = nil
 
+    -- Newly-installed spans change the colors of any visible rows in the
+    -- installed bucket range. Damage tracking would otherwise skip
+    -- repainting them (cursor/viewport didn't move), leaving stale
+    -- plain-text on screen until the next keystroke. Force a full repaint
+    -- when the installed range intersects the current viewport.
+    if self.editor ~= nil then
+        local vvstart = self._hl_last_vstart
+        local vvend = self._hl_last_vend
+        if vvstart ~= nil and vvend ~= nil then
+            local a = bucket_of(vvstart)
+            local b = bucket_of(math.max(vvend - 1, vvstart))
+            if not (bucket_end <= a or bucket_start > b) then
+                self.editor:request_full_damage()
+            end
+        else
+            self.editor:request_full_damage()
+        end
+    end
+
     -- Lane responded successfully within its own async time → it's
     -- healthy. Reset the sync-wait circuit breaker so the zero-flash
     -- path re-engages (covers the case where a transient stall tripped
@@ -2255,6 +2290,9 @@ end
 function View:invalidate_wrap_cache()
     self._wrap_rows = nil
     self._wrap_cum = nil
+    self._wrap_built = nil
+    self._wrap_end = nil
+    self._wrap_total = nil
     self._graph_cache = nil
     self._graph_line_text = nil
     self._graph_gen = nil
@@ -2400,37 +2438,72 @@ function View:advance_grapheme(li, b, n)
     return utf8.advance_grapheme(bs, b, n, ll)
 end
 
---- Rebuild the wrap cache from scratch.
---- Also checks the buffer's undo+redo generation counter and
---- invalidates the cache proactively if the buffer was edited
---- since the last build (prevents stale cache between edit and render).
+--- Ensure the wrap cache exists and is not stale, WITHOUT building it
+--- forward. The cache is built lazily from line 0 by `extend_wrap_cache`
+--- as queries demand it, so opening a 37k-line file and sitting at the
+--- top parses only the ~viewport-depth of lines instead of all of them.
+--- Proactively invalidates if the buffer's undo+redo generation changed
+--- (an edit) so we never return stale cumulative offsets.
 local function ensure_wrap_cache(view)
-    -- Proactive staleness check: if buffer was edited, invalidate now
-    -- so we never return stale data to scroll_to_cursor etc.
     if view._wrap_rows and view._wrap_gen then
         local gen = tonumber(view.buffer._ptr.undo.count) + tonumber(view.buffer._ptr.redo.count)
         if gen ~= view._wrap_gen then
             view._wrap_rows = nil
             view._wrap_cum = nil
+            view._wrap_built = nil
+            view._wrap_end = nil
+            view._wrap_total = nil
         end
     end
     if view._wrap_rows then
         return
     end
-    local n = view:line_count()
-    local rows = {} -- rows[i] = screen rows for logical line (i-1), 1-based index
-    local cum = {} -- cum[i] = screen row where logical line (i-1) starts, 1-based index
-    local screen_row = 0
-    for li = 0, n - 1 do
-        local r = view:wrap_rows(li)
+    view._wrap_rows = {} -- rows[i] = screen rows for logical line (i-1)
+    view._wrap_cum = {} -- cum[i] = screen row where logical line (i-1) starts
+    view._wrap_built = 0 -- number of lines (1-based count) built so far
+    view._wrap_end = 0 -- total screen rows of all built lines (start of first unbuilt)
+    view._wrap_total = nil -- cached total once fully built
+    view._wrap_gen = tonumber(view.buffer._ptr.undo.count) + tonumber(view.buffer._ptr.redo.count)
+end
+
+--- Extend the wrap cache forward so that line index `upto_li` (0-based)
+--- is covered (i.e. build entries 1..upto_li+1). Builds incrementally
+--- from the current `_wrap_built`; each new line calls `wrap_rows(li)`
+--- (which is itself grapheme-cached). Cheap when extending by a few
+--- lines (the common viewport/scroll case); only expensive when asked
+--- to cover a near-EOF line from a cold cache (rare: goto-line / EOF
+--- clamp), and even then it's amortized permanently into the cache.
+---@param upto_li integer 0-based line index to cover
+function View:_extend_wrap_to(upto_li)
+    ensure_wrap_cache(self)
+    if upto_li < 0 then
+        return
+    end
+    local n = self:line_count()
+    if upto_li >= n then
+        upto_li = n - 1
+    end
+    local built = self._wrap_built or 0
+    local target = upto_li + 1 -- 1-based index to cover
+    if built >= target then
+        return
+    end
+    local rows = self._wrap_rows
+    local cum = self._wrap_cum
+    local screen_row = self._wrap_end or 0
+    local extend_t0 = profile.now_us()
+    for li = built, upto_li do
+        local r = self:wrap_rows(li)
         rows[li + 1] = r
         cum[li + 1] = screen_row
         screen_row = screen_row + r
     end
-    view._wrap_rows = rows
-    view._wrap_cum = cum
-    -- Record the generation we just built for
-    view._wrap_gen = tonumber(view.buffer._ptr.undo.count) + tonumber(view.buffer._ptr.redo.count)
+    self._wrap_built = upto_li + 1
+    self._wrap_end = screen_row
+    if self._wrap_built >= n then
+        self._wrap_total = screen_row
+    end
+    profile.span("view", "wrap_cache_extend", extend_t0, { from = built, to = upto_li })
 end
 
 --- Return the screen row where logical line `li` starts (0-based).
@@ -2440,7 +2513,7 @@ function View:line_to_screen_row(li)
     if not self.wrap_width or self.wrap_width <= 0 then
         return li
     end
-    ensure_wrap_cache(self)
+    self:_extend_wrap_to(li)
     return self._wrap_cum[li + 1] or 0
 end
 
@@ -2454,11 +2527,27 @@ function View:screen_row_to_line(screen_row)
     end
     ensure_wrap_cache(self)
     -- Empty document guard
-    if #self._wrap_cum == 0 then
+    if self:line_count() == 0 then
         return 0, 0
     end
-    -- Binary search in cumulative table
-    local lo, hi = 1, #self._wrap_cum
+    -- If the queried screen row is beyond what we've built, extend the
+    -- cache forward until it's covered (or we hit EOF). This is the
+    -- lazy path: scrolling down extends the cache only as far as needed.
+    -- `_wrap_end` is the start row of the first unbuilt line, i.e. the
+    -- first row NOT yet covered.
+    -- Extend by a batch (up to the next 64 lines or EOF) to amortize
+    -- the per-call overhead when scrolling far in one frame.
+    local built = self._wrap_built or 0
+    local n = self:line_count()
+    local end_row = self._wrap_end or 0
+    while built < n and screen_row >= end_row do
+        local target = math.min(built + 64, n - 1)
+        self:_extend_wrap_to(target)
+        built = self._wrap_built
+        end_row = self._wrap_end or 0
+    end
+    -- Binary search in cumulative table (the built prefix)
+    local lo, hi = 1, built
     while lo < hi do
         local mid = math.floor((lo + hi + 1) / 2)
         if self._wrap_cum[mid] <= screen_row then
@@ -2472,22 +2561,343 @@ function View:screen_row_to_line(screen_row)
     return li, sub_row
 end
 
+----------------------------------------------------------------------------------------------------
+-- Viewport-local positioning (line-anchored scroll model)
+--
+-- These helpers reason about screen positions RELATIVE to the current
+-- viewport anchor (scroll_li, scroll_sub_row). They walk only as far as
+-- the viewport needs (~text_rows lines), never building the whole
+-- wrap-cache prefix — so positioning the viewport anywhere in the file
+-- is O(viewport), not O(document). The legacy absolute helpers above
+-- (line_to_screen_row / screen_row_to_line / total_screen_rows) are kept
+-- only for the no-wrap fast path and unit tests; the render + scroll
+-- paths use these instead.
+----------------------------------------------------------------------------------------------------
+
+--- Return the row offset of a buffer position (li, sub) RELATIVE to
+--- the viewport top anchor. Walks forward from scan_li accumulating
+--- wrap_rows until li is reached; if (li,sub) is ABOVE the anchor,
+--- walks backward up to `budget` rows and returns a negative row. For
+--- positions far above the anchor (more than budget), clamps to the
+--- top (returns 0) — callers that need a precise far-above row should
+--- re-anchor first. Budget default ≫ viewport so normal above-viewport
+--- cursor positions are exact.
+---@param li integer 0-based line index
+---@param sub integer 0-based sub-row within li
+---@param budget integer? max backward rows to walk before clamping (default 10000)
+---@return integer row viewport-relative row; 0 = top of viewport
+function View:viewport_row_for_line(li, sub, budget)
+    local n = self:line_count()
+    if n == 0 or li < 0 then
+        return 0
+    end
+    local a_li = self.scroll_li or 0
+    local a_sub = self.scroll_sub_row or 0
+    if li == a_li then
+        return sub - a_sub
+    elseif li > a_li then
+        -- Forward: accumulate wrap_rows from a_li+1 .. li.
+        local row = (self:wrap_rows(a_li) or 1) - a_sub
+        for i = a_li + 1, li - 1 do
+            row = row + (self:wrap_rows(i) or 1)
+        end
+        row = row + sub
+        return row
+    else
+        -- Backward: accumulate wrap_rows from li+1 .. a_li.
+        local lim = budget or 10000
+        local row = sub - a_sub
+        local i = a_li
+        while i > li and lim > 0 do
+            i = i - 1
+            row = row - (self:wrap_rows(i) or 1)
+            lim = lim - 1
+        end
+        if i > li then
+            -- Ran out of budget: clamp to top.
+            return 0
+        end
+        return row
+    end
+end
+
+--- Set the viewport anchor so that (li, sub) sits at viewport row 0.
+--- The cheapest positioning op: O(1), no walking. Used by jumps.
+---@param li integer 0-based line index
+---@param sub integer 0-based sub-row within li
+function View:anchor_to_line(li, sub)
+    local n = self:line_count()
+    if n == 0 then
+        self.scroll_li = 0
+        self.scroll_sub_row = 0
+        return
+    end
+    if li < 0 then
+        li = 0
+    end
+    if li >= n then
+        li = n - 1
+    end
+    if sub < 0 then
+        sub = 0
+    end
+    local rows = self:wrap_rows(li) or 1
+    if sub >= rows then
+        sub = rows - 1
+    end
+    self.scroll_li = li
+    self.scroll_sub_row = sub
+end
+
+--- Inverse of viewport_row_for_line: given a row RELATIVE to the anchor
+--- (0 = top), return the (li, sub) at that row by walking forward from
+--- the anchor. Negative rows are clamped to the anchor. O(|row|).
+---@param rel_row integer viewport-relative row (0-based)
+---@return integer li 0-based line index
+---@return integer sub 0-based sub-row within li
+function View:viewport_line_at_row(rel_row)
+    local n = self:line_count()
+    if n == 0 then
+        return 0, 0
+    end
+    if rel_row <= 0 then
+        return self.scroll_li or 0, self.scroll_sub_row or 0
+    end
+    local li = self.scroll_li or 0
+    local sub = self.scroll_sub_row or 0
+    local remaining = rel_row
+    while remaining > 0 and li < n - 1 do
+        local rows = self:wrap_rows(li) or 1
+        local avail = rows - 1 - sub
+        if remaining <= avail then
+            sub = sub + remaining
+            remaining = 0
+        else
+            remaining = remaining - avail - 1
+            li = li + 1
+            sub = 0
+        end
+    end
+    return li, sub
+end
+
+--- Walk `delta` screen (sub) rows from (li, sub), independent of the
+--- viewport anchor. Used by visual-line motion (C-n/C-p) which must
+--- move the cursor by display rows regardless of where the viewport is
+--- scrolled. O(|delta|) local walk from the cursor's own line; never
+--- touches the wrap-cache prefix. Returns the destination (li, sub) and
+--- a status: "ok", "start" (clamped to document start), or "end" (EOF).
+---@param li integer 0-based starting line
+---@param sub integer 0-based starting sub-row within li
+---@param delta integer signed screen rows
+---@return integer li destination
+---@return integer sub destination
+---@return string status "ok"|"start"|"end"
+function View:walk_sub_rows(li, sub, delta)
+    local n = self:line_count()
+    if n == 0 then
+        return 0, 0, "start"
+    end
+    if delta == 0 then
+        return li, sub, "ok"
+    end
+    if delta > 0 then
+        local remaining = delta
+        while remaining > 0 and li < n - 1 do
+            local rows = self:wrap_rows(li) or 1
+            local avail = rows - 1 - sub
+            if remaining <= avail then
+                sub = sub + remaining
+                remaining = 0
+            else
+                remaining = remaining - avail - 1
+                li = li + 1
+                sub = 0
+            end
+        end
+        if li >= n - 1 then
+            local last_rows = self:wrap_rows(n - 1) or 1
+            if remaining > 0 and sub >= last_rows - 1 then
+                sub = last_rows - 1
+                return li, sub, "end"
+            end
+        end
+        return li, sub, "ok"
+    else
+        local remaining = -delta
+        while remaining > 0 and (li > 0 or sub > 0) do
+            if sub > 0 then
+                local take = math.min(sub, remaining)
+                sub = sub - take
+                remaining = remaining - take
+            else
+                li = li - 1
+                local rows = self:wrap_rows(li) or 1
+                local take = math.min(rows, remaining)
+                sub = rows - take
+                remaining = remaining - take
+            end
+        end
+        if li <= 0 and sub <= 0 and remaining > 0 then
+            return 0, 0, "start"
+        end
+        return li, sub, "ok"
+    end
+end
+
+--- `target_row` (0 = top). Walks backward from li by `target_row` rows
+--- to find the anchor line/sub. O(target_row) ≤ O(viewport). Used by
+--- "cursor near bottom / center / top" positioning after a jump.
+---@param li integer 0-based line index of the position to place
+---@param sub integer 0-based sub-row within li
+---@param target_row integer desired viewport row (0-based) for (li,sub)
+function View:anchor_so_line_at_row(li, sub, target_row)
+    if target_row <= 0 then
+        self:anchor_to_line(li, sub)
+        return
+    end
+    local n = self:line_count()
+    if n == 0 then
+        self.scroll_li = 0
+        self.scroll_sub_row = 0
+        return
+    end
+    if li < 0 then
+        li = 0
+    end
+    if li >= n then
+        li = n - 1
+    end
+    local remaining = target_row
+    local cur_li = li
+    local cur_sub = sub
+    while remaining > 0 and cur_li > 0 do
+        if cur_sub > 0 then
+            -- Use up the sub-rows within the current line first.
+            local take = math.min(cur_sub, remaining)
+            cur_sub = cur_sub - take
+            remaining = remaining - take
+        else
+            -- Move to the previous line, consuming its wrap rows.
+            cur_li = cur_li - 1
+            local rows = self:wrap_rows(cur_li) or 1
+            local take = math.min(rows, remaining)
+            cur_sub = rows - take
+            remaining = remaining - take
+        end
+    end
+    self:anchor_to_line(cur_li, cur_sub)
+end
+
+--- Clamp the anchor so the document's tail fits: if fewer than
+--- `text_rows` rows remain below the anchor, slide the anchor up so
+--- the last line's last sub-row sits at the viewport bottom. O(viewport)
+--- walk forward from the anchor, never building the whole prefix.
+---@param text_rows integer visible text rows
+function View:clamp_anchor_to_eof(text_rows)
+    local n = self:line_count()
+    if n == 0 then
+        return
+    end
+    -- Walk forward from the anchor counting how many rows remain below.
+    local a_li = self.scroll_li or 0
+    local a_sub = self.scroll_sub_row or 0
+    local rows = self:wrap_rows(a_li) or 1
+    local filled = rows - a_sub
+    local li = a_li
+    while filled < text_rows and li < n - 1 do
+        li = li + 1
+        filled = filled + (self:wrap_rows(li) or 1)
+    end
+    if filled >= text_rows then
+        -- Enough rows below the anchor to fill the viewport: no clamp needed.
+        return
+    end
+    -- EOF reached before filling (`filled < text_rows`). Two cases:
+    --  (a) the whole document fits in text_rows → top should be line 0;
+    --  (b) the anchor is simply too low → pull UP by the deficit so the
+    --      last line's last sub-row sits at the viewport bottom.
+    -- We distinguish by checking whether line 0 as top would fit the whole
+    -- doc: if the anchor is already at (or would clamp to) line 0, case (a).
+    -- Pulling up in case (a) is a no-op (anchor already at 0). So in BOTH
+    -- cases the right move is: anchor so the LAST visible line's last row
+    -- sits at viewport bottom (= text_rows-1). If that lands at line 0,
+    -- so be it.
+    local last_li = n - 1
+    local last_sub = (self:wrap_rows(last_li) or 1) - 1
+    self:anchor_so_line_at_row(last_li, last_sub, text_rows - 1)
+end
+
+--- Scroll the anchor by `delta` screen rows (signed). Walks forward or
+--- backward from the current anchor, O(|delta|). Used by wheel/page.
+---@param delta integer signed screen rows
+function View:scroll_anchor(delta)
+    if delta == 0 then
+        return
+    end
+    local n = self:line_count()
+    if n == 0 then
+        return
+    end
+    local li = self.scroll_li or 0
+    local sub = self.scroll_sub_row or 0
+    if delta > 0 then
+        local remaining = delta
+        while remaining > 0 and li < n - 1 do
+            local rows = self:wrap_rows(li) or 1
+            local avail = rows - 1 - sub
+            if remaining <= avail then
+                sub = sub + remaining
+                remaining = 0
+            else
+                remaining = remaining - avail - 1
+                li = li + 1
+                sub = 0
+            end
+        end
+    else
+        local remaining = -delta
+        while remaining > 0 and (li > 0 or sub > 0) do
+            if sub > 0 then
+                local take = math.min(sub, remaining)
+                sub = sub - take
+                remaining = remaining - take
+            else
+                li = li - 1
+                local rows = self:wrap_rows(li) or 1
+                local take = math.min(rows, remaining)
+                sub = rows - take
+                remaining = remaining - take
+            end
+        end
+        if li < 0 then
+            li = 0
+            sub = 0
+        end
+    end
+    self.scroll_li = li
+    self.scroll_sub_row = sub
+end
+
 --- Total number of screen rows for the entire document.
 ---@return integer
 function View:total_screen_rows()
     if not self.wrap_width or self.wrap_width <= 0 then
         return self:line_count()
     end
-    ensure_wrap_cache(self)
     local n = self:line_count()
     if n == 0 then
         return 0
     end
-    -- Add up all rows
-    local total = 0
-    for i = 1, n do
-        total = total + self._wrap_rows[i]
+    -- Cached total from a previous full build?
+    if self._wrap_total ~= nil then
+        return self._wrap_total
     end
+    local tot_t0 = profile.now_us()
+    -- Force a full forward build (sets _wrap_total on completion).
+    self:_extend_wrap_to(n - 1)
+    local total = self._wrap_total or 0
+    profile.span("view", "total_screen_rows", tot_t0, { lines = n })
     return total
 end
 
@@ -3170,9 +3580,14 @@ function View:move_line(n)
             local visual_goal = c.visual_col
             ---@cast visual_goal integer
 
-            local cur_screen = self:line_to_screen_row(c.line) + cur_sub_row
-            local target_screen = cur_screen + n
-            if target_screen < 0 then
+            -- Walk `n` display rows from the cursor's OWN position
+            -- (independent of the viewport anchor). Keeping this
+            -- anchor-independent is what makes C-n/C-p correct after the
+            -- viewport has been paged away from the cursor (wheel/page);
+            -- viewport-relative math would mistake an above-viewport cursor
+            -- for being near the document start and clamp wrongly.
+            local nli, nsub, status = self:walk_sub_rows(c.line, cur_sub_row, n)
+            if status == "start" then
                 c.line = 0
                 c.col = 0
                 c.goal_col = 0
@@ -3181,8 +3596,7 @@ function View:move_line(n)
                 c.yank_col = nil
                 return nil, "start of document"
             end
-            local total = self:total_screen_rows()
-            if target_screen >= total then
+            if status == "end" then
                 c.line = line_count - 1
                 local end_byte = buf:line_len(line_count - 1) - 1
                 c.col = end_byte
@@ -3192,7 +3606,7 @@ function View:move_line(n)
                 c.yank_col = nil
                 return nil, "end of document"
             end
-            local li, sub_row = self:screen_row_to_line(target_screen)
+            local li, sub_row = nli, nsub
             c.line = li
             local content_len = self:content_len(li)
             -- Last sub-row? Compute its actual display width by walking
@@ -4502,6 +4916,7 @@ end
 ---@param height integer terminal height in rows
 ---@param force boolean? when true, skip the cursor-unchanged guard
 function View:scroll_to_cursor(height, force)
+    local scroll_t0 = profile.now_us()
     local c = self:p()
     if not force and c.line == self._scroll_guard_line and c.col == self._scroll_guard_col then
         return
@@ -4514,25 +4929,44 @@ function View:scroll_to_cursor(height, force)
 
     local text_rows = height - 1
     local margin = text_rows - 1
-    local cursor_screen = self:line_to_screen_row(c.line)
-    -- Add the sub-row offset within the wrapped line
     local cur_sub_row, _ = self:wrap_sub_position(c.line, c.col)
-    cursor_screen = cursor_screen + cur_sub_row
 
-    if cursor_screen < self.scroll_y then
-        self.scroll_y = cursor_screen
+    -- JUMP fast path: if the cursor is far outside the viewport
+    -- (more than two viewports away from the anchor line), computing
+    -- its viewport-relative row by walking from the anchor would be
+    -- O(distance) — exactly the whole-prefix walk we're trying to
+    -- avoid. Instead re-anchor directly: near EOF → anchor so the
+    -- cursor sits at the bottom (backward walk of `margin` rows, O(viewport));
+    -- elsewhere → anchor so the cursor sits at the top (O(1)).
+    local a_li = self.scroll_li or 0
+    if math.abs(c.line - a_li) > 2 * text_rows then
+        local n = self:line_count()
+        if c.line >= n - 1 - text_rows then
+            -- Near EOF: bring the tail into view, cursor at bottom.
+            self:anchor_so_line_at_row(c.line, cur_sub_row, margin)
+        else
+            -- Mid-document jump: anchor at the cursor (top).
+            self:anchor_to_line(c.line, cur_sub_row)
+        end
         self._recenter_state = 0
-    elseif cursor_screen > self.scroll_y + margin then
-        self.scroll_y = cursor_screen - margin
-        self._recenter_state = 0
+        self:clamp_anchor_to_eof(text_rows)
+        profile.span("view", "scroll_to_cursor", scroll_t0)
+        return
     end
 
-    -- Clamp scroll_y so we never scroll past the document
-    local total_rows = self:total_screen_rows()
-    local max_scroll = math.max(0, total_rows - text_rows)
-    if self.scroll_y > max_scroll then
-        self.scroll_y = max_scroll
+    local row = self:viewport_row_for_line(c.line, cur_sub_row)
+    if row < 0 then
+        -- Cursor above viewport: anchor so cursor sits at the top.
+        self:anchor_to_line(c.line, cur_sub_row)
+        self._recenter_state = 0
+    elseif row > margin then
+        -- Cursor below viewport: anchor so cursor sits at the bottom row.
+        self:anchor_so_line_at_row(c.line, cur_sub_row, margin)
+        self._recenter_state = 0
     end
+    -- Clamp so we never scroll past EOF. O(viewport), no full prefix build.
+    self:clamp_anchor_to_eof(text_rows)
+    profile.span("view", "scroll_to_cursor", scroll_t0)
 end
 
 --- Scroll the viewport by `delta` screen rows WITHOUT moving the
@@ -4547,14 +4981,7 @@ end
 ---@param delta integer signed screen rows (negative = toward start)
 ---@param text_rows integer visible text-row count (for clamping)
 function View:scroll_viewport(delta, text_rows)
-    self.scroll_y = self.scroll_y + delta
-    local total_rows = self:total_screen_rows()
-    local max_scroll = math.max(0, total_rows - text_rows)
-    if self.scroll_y < 0 then
-        self.scroll_y = 0
-    elseif self.scroll_y > max_scroll then
-        self.scroll_y = max_scroll
-    end
+    self:scroll_anchor(delta)
     if self.editor then
         self.editor:request_full_damage()
     end
@@ -4575,18 +5002,23 @@ function View:scroll_page(n, page_size)
     if page_size <= 0 then
         return
     end
-    local total_screen = self:total_screen_rows()
-    if total_screen == 0 then
+    local n_lines = self:line_count()
+    if n_lines == 0 then
         return
     end
-    local start_screen = self.scroll_y
-    local end_screen = math.min(start_screen + page_size - 1, total_screen - 1)
-    if start_screen > end_screen then
+    -- Visible line range from the anchor, by a viewport-local forward walk.
+    local start_li = self.scroll_li or 0
+    local li = start_li
+    local sub = self.scroll_sub_row or 0
+    local filled = (self:wrap_rows(li) or 1) - sub
+    while filled < page_size and li < n_lines - 1 do
+        li = li + 1
+        filled = filled + (self:wrap_rows(li) or 1)
+    end
+    if start_li > li then
         return
     end
-    local start_li = select(1, self:screen_row_to_line(start_screen))
-    local end_li = select(1, self:screen_row_to_line(end_screen))
-    self.buffer:compact_lines(start_li, end_li)
+    self.buffer:compact_lines(start_li, li)
 end
 
 --- Recenter the view so the cursor line is at the given position.
@@ -4595,19 +5027,18 @@ end
 function View:recenter(height)
     local c = self:p()
     local text_rows = height - 1
-    local cursor_screen = self:line_to_screen_row(c.line)
-        + select(1, self:wrap_sub_position(c.line, c.col))
+    local cur_sub_row = select(1, self:wrap_sub_position(c.line, c.col))
 
     local state = self._recenter_state
     if state == 0 then
         -- Middle
-        self.scroll_y = cursor_screen - math.floor(text_rows / 2)
+        self:anchor_so_line_at_row(c.line, cur_sub_row, math.floor(text_rows / 2))
     elseif state == 1 then
         -- Top
-        self.scroll_y = cursor_screen
+        self:anchor_to_line(c.line, cur_sub_row)
     else
         -- Bottom
-        self.scroll_y = cursor_screen - (text_rows - 1)
+        self:anchor_so_line_at_row(c.line, cur_sub_row, text_rows - 1)
     end
 
     self._recenter_state = (state + 1) % 3
@@ -4615,14 +5046,8 @@ function View:recenter(height)
         self.editor:request_full_damage()
     end
 
-    -- Clamp
-    local total_rows = self:total_screen_rows()
-    local max_scroll = math.max(0, total_rows - text_rows)
-    if self.scroll_y < 0 then
-        self.scroll_y = 0
-    elseif self.scroll_y > max_scroll then
-        self.scroll_y = max_scroll
-    end
+    -- Clamp to EOF.
+    self:clamp_anchor_to_eof(text_rows)
 end
 
 ----------------------------------------------------------------------------------------------------
