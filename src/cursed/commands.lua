@@ -750,6 +750,7 @@ commands.load_theme = function(view, editor)
             end
             if name then
                 ColorScheme.apply(name, truecolor)
+                editor:request_full_damage()
             end
         end,
         on_cancel = function()
@@ -757,6 +758,7 @@ commands.load_theme = function(view, editor)
             if saved_scheme ~= nil then
                 ColorScheme.active = saved_scheme
                 ColorScheme.generation = ColorScheme.generation + 1
+                editor:request_full_damage()
             end
         end,
         on_submit = function(input)
@@ -768,6 +770,7 @@ commands.load_theme = function(view, editor)
             end
             local scheme, status = ColorScheme.apply(input, truecolor)
             editor.status_message = status
+            editor:request_full_damage()
             log.info("commands", "theme switched", {
                 name = scheme.name,
                 setting = input,

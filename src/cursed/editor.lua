@@ -306,7 +306,7 @@ end
 ---@field _eval_result string|nil pretty-printed eval result to show in minibuffer area
 ---@field _quit_requested boolean set by M-x to signal quit from async callback
 ---@field _wake_main function? callback to wake the main select() loop from async context
----@field _background_tasks fun(): boolean?[] incremental main-thread tasks
+---@field _background_tasks (fun(): boolean?|{deadline: integer, fn: fun(): boolean?})[] main-thread task queue
 ---@field _universal_active boolean true when C-u argument collection is in progress
 ---@field _universal_count integer number of times C-u was pressed in current collection
 ---@field universal_args table|nil universal argument list for the next command dispatch
@@ -332,13 +332,22 @@ end
 ---@field _config Config the loaded user configuration
 ---@field margin integer|nil max text render width; when set, the (gutter+text) column is centered in the window
 ---@field _blink_on boolean caret visible (drawn) this blink phase
----@field _blink_next_us integer deadline (us) of next on/off toggle; 0 = uninitialized
+---@field _blink_task table|nil handle of the scheduled blink toggle task
 ---@field event_system EventSystem central event hub (pre/post-command, mode_enter/exit, ring-buffer, ...)
 ---@field overlays OverlayManager screen-space overlay layer (file-anchored + floating)
 ---@field modeline_segments table[] ordered modeline segment specs (bg/format/fill/fg)
 ---@field _last_command string|nil name of the most recently dispatched command (Emacs `last-command`)
 ---@field _command_before_this string|nil the command before the most recent one (Emacs `command-before-this`)
 ---@field _last_complex_command { name: string, universal_args: table }|nil most recent command invoked with universal args (for repeat-complex-command)
+---@field _exit_code integer exit code surfaced by async tasks
+---@field _damage_start_row integer|nil 0 = full screen, nil = derive from cursor, >0 = repaint from this row down
+---@field _last_min_cursor_row integer|nil smallest cursor/anchor screen row of the previous render
+---@field _last_w integer|nil terminal width observed at last render
+---@field _last_h integer|nil terminal height observed at last render
+---@field _last_footer_rows integer|nil footer rows observed at last render
+---@field _last_palette boolean|nil palette (M-x) active at last render
+---@field _last_scroll_y integer|nil scroll offset of current view at last render
+---@field _last_line_count integer|nil line count of current view at last render
 local Editor = {}
 Editor.__index = Editor
 
@@ -363,6 +372,8 @@ function Editor.new(term)
         _eval_result = nil,
         _quit_requested = false,
         _background_tasks = {},
+        _exit_code = 0,
+        _blink_task = nil,
         _hl_idle_last = nil,
         _wake_main = function() end,
         _universal_active = false,
@@ -389,10 +400,17 @@ function Editor.new(term)
         _read_char_prompt = "",
         _config = nil,
         _blink_on = true, -- caret visible (drawn) this phase
-        _blink_next_us = 0, -- deadline (us) of next on/off toggle; 0 = uninitialized
         _last_command = nil, -- most recent dispatched command name
         _command_before_this = nil, -- command before the most recent
         _last_complex_command = nil, -- most recent command-with-args, for repeat-complex-command
+        _damage_start_row = 0, -- full damage on first render
+        _last_min_cursor_row = nil,
+        _last_w = nil,
+        _last_h = nil,
+        _last_footer_rows = nil,
+        _last_palette = nil,
+        _last_scroll_y = nil,
+        _last_line_count = nil,
     }, Editor)
     editor.event_system = EventSystem.new(editor)
     editor.overlays = OverlayManager.new(editor)
@@ -408,6 +426,55 @@ end
 function Editor:request_quit()
     self._quit_requested = true
     self._wake_main()
+end
+
+----------------------------------------------------------------------------------------------------
+-- Damage tracking / partial rerender (#4)
+----------------------------------------------------------------------------------------------------
+
+--- Request a full-screen repaint on the next render. Used by viewport
+-- changes (scroll, resize, view switch, theme change) where partial
+-- damage from the cursor down would leave stale content above.
+function Editor:request_full_damage()
+    self._damage_start_row = 0
+end
+
+--- Compute the topmost viewport row that may contain visual state
+-- (cursor, selection anchor, or pending drop). Rendering from this row
+-- downward covers cursor moves, selection changes, blink toggles, and
+-- drop markers; the caller combines it with the previous frame's value
+-- so the old cursor/selection cells are also erased.
+---@return integer viewport row (0-based); 0 if derrived value is negative
+function Editor:_min_cursor_screen_row()
+    local view = self:current_view()
+    if view == nil then
+        return 0
+    end
+    local min_row ---@type integer|nil
+    local function consider(line, col)
+        local sub_row = select(1, view:wrap_sub_position(line, col))
+        local doc_row = view:line_to_screen_row(line) + sub_row
+        local row = doc_row - view.scroll_y
+        if min_row == nil or row < min_row then
+            min_row = row
+        end
+    end
+    for _, c in ipairs(view.cursors) do
+        consider(c.line, c.col)
+        if c.anchor_line then
+            consider(c.anchor_line, c.anchor_col)
+        end
+    end
+    for _, c in ipairs(view.pending_cursors) do
+        consider(c.line, c.col)
+    end
+    if min_row == nil then
+        return 0
+    end
+    if min_row < 0 then
+        return 0
+    end
+    return min_row
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -428,37 +495,26 @@ local function now_us()
     return tonumber(tv[0].tv_sec) * 1000000 + tonumber(tv[0].tv_usec)
 end
 
---- Advance the blink timer. Returns true if the on/off phase changed
---- since the last call (the caller re-renders regardless; this is mostly
---- informational). Lazily initializes the deadline on first call.
----@return boolean changed
-function Editor:tick_blink()
-    local now = now_us()
-    if self._blink_next_us == 0 then
-        self._blink_on = true
-        self._blink_next_us = now + BLINK_HALF_US
-        return false
-    end
-    local changed = false
-    while now >= self._blink_next_us do
+--- Schedule the next cursor-blink toggle. The task inverts `_blink_on`
+-- and reschedules itself so the caret keeps blinking until input resets
+-- it back to the "on" phase.
+function Editor:schedule_blink()
+    self._blink_task = self:schedule_after(BLINK_HALF_US, function()
         self._blink_on = not self._blink_on
-        self._blink_next_us = self._blink_next_us + BLINK_HALF_US
-        changed = true
-        -- Guard against clock jumps backwards in time leaving us stuck.
-        if self._blink_next_us < now then
-            self._blink_next_us = now + BLINK_HALF_US
-            break
-        end
-    end
-    return changed
+        self:schedule_blink()
+        return true
+    end)
 end
 
---- Reset the blink to the "on" phase and push the next toggle deadline
---- forward. Called whenever input is processed so the caret stays solid
---- while the user is actively typing.
+--- Reset the blink to the "on" phase and schedule the next toggle.
+-- Called whenever input is processed so the caret stays solid while the
+-- user is actively typing.
 function Editor:reset_blink()
     self._blink_on = true
-    self._blink_next_us = now_us() + BLINK_HALF_US
+    if self._blink_task then
+        self:cancel_task(self._blink_task)
+    end
+    self:schedule_blink()
 end
 
 --- Rebuild the active keybind trie by merging the active view's mode
@@ -582,7 +638,7 @@ function Editor:define_command(name, fn)
     commands[key] = fn
 end
 
---- Schedule a function to run incrementally on the main thread.
+--- Schedule a plain function to run incrementally on the main thread.
 --- The function is called once per main-loop iteration (round-robin
 --- with other background tasks). If it returns true, it is removed
 --- from the queue; false/nil means it will be called again next time.
@@ -591,18 +647,102 @@ function Editor:push_background_task(fn)
     self._background_tasks[#self._background_tasks + 1] = fn
 end
 
+--- Schedule a function to run once at or after `deadline_us` (monotonic
+--- wall-clock microseconds). The function should return truthy when
+--- done; false/nil re-queues it at the same deadline. Returns a task
+--- handle that can be passed to `cancel_task`.
+---@param deadline_us integer
+---@param fn fun(): boolean?
+---@return table handle
+function Editor:schedule_at(deadline_us, fn)
+    local task = { deadline = deadline_us, fn = fn }
+    self._background_tasks[#self._background_tasks + 1] = task
+    return task
+end
+
+--- Schedule a function to run once after `delay_us` microseconds.
+---@param delay_us integer
+---@param fn fun(): boolean?
+---@return table handle
+function Editor:schedule_after(delay_us, fn)
+    return self:schedule_at(now_us() + delay_us, fn)
+end
+
+--- Remove a scheduled task from the queue by its handle.
+---@param handle table
+function Editor:cancel_task(handle)
+    local tasks = self._background_tasks
+    local j = 1
+    for i = 1, #tasks do
+        if tasks[i] ~= handle then
+            tasks[j] = tasks[i]
+            j = j + 1
+        end
+    end
+    for i = j, #tasks do
+        tasks[i] = nil
+    end
+end
+
+--- Earliest deadline among pending tasks, or `now_us()` if any plain
+--- task is queued. Used by the main select() loop to sleep only until
+--- the next timer is due.
+---@return integer|nil deadline_us
+function Editor:next_task_deadline()
+    local tasks = self._background_tasks
+    if #tasks == 0 then
+        return nil
+    end
+    local deadline ---@type integer|nil
+    for _, e in ipairs(tasks) do
+        if type(e) == "table" and e.deadline ~= nil then
+            if deadline == nil or e.deadline < deadline then
+                deadline = e.deadline
+            end
+        else
+            -- Plain task: ready immediately.
+            return now_us()
+        end
+    end
+    return deadline
+end
+
 --- Execute one step of a single background task per call (round-robin).
---- Call this once per main-loop iteration.
+--- Deadline tasks run only when their deadline has been reached; plain
+--- tasks run every call. Re-queues unfinished tasks. Returns the
+--- earliest remaining deadline so the caller can update its sleep time.
+---@return integer|nil deadline_us
 function Editor:tick_background_tasks()
     local tasks = self._background_tasks
     if #tasks == 0 then
-        return
+        return nil
     end
-    local fn = table.remove(tasks, 1)
-    local done = fn()
+    local entry = table.remove(tasks, 1)
+    local now = now_us()
+    local next_deadline ---@type integer|nil
+    local done = false
+    if type(entry) == "table" and entry.deadline ~= nil then
+        if now >= entry.deadline then
+            done = entry.fn()
+        else
+            next_deadline = entry.deadline
+        end
+    else
+        done = entry()
+    end
     if not done then
-        tasks[#tasks + 1] = fn -- re-queue at the end
+        tasks[#tasks + 1] = entry
     end
+    for _, e in ipairs(tasks) do
+        if type(e) == "table" and e.deadline ~= nil then
+            if next_deadline == nil or e.deadline < next_deadline then
+                next_deadline = e.deadline
+            end
+        else
+            return now
+        end
+    end
+    return next_deadline
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -647,6 +787,9 @@ function Editor:set_active_view(idx)
     self.active_view = idx
     self:rebuild_active_trie()
     self:_emit_focus_change(old_view, self:current_view())
+    if old_view ~= self:current_view() then
+        self:request_full_damage()
+    end
 end
 
 --- Get the active view.
@@ -1834,6 +1977,44 @@ function Editor:render()
         ov:put_float(x, y, text, fg, bg)
     end
 
+    -- Damage tracking (#4): decide the first viewport row that needs
+    -- repainting. 0 = full screen; nil = derive from cursor/anchors;
+    -- >0 = only from this row down. Full damage is forced when terminal
+    -- size, footer geometry, palette state, scroll offset, or document
+    -- line count changed since the last render.
+    local footer_rows = self:footer_rows()
+    local palette_active = mb and mb.palette or false
+    local cur_min_cursor_row = self:_min_cursor_screen_row()
+    local damage_start_row = self._damage_start_row
+    if damage_start_row == nil then
+        if self._last_min_cursor_row ~= nil then
+            damage_start_row = math.min(cur_min_cursor_row, self._last_min_cursor_row)
+        else
+            damage_start_row = cur_min_cursor_row
+        end
+    end
+    local line_count_changed = false
+    if view then
+        local cur_lc = view.buffer:line_count()
+        line_count_changed = self._last_line_count ~= nil and cur_lc ~= self._last_line_count
+    end
+    if
+        self._last_w ~= nil
+        and (
+            w ~= self._last_w
+            or h ~= self._last_h
+            or footer_rows ~= self._last_footer_rows
+            or palette_active ~= self._last_palette
+            or line_count_changed
+            or (view and view.scroll_y ~= self._last_scroll_y)
+        )
+    then
+        damage_start_row = 0
+    end
+    if damage_start_row < 0 then
+        damage_start_row = 0
+    end
+
     -- When the palette is open, the focus backdrop tints the whole
     -- buffer region — including empty rows below the last line — so
     -- clear with the black-blended bg instead of bright default_bg.
@@ -1842,7 +2023,11 @@ function Editor:render()
         if mb and mb.palette then
             clear_bg = blend(clear_bg, 0x000000, 195)
         end
-        term:clear(ui("default_fg"), clear_bg)
+        -- Full damage: clear the backbuffer. Partial damage: leave rows
+        -- above damage_start_row untouched from the previous frame.
+        if damage_start_row == 0 then
+            term:clear(ui("default_fg"), clear_bg)
+        end
     end
     -- The hardware terminal caret is always hidden; the caret is drawn
     -- as a reverse-video cell (toggled on/off by the blink timer)
@@ -2072,8 +2257,18 @@ function Editor:render()
     end
 
     -- Footer rows: modeline + optional completions row + minibuffer/eval
-    local footer_rows = self:footer_rows()
     local has_completions = mb and mb.active and mb.completion and #mb._completions > 0
+
+    local function finish_damage_state()
+        self._last_min_cursor_row = cur_min_cursor_row
+        self._last_w = w
+        self._last_h = h
+        self._last_footer_rows = footer_rows
+        self._last_palette = palette_active
+        self._last_scroll_y = view and view.scroll_y or nil
+        self._last_line_count = view and view.buffer:line_count() or nil
+        self._damage_start_row = nil
+    end
 
     if not view or not view.file_loaded then
         local msg = "Loading..."
@@ -2082,6 +2277,7 @@ function Editor:render()
         fp(x, y, msg, ui("default_fg"), ui("default_bg"))
         ov:emit_render()
         ov:flush()
+        finish_damage_state()
         term:present()
         return
     end
@@ -2096,6 +2292,7 @@ function Editor:render()
     local gutter_width, text_x, text_width, block_x, block_w = view:text_geometry(w)
     local avail_text = w - gutter_width
     if avail_text <= 0 then
+        finish_damage_state()
         term:present()
         return
     end
@@ -2145,8 +2342,8 @@ function Editor:render()
         view:_hl_notify_viewport(vstart_byte, vend_byte)
     end
 
-    local row = 0
-    local li, sub_row = view:screen_row_to_line(view.scroll_y)
+    local row = damage_start_row
+    local li, sub_row = view:screen_row_to_line(view.scroll_y + row)
     while row <= max_y and li < line_count do
         local line_text = view:_line_text_stripped(li)
         local display_text = line_text
@@ -2608,6 +2805,7 @@ function Editor:render()
 
     ov:emit_render()
     ov:flush()
+    finish_damage_state()
     term:present()
 end
 

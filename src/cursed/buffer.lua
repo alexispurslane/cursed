@@ -806,6 +806,70 @@ function Buffer:split_line(line_idx, pos)
 end
 
 ----------------------------------------------------------------------------------------------------
+-- Piece-table compaction
+----------------------------------------------------------------------------------------------------
+
+--- Coalesce adjacent pieces within a single line when they reference
+--- contiguous regions of the same underlying buffer (orig or add).
+--- Compaction preserves the exact logical text and line length; it only
+--- reduces piece count, which speeds up subsequent line_text/extract
+--- walks and lowers per-render overhead. Because the add buffer is
+--- append-only and orig is immutable, two pieces can merge iff they
+--- share buf_id and `left.off + left.len == right.off`.
+---@param line_idx integer 0-based line index
+function Buffer:compact_line(line_idx)
+    local line = self._ptr.lines[line_idx]
+    local count = tonumber(line.count)
+    ---@cast count integer
+    if count <= 1 then
+        return
+    end
+    local write = 0
+    for read = 0, count - 1 do
+        local p = line.pieces[read]
+        if write == 0 then
+            line.pieces[0] = p
+            write = 1
+        else
+            local w = line.pieces[write - 1]
+            if p.buf_id == w.buf_id and tonumber(p.off) == tonumber(w.off) + tonumber(w.len) then
+                w.len = w.len + p.len
+            else
+                if write ~= read then
+                    line.pieces[write] = p
+                end
+                write = write + 1
+            end
+        end
+    end
+    line.count = write
+end
+
+--- Compact every line in the inclusive range [start_idx, end_idx].
+--- Clamps to the document bounds. Safe to call during navigation; it
+--- does not mutate logical text or the dirty flag.
+---@param start_idx integer 0-based start line index (inclusive)
+---@param end_idx integer 0-based end line index (inclusive)
+function Buffer:compact_lines(start_idx, end_idx)
+    local lc = self:line_count()
+    if lc == 0 then
+        return
+    end
+    if start_idx < 0 then
+        start_idx = 0
+    end
+    if end_idx >= lc then
+        end_idx = lc - 1
+    end
+    if end_idx < start_idx then
+        return
+    end
+    for li = start_idx, end_idx do
+        self:compact_line(li)
+    end
+end
+
+----------------------------------------------------------------------------------------------------
 -- Text extraction
 ----------------------------------------------------------------------------------------------------
 

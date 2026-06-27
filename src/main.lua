@@ -848,21 +848,35 @@ local function main()
     end
 
     -- File-load watchdog: if any view is still awaiting its initial
-    -- load reply from the IO lane, set a 200ms deadline. Exceeding it
+    -- load reply from the IO lane, schedule a 200ms timer. Exceeding it
     -- bails out of the program (the load is hung — e.g. on a stale NFS
-    -- mount). Cleared to nil once all views report file_loaded. The
-    -- no-file case now opens a temp file, so this arms and clears on
-    -- the (instant) local load; directory args pre-mark their view
-    -- loaded and so never arm it.
-    local load_deadline_us ---@type integer|nil microseconds; nil = no pending load
+    -- mount). Cancelled once all views report file_loaded. The no-file
+    -- case now opens a temp file, so this arms and clears on the
+    -- (instant) local load; directory args pre-mark their view loaded
+    -- and so never arm it.
+    local load_watchdog_task = nil
     for _, v in ipairs(editor.views) do
         if not v.file_loaded then
-            load_deadline_us = now_us() + 200000 -- 200ms
+            load_watchdog_task = editor:schedule_after(200000, function()
+                local any_pending = false
+                for _, vv in ipairs(editor.views) do
+                    if not vv.file_loaded then
+                        any_pending = true
+                        break
+                    end
+                end
+                if not any_pending then
+                    return true
+                end
+                io.stderr:write("cursed: file load timed out after 200ms; aborting\n")
+                log.error("main", "file load timeout")
+                editor._exit_code = 2
+                editor:request_quit()
+                return true
+            end)
+            log.info("main", "file-load watchdog armed", { delay_us = 200000 })
             break
         end
-    end
-    if load_deadline_us then
-        log.info("main", "file-load watchdog armed", { deadline_us = load_deadline_us })
     end
 
     -- Key chord state machine
@@ -923,16 +937,14 @@ local function main()
     -- True while the left mouse button is held after a press, so motion
     -- events extend the selection instead of relocating the cursor.
     local mouse_drag = false
+    -- Handle for the chord-timeout background task, cancelled once the
+    -- chord resolves.
+    local chord_timeout_task = nil
 
     -- Initial render (empty buffer; file load event will wake us via kq)
     editor:render()
-    editor:tick_blink() -- initialize blink deadline before the loop
+    editor:schedule_blink() -- start the periodic blink timer
     log.info("main", "entering main loop")
-
-    -- Exit code returned from main(). Set to nonzero by the file-load
-    -- watchdog if a load exceeds 200ms. Routed through the normal
-    -- loop-exit path so term:shutdown() always restores the terminal.
-    local exit_code = 0
 
     -- Main loop: select(ttyfd, kq_fd, wake_pipe_r), then dispatch
     while ss:running() do
@@ -942,33 +954,12 @@ local function main()
         pffi.fd_set_set(readfds, kq_fd)
         pffi.fd_set_set(readfds, wake_pipe_r)
 
-        -- select() timeout. We always wake by the next cursor-blink
-        -- toggle so the drawn caret can blink even while fully idle,
-        -- and otherwise honour background-task / chord deadlines.
+        -- select() timeout. Background tasks now carry their own
+        -- deadlines; the editor returns the earliest one so we always
+        -- wake in time for timers (blink, chord timeout, load watchdog)
+        -- without bespoke deadline math here.
         local now = now_us()
-        local deadline
-        if #editor._background_tasks > 0 then
-            deadline = now
-        elseif #key_state > 0 then
-            -- In a chord (e.g. C-x waiting for next key): use a short
-            -- timeout so we don't block indefinitely between the two
-            -- key events. Terminals may deliver them in separate writes.
-            deadline = now + 100000 -- 100ms
-        end
-        if editor._blink_next_us ~= 0 then
-            if deadline == nil or editor._blink_next_us < deadline then
-                deadline = editor._blink_next_us
-            end
-        end
-        -- File-load watchdog: while any view is still awaiting its
-        -- initial load reply, also bound select() by the 200ms watchdog
-        -- deadline so we wake in time to bail (or to clear it once the
-        -- load resolves).
-        if load_deadline_us ~= nil then
-            if deadline == nil or load_deadline_us < deadline then
-                deadline = load_deadline_us
-            end
-        end
+        local deadline = editor:next_task_deadline()
         local tv
         if deadline == nil then
             tv = nil -- block indefinitely
@@ -1019,10 +1010,9 @@ local function main()
 
         -- File-load watchdog: re-check pending loads after the inbox
         -- drain above (a MSG_FILE_LOADED/MSG_FILE_ERROR may have just
-        -- resolved a view). If everything is loaded now, clear the
-        -- watchdog so it never fires spuriously post-startup. If a load
-        -- is still pending past the 200ms deadline, bail out cleanly.
-        if load_deadline_us ~= nil then
+        -- resolved a view). If everything is loaded now, cancel the
+        -- watchdog task so it never fires spuriously post-startup.
+        if load_watchdog_task ~= nil then
             local any_pending = false
             for _, v in ipairs(editor.views) do
                 if not v.file_loaded then
@@ -1031,13 +1021,9 @@ local function main()
                 end
             end
             if not any_pending then
-                load_deadline_us = nil
+                editor:cancel_task(load_watchdog_task)
+                load_watchdog_task = nil
                 log.info("main", "file-load watchdog cleared (all views loaded)")
-            elseif now_us() >= load_deadline_us then
-                io.stderr:write("cursed: file load timed out after 200ms; aborting\n")
-                log.error("main", "file load timeout")
-                exit_code = 2
-                break
             end
         end
 
@@ -1260,6 +1246,27 @@ local function main()
                     end
                 end
             end
+            -- Chord timeout: while we're holding a prefix chord, ensure
+            -- a timer is queued to reset it if the next key doesn't
+            -- arrive promptly. Cancel it once the chord resolves.
+            if #key_state > 0 then
+                if chord_timeout_task == nil then
+                    chord_timeout_task = editor:schedule_after(100000, function()
+                        if #key_state > 0 then
+                            key_state = {}
+                            key_node = editor._active_trie
+                            editor.status_message = "chord timeout"
+                        end
+                        chord_timeout_task = nil
+                        return true
+                    end)
+                end
+            else
+                if chord_timeout_task ~= nil then
+                    editor:cancel_task(chord_timeout_task)
+                    chord_timeout_task = nil
+                end
+            end
             ::continue_drain::
         until editor._quit_requested or #key_state == 0
         -- When in a chord (prefix matched), stop draining — we need
@@ -1279,16 +1286,14 @@ local function main()
         -- Fire minibuffer on_change (e.g. isearch live update)
         editor:minibuffer_notify_change()
 
-        -- Process one step of a single background task (round-robin)
-        editor:tick_background_tasks()
-
-        -- Advance the cursor blink timer. On input, reset to "on" first
-        -- so the caret stays solid while actively typing; on idle
-        -- (select woke on the blink deadline) the phase toggles here.
+        -- Reset blink on input so the caret stays solid while typing.
+        -- The blink toggle itself is a scheduled background task; run
+        -- timers here after input processing so a deadline-only wake
+        -- flips the phase before render.
         if had_input then
             editor:reset_blink()
         end
-        editor:tick_blink()
+        editor:tick_background_tasks()
 
         -- Update view and render only after processing input/wake
         local cur_view = editor:current_view()
@@ -1302,7 +1307,7 @@ local function main()
     term:shutdown()
     ss:stop()
 
-    return exit_code
+    return editor._exit_code
 end
 
 -- main.lua is loaded via lua_pcall(L, 0, 1, ...) in main.c, so only the

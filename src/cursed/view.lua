@@ -194,6 +194,9 @@ function View:set_buffer(buf, opts)
         es:emit("view_attach_buffer", self, buf, old)
     end
     self.buffer = buf
+    if self.editor then
+        self.editor:request_full_damage()
+    end
     if es and not opts.silent then
         if opts.loaded then
             es:emit("buffer_open", buf, self)
@@ -4505,6 +4508,9 @@ function View:scroll_to_cursor(height, force)
     end
     self._scroll_guard_line = c.line
     self._scroll_guard_col = c.col
+    if self.editor then
+        self.editor:request_full_damage()
+    end
 
     local text_rows = height - 1
     local margin = text_rows - 1
@@ -4549,6 +4555,9 @@ function View:scroll_viewport(delta, text_rows)
     elseif self.scroll_y > max_scroll then
         self.scroll_y = max_scroll
     end
+    if self.editor then
+        self.editor:request_full_damage()
+    end
 end
 
 --- Page the viewport (no cursor movement). `page_size` is the number of
@@ -4558,6 +4567,26 @@ end
 ---@param page_size integer screen rows per page
 function View:scroll_page(n, page_size)
     self:scroll_viewport(n * page_size, page_size)
+    -- Piggyback piece-table compaction onto page navigation. The page
+    -- transition already incurs a perceptible viewport shift, so the
+    -- O(visible_lines * pieces_per_line) work is hidden there. This
+    -- amortizes compaction across normal navigation instead of needing
+    -- a separate full-document compaction pass.
+    if page_size <= 0 then
+        return
+    end
+    local total_screen = self:total_screen_rows()
+    if total_screen == 0 then
+        return
+    end
+    local start_screen = self.scroll_y
+    local end_screen = math.min(start_screen + page_size - 1, total_screen - 1)
+    if start_screen > end_screen then
+        return
+    end
+    local start_li = select(1, self:screen_row_to_line(start_screen))
+    local end_li = select(1, self:screen_row_to_line(end_screen))
+    self.buffer:compact_lines(start_li, end_li)
 end
 
 --- Recenter the view so the cursor line is at the given position.
@@ -4582,6 +4611,9 @@ function View:recenter(height)
     end
 
     self._recenter_state = (state + 1) % 3
+    if self.editor then
+        self.editor:request_full_damage()
+    end
 
     -- Clamp
     local total_rows = self:total_screen_rows()
@@ -4600,6 +4632,9 @@ end
 function View:undo()
     if not self.buffer:undo() then
         return false
+    end
+    if self.editor then
+        self.editor:request_full_damage()
     end
     self:clamp_cursor()
     -- Undo swaps buffer content wholesale; the cached spans (and the
@@ -4621,6 +4656,9 @@ end
 function View:redo()
     if not self.buffer:redo() then
         return false
+    end
+    if self.editor then
+        self.editor:request_full_damage()
     end
     self:clamp_cursor()
     -- See View:undo: the wrap cache staleness guard is invariant under
