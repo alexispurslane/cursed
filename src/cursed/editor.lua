@@ -352,6 +352,9 @@ end
 ---@field _last_scroll_sub_row integer|nil anchor sub-row of current view at last render
 ---@field _last_line_count integer|nil line count of current view at last render
 ---@field _last_file_loaded boolean|nil file_loaded state of current view at last render
+---@field _whichkey_node keybind.Trie|nil current trie node while a chord prefix is active (drives the which-key hint)
+---@field _whichkey_prefix string|nil formatted chord-so-far (e.g. "C-x") while a chord prefix is active
+---@field _whichkey_page integer which-key hint popup page index (0-based; reset when the prefix node changes)
 local Editor = {}
 Editor.__index = Editor
 
@@ -418,6 +421,9 @@ function Editor.new(term)
         _last_scroll_sub_row = nil,
         _last_line_count = nil,
         _last_file_loaded = nil,
+        _whichkey_node = nil,
+        _whichkey_prefix = nil,
+        _whichkey_page = 0,
     }, Editor)
     editor.event_system = EventSystem.new(editor)
     editor.overlays = OverlayManager.new(editor)
@@ -616,6 +622,39 @@ function Editor:global_set_key(chord, action)
     self._base_keybindings[chord] = action
     self:rebuild_base_trie()
     self:rebuild_active_trie()
+end
+
+--- Mirror every base keybinding whose chord begins with `from_token`
+--- under `to_token` instead (e.g. "ctrl-x" → "alt-q"), cloning the
+--- entire prefix subtree. Useful when a terminal eats a prefix key
+--- (Ghostty swallows bare C-x) so the family is reachable via an
+--- alternative the terminal passes through. Clears any existing leaf
+--- on the bare `to_token` so it acts as a pure prefix. Rebuilds both
+--- tries immediately.
+---@param from_token string first component to clone (e.g. "ctrl-x")
+---@param to_token string    new first component (e.g. "alt-q")
+function Editor:mirror_prefix(from_token, to_token)
+    if self._base_keybindings == nil then
+        error("editor:mirror_prefix: keybindings not yet initialized", 2)
+    end
+    local mirrored = {}
+    for chord, action in pairs(self._base_keybindings) do
+        local m = keybind.mirror_chord(chord, from_token, to_token)
+        if m ~= nil then
+            mirrored[m] = action
+        end
+    end
+    -- If the bare to_token is bound as a leaf, clear it so the prefix
+    -- shows which-key continuations instead of dispatching immediately.
+    if self._base_keybindings[to_token] ~= nil then
+        self._base_keybindings[to_token] = nil
+    end
+    for chord, action in pairs(mirrored) do
+        self._base_keybindings[chord] = action
+    end
+    self:rebuild_base_trie()
+    self:rebuild_active_trie()
+    return next(mirrored) ~= nil
 end
 
 --- Bind a key chord in a specific major mode (Emacs `define-key`).

@@ -12,6 +12,7 @@ local Kqueue = require("cursed.kqueue").Kqueue
 local pffi = require("cursed.posix_ffi")
 local c = pffi.C
 local keybind = require("cursed.keybind")
+local WhichKey = require("cursed.whichkey")
 local commands = require("cursed.commands")
 local Editor = require("cursed.editor")
 local View = require("cursed.view").View
@@ -428,6 +429,12 @@ local function process_key(editor, view, trie, key_state, key_node, token, ev, p
     end
 
     ::feed_trie::
+    -- Which-key paging: while a prefix is held and the hint popup
+    -- overflows, Page Up/Down page the popup instead of feeding the
+    -- trie (these keys are otherwise undefined mid-prefix).
+    if in_chord and token ~= nil and WhichKey.try_page(editor, token) then
+        return key_state, key_node, nil
+    end
     -- Modified key, non-printable, chord participant, or any key while in a chord
     local child = key_node.children[token]
     if child == nil then
@@ -652,6 +659,12 @@ local function main()
     for chord, action in pairs(config.keybindings) do
         editor:global_set_key(chord, action)
     end
+    -- Mirror prefix: clone the ctrl-x subtree under an alternative
+    -- prefix (e.g. alt-q) for terminals that swallow bare C-x (Ghostty).
+    if config.mirror_prefix then
+        editor:mirror_prefix("ctrl-x", config.mirror_prefix)
+        log.info("main", "mirrored ctrl-x prefix", { to = config.mirror_prefix })
+    end
     -- Margin: global config applied to every view at load. The initial
     -- view is added before config loads, so backfill it here; views
     -- added later (find-file, etc.) inherit via Editor:add_view.
@@ -730,6 +743,7 @@ local function main()
     -- `init.lua` against the global editor).
     -- ------------------------------------------------------------------
     require("cursed.editor_listeners").setup(editor)
+    require("cursed.whichkey").setup(editor)
 
     -- Announce editor readiness. Fires AFTER init.lua (config.load, run
     -- above) and default listeners are registered, so both user and
@@ -889,6 +903,31 @@ local function main()
     local key_state = {} -- accumulated key tokens for current chord
     local key_node = editor._active_trie -- current position in the trie
 
+    --- Sync the which-key hint state from the authoritative chord state.
+    --- Called after every process_key so the render_overlay listener
+    --- redraws (or hides) the popup. The popup shows while a prefix has
+    --- matched but the chord is unresolved.
+    local function sync_whichkey()
+        if #key_state > 0 and next(key_node.children) ~= nil then
+            -- Reset the page index whenever the prefix node changes
+            -- (i.e. the chord advanced or branched) so paging never
+            -- points at a stale page.
+            if editor._whichkey_node ~= key_node then
+                editor._whichkey_page = 0
+            end
+            editor._whichkey_node = key_node
+            local parts = {}
+            for i = 1, #key_state do
+                parts[#parts + 1] = keybind.format_token(key_state[i])
+            end
+            editor._whichkey_prefix = table.concat(parts, " ")
+        else
+            editor._whichkey_node = nil
+            editor._whichkey_prefix = nil
+            editor._whichkey_page = 0
+        end
+    end
+
     -- Set up the central kqueue for the main lane. This merges:
     --   - termbox resize fd     (EVFILT_READ — SIGWINCH)
     --   - inbox_io wake ident   (EVFILT_USER — IO lane signals us)
@@ -943,9 +982,6 @@ local function main()
     -- True while the left mouse button is held after a press, so motion
     -- events extend the selection instead of relocating the cursor.
     local mouse_drag = false
-    -- Handle for the chord-timeout background task, cancelled once the
-    -- chord resolves.
-    local chord_timeout_task = nil
 
     -- Initial render (empty buffer; file load event will wake us via kq)
     editor:render()
@@ -963,7 +999,7 @@ local function main()
 
         -- select() timeout. Background tasks now carry their own
         -- deadlines; the editor returns the earliest one so we always
-        -- wake in time for timers (blink, chord timeout, load watchdog)
+        -- wake in time for timers (blink, load watchdog)
         -- without bespoke deadline math here.
         local now = now_us()
         local deadline = editor:next_task_deadline()
@@ -1130,6 +1166,7 @@ local function main()
                             )
                             key_state = new_state
                             key_node = new_node
+                            sync_whichkey()
                             if quit then
                                 editor:request_quit()
                                 break
@@ -1149,6 +1186,7 @@ local function main()
                         )
                         key_state = new_state
                         key_node = new_node
+                        sync_whichkey()
                         if quit then
                             editor:request_quit()
                             break
@@ -1169,6 +1207,7 @@ local function main()
                         )
                         key_state = new_state
                         key_node = new_node
+                        sync_whichkey()
                         if quit then
                             editor:request_quit()
                             break
@@ -1259,33 +1298,11 @@ local function main()
                     end
                 end
             end
-            -- Chord timeout: while we're holding a prefix chord, ensure
-            -- a timer is queued to reset it if the next key doesn't
-            -- arrive promptly. Cancel it once the chord resolves.
-            if #key_state > 0 then
-                if chord_timeout_task == nil then
-                    chord_timeout_task = editor:schedule_after(100000, function()
-                        if #key_state > 0 then
-                            key_state = {}
-                            key_node = editor._active_trie
-                            editor.status_message = "chord timeout"
-                        end
-                        chord_timeout_task = nil
-                        return true
-                    end)
-                end
-            else
-                if chord_timeout_task ~= nil then
-                    editor:cancel_task(chord_timeout_task)
-                    chord_timeout_task = nil
-                end
-            end
             ::continue_drain::
         until editor._quit_requested or #key_state == 0
         profile.span("main", "process_keys", keys_t0, { count = key_count })
         -- When in a chord (prefix matched), stop draining — we need
-        -- select() to wait for the next key with a timeout, in case
-        -- it hasn't arrived on the tty yet. When quit was requested
+        -- select() to block for the next key. When quit was requested
         -- or the chord completed, we stop too.
 
         if editor._quit_requested then

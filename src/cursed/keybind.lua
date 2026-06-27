@@ -460,6 +460,31 @@ local function build_chord_for_command(bindings)
 end
 
 ----------------------------------------------------------------------------------------------------
+-- Chord mirroring (clone a prefix subtree under a new prefix)
+----------------------------------------------------------------------------------------------------
+
+--- Rewrite a chord string whose FIRST component (case-insensitive)
+--- matches `from_token` so it instead begins with `to_token`. Returns
+--- nil when the chord doesn't start with `from_token`. The remaining
+--- components keep their ORIGINAL casing (so "ctrl-x S" → "alt-q S",
+--- preserving the shift-capital that parse_chord relies on for
+--- alt-letter select motions).
+---@param chord_str string
+---@param from_token string  first component to replace (e.g. "ctrl-x")
+---@param to_token string    replacement first component (e.g. "alt-q")
+---@return string|nil mirrored chord, or nil if it doesn't match
+local function mirror_chord(chord_str, from_token, to_token)
+    local first, rest = chord_str:match("^(%S+)(.*)$")
+    if first and first:lower() == from_token:lower() then
+        if rest == "" or rest:match("^%s*$") then
+            return to_token
+        end
+        return to_token .. rest
+    end
+    return nil
+end
+
+----------------------------------------------------------------------------------------------------
 -- Module export
 ----------------------------------------------------------------------------------------------------
 
@@ -467,7 +492,9 @@ return {
     parse_chord = parse_chord,
     event_to_token = event_to_token,
     is_modified = is_modified,
+    format_token = format_token,
     format_chord = format_chord,
     build_chord_for_command = build_chord_for_command,
+    mirror_chord = mirror_chord,
     Trie = Trie,
 }

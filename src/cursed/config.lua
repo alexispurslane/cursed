@@ -101,6 +101,7 @@ local DEFAULT_FILE_PATTERNS = {
 ---@field colorscheme string|nil name or absolute path to a base16 theme file
 ---@field concept_slots table<string, integer>|nil concept → base-slot (0x0N) overrides
 ---@field margin integer|nil max text render width; when the window is wider, the (gutter+text) column is centered within it
+---@field mirror_prefix string|nil when set (e.g. "alt-q"), clone the ctrl-x prefix subtree under this prefix — for terminals that swallow C-x
 local Config = {}
 Config.__index = Config
 
@@ -431,6 +432,18 @@ function Config.load()
         end
     end
 
+    -- Mirror prefix: clone the ctrl-x prefix subtree under this token
+    -- (e.g. "alt-q") so terminals that swallow bare C-x (Ghostty) still
+    -- reach the family. nil → no mirroring. Set in init.lua as
+    -- `mirror_prefix = "alt-q"`.
+    local mirror_prefix = nil
+    if result and type(result.mirror_prefix) == "string" then
+        local mp = result.mirror_prefix:gsub("^%s+", ""):gsub("%s+$", "")
+        if mp ~= "" then
+            mirror_prefix = mp
+        end
+    end
+
     return setmetatable({
         modes = modes,
         file_patterns = file_patterns,
@@ -438,6 +451,7 @@ function Config.load()
         colorscheme = colorscheme,
         concept_slots = concept_slots,
         margin = margin,
+        mirror_prefix = mirror_prefix,
     }, Config)
 end
 
