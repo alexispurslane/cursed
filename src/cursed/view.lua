@@ -8,6 +8,7 @@ local ffi = require("ffi")
 local utf8 = require("cursed.utf8")
 local profile = require("cursed.profile")
 local log = require("cursed.log")
+local IH = require("cursed.input_hook")
 --- which return the resulting cursor position; the View owns the
 --- forwarding to each cursor.
 ---
@@ -3554,411 +3555,157 @@ function View:_syntax_indent_extra(c)
     end
     return false
 end
+----------------------------------------------------------------------------------------------------
+-- Input hooks (electric pairs + arbitrary pattern-callback hooks)
+--
+-- A major mode may declare `input_hooks`: a list of hook specs whose
+-- `pattern` is matched as a SUFFIX of the text left of the cursor; the
+-- moment the user finishes typing it (printable trigger) or hits Return
+-- (return trigger), the hook's `fn` runs. Openers and closers are just
+-- two higher-order builders over this generic hook, declared in
+-- `cursed.input_hook`. Hooks run their OWN `batch_edit` (multi-cursor
+-- coordination preserved within one hook's batch); cursors a hook
+-- declines to handle fall through to the trigger site's default behaviour.
+--
+-- The block-opener block-text + tree-sitter body-indent fixup, the
+-- closer structural-dedent, and the suffix-matching primitive all live
+-- in `cursed.input_hook` now — View only supplies the generic trigger
+-- dispatch (`_run_input_hooks`) and the default-newline carry-indent
+-- fallback. Bridges into View's tree-sitter state go through the View
+-- methods that stayed here (`_indent_query`, `hl_tree`).
+----------------------------------------------------------------------------------------------------
 
---- Match `spec.pattern` as a SUFFIX of `left` (text left of the cursor).
---- When `spec.word` is set, require a leading word boundary: the byte
---- immediately before the matched span is non-`[%w_]`, OR the match
---- starts at byte 1 (BOL). Returns the matched string + its 1-based
---- start byte, or nil. Used by the electric-pair machinery to detect
---- a just-finished opener/closer token.
----@param left string text left of the cursor (bytes [1, c.col])
----@param spec table {pattern=string, word?=boolean}
----@return string|nil, integer|nil
-local function match_suffix(left, spec)
-    local pat = spec.pattern
-    if pat == nil or #left == 0 then
-        return nil
-    end
-    -- Scan non-overlapping matches rightward; accept the first that ENDS
-    -- exactly at the cursor (== #left). For `then` in `athen then` this
-    -- skips the embedded match (ends early) and accepts the real token.
-    local s, e = string.find(left, pat, 1)
-    while s do
-        if e == #left then
-            if spec.word then
-                if s == 1 then
-                    return left:sub(s, e), s
-                end
-                local prev = left:sub(s - 1, s - 1)
-                if not prev:match("[%w_]") then
-                    return left:sub(s, e), s
-                end
-            else
-                return left:sub(s, e), s
-            end
-        end
-        s, e = string.find(left, pat, e + 1)
-    end
-    return nil
-end
-
---- Composite of all active major modes' `electric_openers`, last-wins
---- precedence (later modes checked first; first match wins per cursor).
+--- Composite of all active major modes' `input_hooks`, flattening any
+--- `_multi` block-opener builders into separate entries and reversing so
+--- the last-declared hook (later mode / later in the mode's list) wins
+--- on first-match. Mirrors the old `_electric_openers` reversal: a user
+--- mode's hooks override the built-in defaults; within one mode,
+--- later-listed wins. Built per call (small lists, no caching needed).
 ---@return table[]
-function View:_electric_openers()
+function View:_input_hooks_composite()
     local out = {}
+    local count = 0
     for _, m in ipairs(self._major_modes) do
-        if m.electric_openers then
-            for _, op in ipairs(m.electric_openers) do
-                out[#out + 1] = op
+        if m.input_hooks then
+            for _, entry in ipairs(m.input_hooks) do
+                if type(entry) == "table" and entry._multi then
+                    for _, h in ipairs(entry.hooks) do
+                        count = count + 1
+                        out[count] = h
+                    end
+                else
+                    count = count + 1
+                    out[count] = entry
+                end
             end
         end
     end
     local rev = {}
-    for i = #out, 1, -1 do
+    for i = count, 1, -1 do
         rev[#rev + 1] = out[i]
     end
     return rev
 end
 
---- Composite of all active major modes' `electric_closers`, last-wins.
----@return table[]
-function View:_electric_closers()
-    local out = {}
-    for _, m in ipairs(self._major_modes) do
-        if m.electric_closers then
-            for _, cl in ipairs(m.electric_closers) do
-                out[#out + 1] = cl
-            end
+--- Run the input hooks for `trigger` ("printable" or "return"). For
+--- each cursor, prepare `left` — raw `line_text(c.line):sub(1, c.col)`
+--- for printable; trailing-whitespace-stripped for return (so
+--- `function f() <RET>` still completes a block opener whose pattern
+--- is `function%s*[^%s]*%([^%)]*%)$`) — scan the composite in priority
+--- order (last-declared first; first match wins per cursor), and
+--- dispatch each cursor to its winning hook's `fn`. Each hook runs its
+--- own `batch_edit` over its share of cursors. Returns the set of
+--- cursors actually handled (a hook may decline — e.g. a closer whose
+--- line isn't over-indented, or no parse tree available — leaving that
+--- cursor to the trigger site's default). No-op (`_set_goal_col` only)
+--- when no hooks / no matches.
+---@param trigger "printable" | "return"
+---@return table<Cursor,boolean>|nil cursor set actually handled
+function View:_run_input_hooks(trigger)
+    local hooks = self:_input_hooks_composite()
+    if #hooks == 0 then
+        return nil
+    end
+    local active = {}
+    for _, h in ipairs(hooks) do
+        if h.trigger == trigger then
+            active[#active + 1] = h
         end
     end
-    local rev = {}
-    for i = #out, 1, -1 do
-        rev[#rev + 1] = out[i]
-    end
-    return rev
-end
-
---- Find a BLOCK (keyword) opener matching the text left of the cursor.
---- Returns the matched opener spec, or nil. Only `block=true` openers
---- (keyword closers like `end`) are considered — non-block (bracket)
---- openers never complete on Return, only on the typing keystroke.
---- The match is against the text left of the cursor; callers that want
---- whitespace-insensitivity strip trailing ws from that text first.
----@param left string text left of the cursor (bytes [1, c.col])
----@return table|nil
-function View:_electric_block_match(left)
-    local openers = self:_electric_openers()
-    if #openers == 0 then
-        return nil
-    end
-    for _, op in ipairs(openers) do
-        if op.block and match_suffix(left, op) then
-            return op
-        end
-    end
-    return nil
-end
-
---- Compute the opener-line indent, body indent, and block-completion
---- text for a cursor where `op` (a block opener) matched. Returns
---- (body_ind, opener_ind, text) where `text` is the string to insert at
---- the cursor: `\n<body_ind>\n<opener_ind><closer>`.
----@param c Cursor
----@param op table matched block opener spec
----@return string body_ind, string opener_ind, string text
-function View:_electric_block_text(c, op, unit)
-    local line = self.buffer:line_text(c.line)
-    local ind = line:match("^([ \t]*)") or ""
-    if self.expand_tab then
-        ind = ind:gsub("\t", string.rep(" ", self.tab_width))
-    end
-    local body_ind = ind .. unit
-    local text = "\n" .. body_ind .. "\n" .. ind .. op.closer
-    return body_ind, ind, text
-end
-
---- Count `@indent`-captured nodes (per the active mode's
---- `indent_queries`) whose line range `[start_row, end_row]` contains
---- the cursor's line. Line-containment (not half-open byte-containment)
---- is used so the closer line (a block's last line) still counts as
---- inside the block it closes. A `[0, byte+1)` byte window restricts the
---- query so we don't walk every statement node in a huge document;
---- ancestor blocks of the cursor always start at/before it, so the
---- window catches every one. Returns nil when no parse tree or
---- `@indent` query is available (before the first highlight response
---- lands); callers treat nil as "no structural answer — fall back".
----
---- Drives both the closer-dedent target (depth - 1 = opener level of
---- the closed block) and the electric-opener body target (depth = body
---- indent of the just-opened block, queried AFTER the closer is
---- inserted so the opener is a real node).
----@param c Cursor
----@return integer|nil depth
-function View:_enclosing_indent_depth(c)
-    local query = self:_indent_query()
-    if query == nil then
-        return nil
-    end
-    local tree = self:hl_tree()
-    if tree == nil then
-        return nil
-    end
-    local ts = require("cursed.ts")
-    local root = tree:root()
-    if ts.node_is_null(root) then
-        return nil
-    end
-    local cursor, _cerr = ts.QueryCursor.new()
-    if not cursor then
-        return nil
-    end
-    local byte = cursor_byte_offset(self.buffer, c)
-    cursor:set_byte_range(0, byte + 1)
-    cursor:exec(query, root)
-    local depth = 0
-    for match in cursor:matches() do
-        for _, cap in ipairs(match.captures) do
-            if cap.name == "indent" then
-                local srow, _scol, erow = ts.node_point_range(cap.node)
-                if srow ~= nil and srow <= c.line and c.line <= erow then
-                    depth = depth + 1
-                end
-            end
-        end
-    end
-    return depth
-end
-
---- Structural target indent for a closer at the cursor: the opener
---- level of the innermost enclosing `@indent` block = (depth - 1) indent
---- units, floored at 0. Returns nil when no parse tree / `@indent` query
---- is available; callers treat nil as "don't dedent" so a
---- correctly-indented closer is never wrongly stripped.
----@param c Cursor
----@return string|nil target indent string (opener level of the closed block)
-function View:_electric_closer_target_indent(c)
-    local depth = self:_enclosing_indent_depth(c)
-    if depth == nil then
-        return nil
-    end
-    local units = depth - 1
-    if units < 0 then
-        units = 0
-    end
-    return string.rep(indent_unit(self), units)
-end
-
---- Structural target indent for the BODY line of a just-opened electric
---- block = (depth of `@indent` blocks whose line range contains the
---- body line) indent units, where `depth` already counts the
---- just-opened block (its node spans opener..closer and thus contains
---- the body line). MUST be queried AFTER the electric block text
---- (opener + empty body + closer) is inserted: before insertion the
---- freshly-typed opener is just an ERROR node (no closer yet), so the
---- block being opened isn't counted and the depth is wrong. Returns nil
---- when no parse tree / `@indent` query is available; callers keep the
---- provisional body indent (`opener_indent + one unit`) in that case.
----@param c Cursor cursor on the body line (post-insertion)
----@return string|nil target body indent string
-function View:_electric_body_target_indent(c)
-    local depth = self:_enclosing_indent_depth(c)
-    if depth == nil then
-        return nil
-    end
-    return string.rep(indent_unit(self), depth)
-end
-
---- If the cursor's line (content up to cursor, trailing whitespace
---- stripped) ends with an `electric_closers` pattern, return the
---- closer's structural target indent — but ONLY when the current line
---- indent EXCEEDS that target (the closer is over-indented). A correctly
---- indented closer (or an under-indented one) returns nil so Return
---- carries the current indent unchanged. When no parse tree is available,
---- returns nil (conservative: don't dedent) rather than guessing.
----@param c Cursor
----@return string|nil dedented indent to apply, or nil to carry
-function View:_electric_dedent(c)
-    local closers = self:_electric_closers()
-    if #closers == 0 then
+    if #active == 0 then
         return nil
     end
     local buf = self.buffer
-    local line = buf:line_text(c.line)
-    local raw_indent = line:match("^([ \t]*)") or ""
-    local cur_indent = raw_indent
-    if self.expand_tab then
-        cur_indent = cur_indent:gsub("\t", string.rep(" ", self.tab_width))
-    end
-    local content = line:sub(#raw_indent + 1, c.col)
-    local stripped = content:gsub("%s+$", "")
-    local matched = false
-    for _, cl in ipairs(closers) do
-        if match_suffix(stripped, cl) then
-            matched = true
-            break
-        end
-    end
-    if not matched then
-        return nil
-    end
-    local target = self:_electric_closer_target_indent(c)
-    if target == nil then
-        return nil
-    end
-    if #cur_indent > #target then
-        return target
-    end
-    return nil
-end
-
---- Electric pairs: called from `__printable` after each printable insert.
---- For each cursor, checks the text left of the cursor for a suffix match
---- against the composite `electric_openers`; on match inserts the closer.
---- NON-block (brackets): closer inserted right after the cursor, cursor
---- stays between (`(|)`). BLOCK (keywords): inserts
---- `\n<opener-indent><indent_unit>\n<opener-indent><closer>` and relocates
---- the cursor to the indented body line — so `then` yields a body line
---- and a pre-placed `end` below at the opener's indent. Joined to the
---- just-typed char's undo group (`breaks_group=false`).
-function View:electric_after_printable()
-    local openers = self:_electric_openers()
-    if #openers == 0 then
-        return
-    end
-    local buf = self.buffer
-    ---@type table<Cursor, table>
-    local match = {}
+    local by_hook = {}
+    local ordered = {}
     for _, c in ipairs(self.cursors) do
         local left = buf:line_text(c.line):sub(1, c.col)
-        for _, op in ipairs(openers) do
-            if match_suffix(left, op) then
-                match[c] = op
+        if trigger == "return" then
+            left = left:gsub("%s+$", "")
+        end
+        for _, h in ipairs(active) do
+            if IH.match_suffix(left, h) ~= nil then
+                if not by_hook[h] then
+                    by_hook[h] = {}
+                    ordered[#ordered + 1] = h
+                end
+                local list = by_hook[h]
+                list[#list + 1] = c
                 break
             end
         end
     end
-    if next(match) == nil then
-        return
+    if #ordered == 0 then
+        return nil
     end
-    local unit = indent_unit(self)
-    ---@type table<Cursor, string> block-opener cursors → provisional body indent
-    local block_body = {}
-    self:batch_edit(false, function(c)
-        local op = match[c]
-        if not op then
-            return c.line, c.col, c.line, c.col, "insert"
+    local handled = {}
+    for _, h in ipairs(ordered) do
+        local handled_cursors = h.fn(self, by_hook[h])
+        for _, c in ipairs(handled_cursors) do
+            handled[c] = true
         end
-        local sl, sc = c.line, c.col
-        if op.block then
-            local body_ind, _ind, text = self:_electric_block_text(c, op, unit)
-            block_body[c] = body_ind
-            local rl, rc = buf:insert_char(c.line, c.col, text)
-            return sl, sc, rl, rc, "insert_relocate", c.line + 1, #body_ind
-        else
-            local rl, rc = buf:insert_char(c.line, c.col, op.closer)
-            return sl, sc, rl, rc, "insert_relocate", c.line, c.col
-        end
-    end)
-    self:_electric_fixup_body_indent(block_body)
+    end
     self:_set_goal_col(self:p().col)
-end
-
---- Snap a just-inserted electric block-opener body line from its
---- provisional `opener_indent + one unit` indent to the tree-sitter
---- structural target. The freshly-typed opener only becomes a real
---- `@indent` node once its closer is present, so this MUST run AFTER the
---- block text's `batch_edit` (which inserts opener+empty-body+closer
---- and sync-parses). `block_body` maps each block-opener cursor to its
---- provisional body indent string. All targets are computed from the
---- current (post-insertion) tree BEFORE any fixup edit lands, so a
---- multi-cursor pass isn't invalidated by an earlier cursor's fixup in
---- the same batch. Entries are skipped when the tree is unavailable
---- (keep provisional) or the target already matches. Noop when empty.
----@param block_body table<Cursor, string>
-function View:_electric_fixup_body_indent(block_body)
-    if next(block_body) == nil then
-        return
-    end
-    local buf = self.buffer
-    ---@type table<Cursor, string>
-    local targets = {}
-    for c, provisional in pairs(block_body) do
-        local target = self:_electric_body_target_indent(c)
-        if target ~= nil and target ~= provisional then
-            targets[c] = target
-        end
-    end
-    if next(targets) == nil then
-        return
-    end
-    self:batch_edit(false, function(c)
-        local provisional = block_body[c]
-        local target = targets[c]
-        if target == nil then
-            return c.line, c.col, c.line, c.col, "insert"
-        end
-        -- The body line currently holds exactly the provisional indent
-        -- (no trailing text — it was just created). Replace [0, #provisional)
-        -- with the structural target; cursor relocates to its end.
-        local sl, sc = c.line, 0
-        local el, ec = c.line, #provisional
-        buf:delete_char(sl, sc, ec)
-        local rl, rc = buf:insert_char(sl, sc, target)
-        return sl, sc, rl, rc, "replace", el, ec
-    end)
+    return handled
 end
 
 --- Insert a newline at every cursor, with electric indent.
---- Computes the leading-whitespace indent of each cursor's current
---- line and inserts "\n" + indent. The batch_edit insert translator
---- correctly handles same-line-newline splits: a later cursor on the
---- same line ends up in the new line at the appropriate column.
---- Syntax-aware: if the cursor sits inside a tree-sitter `@indent`
---- node (per the active mode's `indent_queries`), one extra indent unit
---- is appended so e.g. `if x then<RET>` indents the body.
+---
+--- First the `return`-trigger input hooks fire (block-opener-on-return
+--- pre-places the closer; closer-dedent snaps an over-indented closer
+--- line one unit less). Each hook runs its own `batch_edit`; cursors a
+--- hook actually handled skip the default batch below. The default
+--- batch computes the leading-whitespace indent of each unhandled
+--- cursor's line and inserts "\n" + indent, plus one extra indent unit
+--- when the cursor sits inside a tree-sitter `@indent` node (per the
+--- active mode's `indent_queries`) — so e.g. `if x then<RET>` indents
+--- the body. The batch_edit insert translator handles same-line-newline
+--- splits: a later cursor on the same line ends up in the new line at
+--- the appropriate column.
 function View:insert_newline()
     local buf = self.buffer
     local breaks = buf:should_break_edit("\n")
-    local unit = indent_unit(self)
-    ---@type table<Cursor, string> block-opener cursors → provisional body indent
-    local block_body = {}
+    local handled = self:_run_input_hooks("return")
     self:batch_edit(breaks, function(c)
+        if handled ~= nil and handled[c] then
+            -- Already edited by a hook (block opener inserted its body,
+            -- closer dedented + created the new line). Identity insert
+            -- → no-op translator; the cursor stays where the hook
+            -- relocated it.
+            return c.line, c.col, c.line, c.col, "insert"
+        end
         local line = buf:line_text(c.line)
         local indent = line:match("^([ \t]*)") or ""
         if self.expand_tab then
             indent = indent:gsub("\t", string.rep(" ", self.tab_width))
         end
-        -- Block-opener completion also fires on Return: e.g. after
-        -- `function f()` (cursor right of the `)`) Return inserts the
-        -- body line + pre-placed `end`, mirroring the printable path.
-        -- Takes priority over the closer-dedent path: an opener at the
-        -- line end is NOT a closer line to dedent. Strip trailing
-        -- whitespace from the left-of-cursor text so `function f() `<RET>
-        -- still completes.
-        local left = line:sub(1, c.col):gsub("%s+$", "")
-        local op = self:_electric_block_match(left)
-        if op ~= nil then
-            local body_ind, _ind, text = self:_electric_block_text(c, op, unit)
-            block_body[c] = body_ind
-            local sl, sc = c.line, c.col
-            local rl, rc = buf:insert_char(c.line, c.col, text)
-            return sl, sc, rl, rc, "insert_relocate", c.line + 1, #body_ind
-        end
-        local dedented = self:_electric_dedent(c)
-        if dedented ~= nil then
-            -- A closer sits at the end of this line (e.g. `end`/`}`):
-            -- snap THIS line's leading indent to one unit less (the
-            -- opener's level) and create the new line at that same
-            -- dedented indent. Done as a single "replace" over region
-            -- [0, cursor): replaces leading-ws + content with
-            -- `dedented + content`, tacking on `\n + dedented`.
-            local content = line:sub(#indent + 1, c.col)
-            local replacement = dedented .. content .. "\n" .. dedented
-            local sl, sc = c.line, 0
-            local el, ec = c.line, c.col
-            buf:delete_char(sl, sc, ec)
-            local rl, rc = buf:insert_char(sl, sc, replacement)
-            return sl, sc, rl, rc, "replace", el, ec
-        end
         if self:_syntax_indent_extra(c) then
-            indent = indent .. unit
+            indent = indent .. indent_unit(self)
         end
         local sl, sc = c.line, c.col
         local rl, rc = buf:insert_char(c.line, c.col, "\n" .. indent)
         return sl, sc, rl, rc, "insert"
     end)
-    self:_electric_fixup_body_indent(block_body)
     self:_set_goal_col(self:p().col)
 end
 

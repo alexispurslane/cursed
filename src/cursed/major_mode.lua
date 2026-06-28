@@ -40,24 +40,29 @@
 --- top of the carried line indent. Falls back to indent-carry-only when
 --- no tree is available yet (before the first highlight response lands).
 ---
---- Electric pairs: a mode may declare `electric_openers` — a list of
---- `{ pattern, closer, block?, word? }`. After each printable keystroke
---- (`__printable`), the View checks the text immediately left of each
---- cursor for a suffix match against the composite of all active modes'
---- openers (last-wins precedence). On match: for a NON-block opener
---- (brackets) the closer is inserted right after the cursor (`(|)`);
---- for a BLOCK opener (keywords like `then`/`do`/`function`) the View
---- inserts `<newline><opener-indent><indent_unit><newline><opener-indent><closer>`
---- and moves the cursor to the indented body line in the middle — so the
---- closer (`end`) is pre-placed at the opener's indent and the user never
---- types it. `pattern` is a Lua pattern matched as a SUFFIX of the
---- left-of-cursor text; `word=true` requires a leading word boundary
---- (BOL or a non-`[%w_]` char) so `append`/`send` don't fire `end`.
----
---- `electric_closers` — list of `{ pattern, word? }` — drives auto-dedent
---- on Return: when the line's trailing text matches, that line is
---- re-indented ONE unit LESS (the closer snaps to the opener's indent)
---- and the new line is created at the dedented indent.
+--- Input hooks: a mode may declare `input_hooks` — a flat list of hook
+--- specs (built via the `cursed.input_hook` higher-order builders,
+--- `IH`). Each hook has a Lua `pattern` matched as a SUFFIX of the text
+--- left of the cursor; the moment the user finishes typing it (the
+--- `printable` trigger) or hits Return (the `return` trigger), the hook's
+--- `fn(view, cursors)` runs. Two predefined builders cover the classic
+--- electric-pair behaviour dropped in by `major_mode`s:
+---   * `IH.opener(pattern, closer, {block?, word?})` — on a `printable`
+---     trigger (and, when `block=true`, ALSO on `return`) auto-insert the
+---     closer; brackets insert inline (`(|)`), block openers insert
+---     `<newline><body-indent><newline><opener-indent><closer>` and
+---     relocate to the body line (closer pre-placed at the opener's
+---     indent), then tree-sitter-fix the body indent. `word=true`
+---     requires a leading word boundary so `append`/`send`/`bend` don't
+---     fire `end`. Block openers AUTO-SPLIT into two hook entries (one
+---     per trigger) sharing one fn.
+---   * `IH.closer(pattern, {word?})` — on `return`, snap the line's indent
+---     one unit LESS (structural opener level via the `@indent` query)
+---     and create the new line at that dedented indent; declines when no
+---     parse tree is available or the line is not over-indented.
+--- Modes that need bespoke behaviour write `IH.hook(pattern, trigger, fn,
+---   {word?})` directly. Hooks run their own `batch_edit`; the View's
+--- `_run_input_hooks(trigger)` does the suffix-scan dispatch.
 
 local keybind = require("cursed.keybind")
 
@@ -74,8 +79,7 @@ local keybind = require("cursed.keybind")
 ---@field injection_query string|nil injections query (walks the block tree for content regions to inject another grammar into — markdown: inline nodes, fenced code blocks, metadata blocks)
 ---@field extra_injected_grammars table<string,string>|nil grammar name → query source, for grammars the injection_query references that have no MajorMode of their own (e.g. markdown_inline, referenced by markdown's injection query)
 ---@field indent_queries string|nil predicate-free tree-sitter query source; `@indent`-captured nodes add one indent level on Return when the cursor is inside them
----@field electric_openers table|nil list of `{ pattern, closer, block?, word? }`; suffix-matched in `__printable` to auto-insert a closer
----@field electric_closers table|nil list of `{ pattern, word? }`; suffix-matched on Return to auto-dedent the closer line
+---@field input_hooks table|nil flat list of input-hook specs (build with cursed.input_hook); matched as a suffix of left-of-cursor text and dispatched by View:_run_input_hooks
 ---@field _trie table? lazily-built keybind trie for this mode's keybindings
 local MajorMode = {}
 MajorMode.__index = MajorMode
@@ -93,8 +97,7 @@ MajorMode.__index = MajorMode
 ---@field injection_query? string
 ---@field extra_injected_grammars? table<string,string>
 ---@field indent_queries? string
----@field electric_openers? table
----@field electric_closers? table
+---@field input_hooks? table
 
 --- Create a major mode template from a config spec table.
 --- Use :instantiate() to create per-view instances.
@@ -115,8 +118,7 @@ function MajorMode.new(spec)
         injection_query = spec.injection_query,
         extra_injected_grammars = spec.extra_injected_grammars,
         indent_queries = spec.indent_queries,
-        electric_openers = spec.electric_openers,
-        electric_closers = spec.electric_closers,
+        input_hooks = spec.input_hooks,
         _trie = nil,
     }, MajorMode)
 end
@@ -158,7 +160,6 @@ end
 ---@field injection_query string|nil (inherited)
 ---@field extra_injected_grammars table<string,string>|nil (inherited)
 ---@field indent_queries string|nil (inherited)
----@field electric_openers table|nil (inherited)
----@field electric_closers table|nil (inherited)
+---@field input_hooks table|nil (inherited)
 
 return MajorMode

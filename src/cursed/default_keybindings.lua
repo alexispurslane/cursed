@@ -25,11 +25,11 @@ return {
             view:insert_char(ch)
         end
         -- Electric pairs (auto-insert closer when the text left of the
-        -- cursor matches an active mode's `electric_openers`). Run once
+        -- cursor matches an active mode's `input_hooks`). Run once
         -- after the typed characters land; the suffix check sees the
         -- final left-of-cursor text. Not multiplied by universal_args:
         -- a `then` is `then` regardless of repeat count.
-        view:electric_after_printable()
+        view:_run_input_hooks("printable")
     end,
 
     -- Line navigation

@@ -6,6 +6,7 @@
 --- declaration order + the highlighter's same-node-later-wins rule.
 
 local TO = require("cursed.textobject")
+local IH = require("cursed.input_hook")
 
 -- This spec file runs AFTER the global `editor` exists (see
 -- `cursed.config`), so it can register per-mode event handlers on
@@ -218,32 +219,34 @@ return {
   (do_statement)
 ] @indent
 ]],
-    -- Electric pairs. Openers are suffix-matched against the text left
-    -- of the cursor on each printable keystroke; on match the closer is
-    -- auto-inserted. Bracket openers insert inline (`(|)`); block (keyword)
-    -- openers insert `<newline><body-indent><newline><opener-indent><closer>`
-    -- and relocate the cursor to the body line — so you never type `end`.
-    -- `word=true` enforces a leading word boundary so `append`/`send`/
-    -- `bend` don't trigger `end`.
-    electric_openers = {
-        -- Brackets: closer inserted right after the cursor.
-        { pattern = "%(", closer = ")" },
-        { pattern = "%[", closer = "]" },
-        { pattern = "%{", closer = "}" },
+    -- Input hooks (electric pairs). `IH.opener` matches its Lua pattern
+    -- as a SUFFIX of the text left of the cursor the moment the user
+    -- finishes typing it; on match the closer is auto-inserted. Bracket
+    -- openers insert inline (`(|)`); block (keyword) openers insert
+    -- `<newline><body-indent><newline><opener-indent><closer>` and
+    -- relocate the cursor to the body line — so you never type `end`.
+    -- `block=true` AUTO-SPLITS so the same opener also fires on Return
+    -- (e.g. `function f() <RET>` pre-places `end`). `word=true` enforces
+    -- a leading word boundary so `append`/`send`/`bend` don't trigger `end`.
+    -- `IH.closer` matches on Return and snaps the line's indent one unit
+    -- less to the opener's level (structural `@indent` query).
+    input_hooks = {
+        -- Brackets: closer inserted right after the cursor (printable only).
+        IH.opener("%(", ")"),
+        IH.opener("%[", "]"),
+        IH.opener("%{", "}"),
         -- Keyword block openers: closer (`end`) pre-placed below at the
-        -- opener's indent, cursor on the indented body line.
-        { pattern = "then$", closer = "end", block = true, word = true },
-        { pattern = "do$", closer = "end", block = true, word = true },
-        { pattern = "function%s*[^%s]*%([^%)]*%)$", closer = "end", block = true, word = true },
-    },
-    -- Electric closers: on Return, if the line's trailing text matches,
-    -- snap that line's indent one unit LESS (to the opener's level) and
-    -- create the new line at that dedented indent.
-    electric_closers = {
-        { pattern = "end$", word = true },
-        { pattern = "else$", word = true },
-        { pattern = "elseif%s+[^%s]+$", word = true },
-        { pattern = "until%s+[^%s]+$", word = true },
-        { pattern = "%}$" },
+        -- opener's indent, cursor on the indented body line; fires on
+        -- both printable and Return.
+        IH.opener("then$", "end", { block = true, word = true }),
+        IH.opener("do$", "end", { block = true, word = true }),
+        IH.opener("function%s*[^%s]*%([^%)]*%)$", "end", { block = true, word = true }),
+        -- Closers: on Return, snap the closer line's indent one unit
+        -- less and open the next line at that dedented indent.
+        IH.closer("end$", { word = true }),
+        IH.closer("else$", { word = true }),
+        IH.closer("elseif%s+[^%s]+$", { word = true }),
+        IH.closer("until%s+[^%s]+$", { word = true }),
+        IH.closer("%}$"),
     },
 }
