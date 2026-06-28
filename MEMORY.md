@@ -19,19 +19,20 @@ so the agent can pick up context across sessions.
 - I realize the approach is getting overly complex.
 - Concretely the dedent rule is: on Return, if the line's trailing text matches a closer pattern, re-indent that line one *less* unit than its carried indent, then insert the newline at that dedented indent.
 - The structural helper (`_electric_closer_target_indent`) is used in exactly one: the closer-dedent decision on Return.
+- we should probably figure out the amount of indentation to insert directly after an electric opener pattern using the tree sitter based target indentation calculation
 
 ## Gotchas & Errors
 
-- md` starts cleanly (the tb_init failure is just because there's no TTY).
-- Could not find the exact text in src/cursed/major_mode.lua. The old text must match exactly including all whitespace and newlines. — Fix: alright, now here's how we fix the gap: we implement electric pairs, using defined pairs for the mode!
 - Confirmed: incomplete `if x then` parses as `(chunk (ERROR (identifier)))` — **no `if_statement` node exists**, so query-based indent can't fire for a freshly-typed opener.
 - === Vendored files ===
 - rg: main.c: IO error for operation on main.c: No such file or directory (os error 2)
 - The cost is that users can shoot themselves in the foot, but the reward is that nothing is blocked.
 - === initial ===
 - Let me verify the key claim empirically — that the structural helper *can't* be used at block-opener completion time because the tree is incomplete then.
+- So you **cannot** compute the body indent from the tree *before* inserting the closer.
+- That last point is the new finding (you'd previously concluded "can't be used at completion time" — true *before* closer insertion, but **not** after).
 
 ## Heavily Read
 
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/major_mode.lua (3 reads) — Now there are duplicate fields. The MajorMode class (lines 79-80) and… let me lo
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/view.lua (26 reads) — I want to make sure I scope this right before building, because there's a real f
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/view.lua (8 reads) — Let me understand the tree availability at printable time. Let me look at `hl_tr
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/ts.lua (4 reads) — Let me write a quick repro to empirically test whether an incomplete `if x then`

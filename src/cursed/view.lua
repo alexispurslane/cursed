@@ -3668,18 +3668,24 @@ function View:_electric_block_text(c, op, unit)
     return body_ind, ind, text
 end
 
---- Structural target indent for a closer at the cursor: the opener
---- level of the innermost enclosing `@indent` block = (count of `@indent`
---- nodes whose line range contains the cursor's line - 1) indent units,
---- floored at 0. Line-containment (`start_row <= line <= end_row`) is
---- used so the closer line (the block's last line) counts as inside the
---- block it closes. Returns nil when no parse tree or `@indent` query is
---- available (before the first highlight response lands); callers treat
---- nil as "don't dedent" so a correctly-indented closer is never wrongly
---- stripped.
+--- Count `@indent`-captured nodes (per the active mode's
+--- `indent_queries`) whose line range `[start_row, end_row]` contains
+--- the cursor's line. Line-containment (not half-open byte-containment)
+--- is used so the closer line (a block's last line) still counts as
+--- inside the block it closes. A `[0, byte+1)` byte window restricts the
+--- query so we don't walk every statement node in a huge document;
+--- ancestor blocks of the cursor always start at/before it, so the
+--- window catches every one. Returns nil when no parse tree or
+--- `@indent` query is available (before the first highlight response
+--- lands); callers treat nil as "no structural answer — fall back".
+---
+--- Drives both the closer-dedent target (depth - 1 = opener level of
+--- the closed block) and the electric-opener body target (depth = body
+--- indent of the just-opened block, queried AFTER the closer is
+--- inserted so the opener is a real node).
 ---@param c Cursor
----@return string|nil target indent string (opener level of the closed block)
-function View:_electric_closer_target_indent(c)
+---@return integer|nil depth
+function View:_enclosing_indent_depth(c)
     local query = self:_indent_query()
     if query == nil then
         return nil
@@ -3698,11 +3704,6 @@ function View:_electric_closer_target_indent(c)
         return nil
     end
     local byte = cursor_byte_offset(self.buffer, c)
-    -- Window from doc start to just past the cursor: the block being
-    -- CLOSED ends exactly at the closer (the cursor byte), so a window
-    -- of [byte, byte+1) would exclude it. [0, byte+1) catches every
-    -- ancestor and the closing node; line-containment filtering then
-    -- keeps only those actually enclosing the cursor's line.
     cursor:set_byte_range(0, byte + 1)
     cursor:exec(query, root)
     local depth = 0
@@ -3716,11 +3717,46 @@ function View:_electric_closer_target_indent(c)
             end
         end
     end
+    return depth
+end
+
+--- Structural target indent for a closer at the cursor: the opener
+--- level of the innermost enclosing `@indent` block = (depth - 1) indent
+--- units, floored at 0. Returns nil when no parse tree / `@indent` query
+--- is available; callers treat nil as "don't dedent" so a
+--- correctly-indented closer is never wrongly stripped.
+---@param c Cursor
+---@return string|nil target indent string (opener level of the closed block)
+function View:_electric_closer_target_indent(c)
+    local depth = self:_enclosing_indent_depth(c)
+    if depth == nil then
+        return nil
+    end
     local units = depth - 1
     if units < 0 then
         units = 0
     end
     return string.rep(indent_unit(self), units)
+end
+
+--- Structural target indent for the BODY line of a just-opened electric
+--- block = (depth of `@indent` blocks whose line range contains the
+--- body line) indent units, where `depth` already counts the
+--- just-opened block (its node spans opener..closer and thus contains
+--- the body line). MUST be queried AFTER the electric block text
+--- (opener + empty body + closer) is inserted: before insertion the
+--- freshly-typed opener is just an ERROR node (no closer yet), so the
+--- block being opened isn't counted and the depth is wrong. Returns nil
+--- when no parse tree / `@indent` query is available; callers keep the
+--- provisional body indent (`opener_indent + one unit`) in that case.
+---@param c Cursor cursor on the body line (post-insertion)
+---@return string|nil target body indent string
+function View:_electric_body_target_indent(c)
+    local depth = self:_enclosing_indent_depth(c)
+    if depth == nil then
+        return nil
+    end
+    return string.rep(indent_unit(self), depth)
 end
 
 --- If the cursor's line (content up to cursor, trailing whitespace
@@ -3796,6 +3832,8 @@ function View:electric_after_printable()
         return
     end
     local unit = indent_unit(self)
+    ---@type table<Cursor, string> block-opener cursors → provisional body indent
+    local block_body = {}
     self:batch_edit(false, function(c)
         local op = match[c]
         if not op then
@@ -3804,6 +3842,7 @@ function View:electric_after_printable()
         local sl, sc = c.line, c.col
         if op.block then
             local body_ind, _ind, text = self:_electric_block_text(c, op, unit)
+            block_body[c] = body_ind
             local rl, rc = buf:insert_char(c.line, c.col, text)
             return sl, sc, rl, rc, "insert_relocate", c.line + 1, #body_ind
         else
@@ -3811,7 +3850,53 @@ function View:electric_after_printable()
             return sl, sc, rl, rc, "insert_relocate", c.line, c.col
         end
     end)
+    self:_electric_fixup_body_indent(block_body)
     self:_set_goal_col(self:p().col)
+end
+
+--- Snap a just-inserted electric block-opener body line from its
+--- provisional `opener_indent + one unit` indent to the tree-sitter
+--- structural target. The freshly-typed opener only becomes a real
+--- `@indent` node once its closer is present, so this MUST run AFTER the
+--- block text's `batch_edit` (which inserts opener+empty-body+closer
+--- and sync-parses). `block_body` maps each block-opener cursor to its
+--- provisional body indent string. All targets are computed from the
+--- current (post-insertion) tree BEFORE any fixup edit lands, so a
+--- multi-cursor pass isn't invalidated by an earlier cursor's fixup in
+--- the same batch. Entries are skipped when the tree is unavailable
+--- (keep provisional) or the target already matches. Noop when empty.
+---@param block_body table<Cursor, string>
+function View:_electric_fixup_body_indent(block_body)
+    if next(block_body) == nil then
+        return
+    end
+    local buf = self.buffer
+    ---@type table<Cursor, string>
+    local targets = {}
+    for c, provisional in pairs(block_body) do
+        local target = self:_electric_body_target_indent(c)
+        if target ~= nil and target ~= provisional then
+            targets[c] = target
+        end
+    end
+    if next(targets) == nil then
+        return
+    end
+    self:batch_edit(false, function(c)
+        local provisional = block_body[c]
+        local target = targets[c]
+        if target == nil then
+            return c.line, c.col, c.line, c.col, "insert"
+        end
+        -- The body line currently holds exactly the provisional indent
+        -- (no trailing text — it was just created). Replace [0, #provisional)
+        -- with the structural target; cursor relocates to its end.
+        local sl, sc = c.line, 0
+        local el, ec = c.line, #provisional
+        buf:delete_char(sl, sc, ec)
+        local rl, rc = buf:insert_char(sl, sc, target)
+        return sl, sc, rl, rc, "replace", el, ec
+    end)
 end
 
 --- Insert a newline at every cursor, with electric indent.
@@ -3826,6 +3911,8 @@ function View:insert_newline()
     local buf = self.buffer
     local breaks = buf:should_break_edit("\n")
     local unit = indent_unit(self)
+    ---@type table<Cursor, string> block-opener cursors → provisional body indent
+    local block_body = {}
     self:batch_edit(breaks, function(c)
         local line = buf:line_text(c.line)
         local indent = line:match("^([ \t]*)") or ""
@@ -3843,6 +3930,7 @@ function View:insert_newline()
         local op = self:_electric_block_match(left)
         if op ~= nil then
             local body_ind, _ind, text = self:_electric_block_text(c, op, unit)
+            block_body[c] = body_ind
             local sl, sc = c.line, c.col
             local rl, rc = buf:insert_char(c.line, c.col, text)
             return sl, sc, rl, rc, "insert_relocate", c.line + 1, #body_ind
@@ -3870,6 +3958,7 @@ function View:insert_newline()
         local rl, rc = buf:insert_char(c.line, c.col, "\n" .. indent)
         return sl, sc, rl, rc, "insert"
     end)
+    self:_electric_fixup_body_indent(block_body)
     self:_set_goal_col(self:p().col)
 end
 
