@@ -608,6 +608,18 @@ local function handle_query(msg)
             return
         end
 
+        -- Publish a shared parse-tree snapshot for the main lane so it can
+        -- run tree-sitter-backed USER inputs (indent, imenu/xref,
+        -- textobjects) without a second parse on main. The slot keeps
+        -- its OWN ts_tree_copy (subtree refcount bumped + atomic), so the
+        -- lane may later ts_tree_edit its working old_tree for incremental
+        -- reparsing (copy-on-write leaves the published snapshot stable).
+        -- Main never edits; only reads. Skipped when text_ptr is nil
+        -- (empty doc — nothing to expose).
+        if text_ptr ~= nil then
+            ss:publish_tree(view_id, gen, tree.ptr)
+        end
+
         -- Node-text slicer for predicate evaluation: pulls [sb, eb) bytes
         -- directly from the malloc'd text buffer (no Lua string copy).
         -- Defined here so the injection pass below can use it too.

@@ -212,6 +212,61 @@ function SharedState:make_hl_query_req(
     return req, text_ptr
 end
 
+----------------------------------------------------------------------------------------------------
+-- Shared parse-tree slot table (highlight lane → main)
+--
+-- The highlight lane parses off-thread and publishes a snapshot of the
+-- resulting TSTree here (keyed by view_id) after each successful parse.
+-- Main acquires it to run tree-sitter-backed USER inputs (indent, imenu,
+-- xref, textobjects) WITHOUT a second parse on main and WITHOUT crossing
+-- lua_State boundaries (Lua values can't cross lua_States; a C/FFI cell
+-- with a TSTree* can).
+--
+-- Invariant: main NEVER edits the published tree — only reads it. The
+-- lane is the sole writer (briefly, under a mutex, during reparsing).
+-- The slot holds its own ts_tree_copy ref, so a subsequent ts_tree_edit
+-- on the lane's working old_tree copy-on-writes the affected subtrees
+-- (subtree refcounting is atomic) and leaves the published snapshot
+-- stable for any in-flight main reader.
+----------------------------------------------------------------------------------------------------
+
+--- Publish a parse-tree snapshot for `view_id`. Called by the highlight
+--- lane after each successful block parse. The lane retains its own
+--- tree reference; the slot stores an independent ts_tree_copy.
+---@param view_id integer
+---@param gen integer lane-side gen that produced this tree
+---@param tree_ptr any TSTree* (raw cdata); the slot copies it (caller keeps ownership)
+function SharedState:publish_tree(view_id, gen, tree_ptr)
+    shared_ffi.C.shared_tree_publish(self._ptr, view_id, gen, tree_ptr)
+end
+
+--- Acquire the latest published parse tree for `view_id`. Returns the
+--- raw TSTree* (a NEW ts_tree_copy — caller owns the ref; wrap with
+--- `cursed.ts.Tree.new` for RAII) plus the lane gen that produced it,
+--- or (nil, nil) if no tree has been published yet for this view.
+---
+--- The returned tree is a READ-ONLY best-effort snapshot that may lag
+--- the latest keystroke by one async round-trip; never call ts_tree_edit
+--- on it.
+---@param view_id integer
+---@return any|nil tree_ptr raw TSTree* (wrap with ts.Tree.new)
+---@return integer|nil gen
+function SharedState:acquire_tree(view_id)
+    local gen_out = ffi.new("uint32_t[1]")
+    local ptr = shared_ffi.C.shared_tree_acquire(self._ptr, view_id, gen_out)
+    if ptr == nil then
+        return nil, nil
+    end
+    return ptr, tonumber(gen_out[0])
+end
+
+--- Drop the shared slot for `view_id` (frees the slot's tree copy).
+--- Called when a view is closed so the table doesn't outlive its docs.
+---@param view_id integer
+function SharedState:release_tree(view_id)
+    shared_ffi.C.shared_tree_release(self._ptr, view_id)
+end
+
 return {
     SharedState = SharedState,
     MSG_FILE_LOAD = shared_ffi.MSG_FILE_LOAD,

@@ -101,6 +101,7 @@ local log = require("cursed.log")
 ---@field _hl_last_vend integer|nil last viewport end byte we dispatched for
 ---@field _hl_last_gen integer|nil last buffer gen we dispatched an edit for (avoids repeat dispatch on every render when the edit was already sent)
 ---@field _bench_open_t0 integer|nil wall-clock us at Editor:open_file() start; instrumentation for file-open latency (cleared on load)
+---@field _indent_query_cache table|nil {lang,src,query} lazily-compiled indent query for syntax-aware Return; rebuilt when the active language or `indent_queries` source changes
 local View = {}
 View.__index = View
 
@@ -179,6 +180,7 @@ function View.new(buffer)
         _hl_last_vstart = nil,
         _hl_last_vend = nil,
         _hl_last_gen = nil,
+        _indent_query_cache = nil,
     }, View)
 end
 
@@ -1745,6 +1747,38 @@ function View:_hl_snapshot_text()
     -- Direct piece-by-piece memcpy into the dest — no Lua string, no
     -- table.concat. ~7ms → <1ms on a 1.18MB / 16k-line doc.
     return self.buffer:write_text_direct()
+end
+
+--- Acquire the latest shared parse-tree snapshot for this view, published
+--- by the highlight lane after its most recent successful parse.
+--- Returns a read-only `ts.Tree` (RAII: ts_tree_delete on GC) plus the
+--- lane gen that produced it, or (nil, nil) if no tree has been published
+--- yet (e.g. before the first response lands).
+---
+--- The tree is a best-effort snapshot that may lag the latest keystroke
+--- by one async round-trip: compare the returned `gen` against
+--- `self._hl_gen` to decide staleness (gen < _hl_gen means a newer query
+--- is in flight). NEVER call ts_tree_edit on the returned tree — main is
+--- a read-only consumer; only the lane writes (under a mutex).
+---
+--- This is the #11 resolution (future-work report §4): a single shared
+--- parse tree on main, mutex-guarded, instead of a second parse or a
+--- sync ring query.
+---@return any|nil tree ts.Tree (RAII), or nil if none published yet
+---@return integer|nil gen lane-side gen that produced `tree`
+function View:hl_tree()
+    if not self._hl_enabled or self._hl_lang == nil or self._hl_view_id == 0 then
+        return nil, nil
+    end
+    local ptr, gen = ss():acquire_tree(self._hl_view_id)
+    if ptr == nil then
+        return nil, nil
+    end
+    -- Wrap the fresh ts_tree_copy in an RAII Tree so ts_tree_delete runs
+    -- on collection (main holds its own ref via the copy). Tree.new owns
+    -- the pointer it's handed.
+    local ts = require("cursed.ts")
+    return ts.Tree.new(ptr), gen
 end
 
 --- Dispatch a query for a contiguous bucket range [bucket_start,
@@ -3363,19 +3397,173 @@ function View:insert_char(str)
     self:_set_goal_col(self:p().col)
 end
 
+----------------------------------------------------------------------------------------------------
+-- Syntax-aware indent (electric indent on Return)
+--
+-- A major mode may declare `indent_queries` — a predicate-free
+-- tree-sitter query whose `@indent` captures mark nodes that should add
+-- ONE extra indent level on the new line when Return is pressed inside
+-- them. We query the shared parse tree (published by the highlight lane
+-- via #11) for `@indent`-captured nodes containing the cursor; if the
+-- cursor sits inside any, append one indent unit on top of the carried
+-- line indent. Falls back to indent-carry-only when the mode declares no
+-- `indent_queries`, the language/query is unavailable, or no parse tree
+-- has been published yet (before the first highlight response lands).
+--
+-- The tree is a best-effort snapshot; in practice it is current at
+-- Return time because each prior keystroke's edit query already landed
+-- via the zero-flash sync-wait path (`_hl_record_edit` →
+-- `_hl_wait_response`), which publishes a fresh tree.
+----------------------------------------------------------------------------------------------------
+
+--- One unit of indentation for the active view's settings: a tab when
+--- `expand_tab` is false, otherwise `indent_width` spaces.
+---@param view View
+---@return string
+local function indent_unit(view)
+    if view.expand_tab then
+        return string.rep(" ", view.indent_width)
+    end
+    return "\t"
+end
+
+--- Absolute document byte offset of a cursor (line, col), computed
+--- directly from the buffer (`line_len` sums include the trailing newline,
+--- matching the tree's byte space). O(line) per cursor — fine for a
+--- non-hot path (Return), and correct mid-batch (unlike the cached
+--- `_hl_line_starts`, which can't reflect an earlier cursor's edit in
+--- the same `batch_edit`).
+---@param buf Buffer
+---@param c Cursor
+---@return integer
+local function cursor_byte_offset(buf, c)
+    local off = c.col
+    for i = 0, c.line - 1 do
+        off = off + buf:line_len(i)
+    end
+    return off
+end
+
+--- Lazily build (or reuse) the compiled indent query for the active
+--- major mode's `indent_queries` source + the view's `_hl_lang`. Returns
+--- the ts.Query, or nil if no indent queries are declared, no language is
+--- set, or the query failed to compile. Cached on
+--- `self._indent_query_cache`; rebuilt when the language or source
+--- changes (e.g. on mode switch).
+---@return any|nil query
+function View:_indent_query()
+    local src = nil
+    for _, m in ipairs(self._major_modes) do
+        if m.indent_queries ~= nil then
+            src = m.indent_queries
+        end
+    end
+    if src == nil or self._hl_lang == nil then
+        return nil
+    end
+    local cache = self._indent_query_cache
+    if cache ~= nil and cache.lang == self._hl_lang and cache.src == src then
+        return cache.query
+    end
+    local ts = require("cursed.ts")
+    local lang_ptr, lerr = ts.lang_get(self._hl_lang)
+    if not lang_ptr then
+        log.warn("view", "indent query: language unavailable", {
+            language = self._hl_lang,
+            error = tostring(lerr),
+        })
+        return nil
+    end
+    local query, qerr = ts.Query.new(lang_ptr, src)
+    if not query then
+        log.warn("view", "indent query failed to compile", {
+            language = self._hl_lang,
+            error = tostring(qerr),
+        })
+        return nil
+    end
+    self._indent_query_cache = { lang = self._hl_lang, src = src, query = query }
+    return query
+end
+
+--- Decide whether Return at this cursor should add ONE extra indent
+--- level on top of the carried line indent. Queries the shared parse
+--- tree for `@indent`-captured nodes containing the cursor (half-open
+--- `[start_byte, end_byte)`). An @indent node only triggers the extra
+--- indent when the cursor sits on the node's OPENER line (its start row):
+--- that's the case where you just typed the block-opening construct
+--- (`if x then<RET>`, `function f()<RET>`) and are about to write the
+--- body. When the cursor is on a later line inside an enclosing block
+--- (e.g. `return`/`local` as the last statement before `end`), no extra
+--- level is added — Return keeps the body's current indent (carry).
+--- This is the "right at the last character / just past" guard in
+--- practice: a completed statement on its own line is never on the
+--- block opener's line, so it never over-indents.
+---@param c Cursor
+---@return boolean
+function View:_syntax_indent_extra(c)
+    local query = self:_indent_query()
+    if query == nil then
+        return false
+    end
+    local tree = self:hl_tree() -- gen ignored; the tree is current at Return time
+    if tree == nil then
+        return false
+    end
+    local ts = require("cursed.ts")
+    local root = tree:root()
+    if ts.node_is_null(root) then
+        return false
+    end
+    local byte = cursor_byte_offset(self.buffer, c)
+    local cursor, cerr = ts.QueryCursor.new()
+    if not cursor then
+        return false
+    end
+    -- Restrict to matches intersecting a 1-byte window at the cursor so
+    -- we don't walk every statement node in a huge document.
+    cursor:set_byte_range(byte, byte + 1)
+    cursor:exec(query, root)
+    for match in cursor:matches() do
+        for _, cap in ipairs(match.captures) do
+            if cap.name == "indent" then
+                local sb = ts.node_start_byte(cap.node)
+                local eb = ts.node_end_byte(cap.node)
+                -- Containing the cursor, half-open: covers the body up to
+                -- (but not at) the node's end byte, so a cursor right after
+                -- the closer (e.g. past `end`) is NOT contained → no extra.
+                if sb <= byte and byte < eb then
+                    local start_row = select(1, ts.node_point_range(cap.node))
+                    if start_row == c.line then
+                        return true
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
 --- Insert a newline at every cursor, with electric indent.
 --- Computes the leading-whitespace indent of each cursor's current
 --- line and inserts "\n" + indent. The batch_edit insert translator
 --- correctly handles same-line-newline splits: a later cursor on the
 --- same line ends up in the new line at the appropriate column.
+--- Syntax-aware: if the cursor sits inside a tree-sitter `@indent`
+--- node (per the active mode's `indent_queries`), one extra indent unit
+--- is appended so e.g. `if x then<RET>` indents the body.
 function View:insert_newline()
     local buf = self.buffer
     local breaks = buf:should_break_edit("\n")
+    local unit = indent_unit(self)
     self:batch_edit(breaks, function(c)
         local line = buf:line_text(c.line)
         local indent = line:match("^([ \t]*)") or ""
         if self.expand_tab then
             indent = indent:gsub("\t", string.rep(" ", self.tab_width))
+        end
+        if self:_syntax_indent_extra(c) then
+            indent = indent .. unit
         end
         local sl, sc = c.line, c.col
         local rl, rc = buf:insert_char(c.line, c.col, "\n" .. indent)

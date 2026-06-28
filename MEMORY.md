@@ -16,21 +16,20 @@ so the agent can pick up context across sessions.
 - immediately, and for as long as, the user is in a part of the keychord trie, but has not concluded with a command, we should show what further keys they can press to get to a command if it's a single key or key with...
 - we should do alt+q ig
 - Let me fix the colors properly and use yellow for the footer hint.
+- I realize the approach is getting overly complex.
 
 ## Gotchas & Errors
 
-- total 33995128
-- rm: Screenshot 2026-06-27 at 11.01.24 AM.png: No such file or directory
-- found: [Screenshot 2026-06-27 at 1.39.50*PM.png] [Screenshot 2026-06-27 at 1.40.43*PM.png] [Screenshot 2026-06-27 at 1.41.42*PM.png] [Screenshot 2026-06-27 at 1.40.28*PM.png]
-- I can't view the images, but I'll trust you.
 - stylua --check src
 - For an empty buffer (0 lines), accessing `line_text(0)` fails since line 0 doesn't exist.
 - lua doesn't have `mirror_prefix` set yet — so either they added it and it failed, or there's a real bug.
 - That's almost certainly why the mirror "doesn't work" — the popup was rendering but unreadable.
+- (no output)
+- md` starts cleanly (the tb_init failure is just because there's no TTY).
+- Could not find the exact text in src/cursed/major_mode.lua. The old text must match exactly including all whitespace and newlines. — Fix: alright, now here's how we fix the gap: we implement electric pairs, using defined pairs for the mode!
+- Confirmed: incomplete `if x then` parses as `(chunk (ERROR (identifier)))` — **no `if_statement` node exists**, so query-based indent can't fire for a freshly-typed opener.
 
 ## Heavily Read
 
-- src/main.lua (24 reads) — Now update `process_key` to set/clear `_whichkey_node` + `_whichkey_prefix` inst
-- src/cursed/editor.lua (13 reads) — Let me look at the palette box-drawing to mirror it exactly.
-- src/cursed/whichkey.lua (4 reads) — Now I understand. The modeline center text uses **auto-detected** color (base06 
-- src/cursed/config.lua (8 reads) — `alt-space` is currently bound to `just_one_space` — and since the trie dispatch
+- src/cursed/shared.lua (3 reads) — Now the `SharedState` Lua methods. Let me view the end of shared.lua to place th
+- src/cursed/view.lua (8 reads) — Now task 5: add `View:hl_tree()` and release on close. Let me find a good spot t

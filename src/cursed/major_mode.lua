@@ -30,6 +30,15 @@
 --- to enable syntax highlighting. The View builds a Highlighter from the
 --- highest-precedence mode that carries one. An optional `highlight_query`
 --- overrides the built-in default query for the language.
+---
+--- Syntax-aware indent: a mode may declare `indent_queries` — a
+--- predicate-free tree-sitter query whose `@indent` captures mark nodes
+--- that should add ONE extra indent level on the new line when Return is
+--- pressed inside them (e.g. an `if_statement` body). The View queries
+--- the shared parse tree around the cursor for the smallest matching
+--- node and, if the cursor sits inside one, appends an indent unit on
+--- top of the carried line indent. Falls back to indent-carry-only when
+--- no tree is available yet (before the first highlight response lands).
 
 local keybind = require("cursed.keybind")
 
@@ -45,6 +54,7 @@ local keybind = require("cursed.keybind")
 ---@field highlight_query string|nil override query source for the grammar
 ---@field injection_query string|nil injections query (walks the block tree for content regions to inject another grammar into — markdown: inline nodes, fenced code blocks, metadata blocks)
 ---@field extra_injected_grammars table<string,string>|nil grammar name → query source, for grammars the injection_query references that have no MajorMode of their own (e.g. markdown_inline, referenced by markdown's injection query)
+---@field indent_queries string|nil predicate-free tree-sitter query source; `@indent`-captured nodes add one indent level on Return when the cursor is inside them
 ---@field _trie table? lazily-built keybind trie for this mode's keybindings
 local MajorMode = {}
 MajorMode.__index = MajorMode
@@ -61,6 +71,7 @@ MajorMode.__index = MajorMode
 ---@field highlight_query? string
 ---@field injection_query? string
 ---@field extra_injected_grammars? table<string,string>
+---@field indent_queries? string
 
 --- Create a major mode template from a config spec table.
 --- Use :instantiate() to create per-view instances.
@@ -80,6 +91,7 @@ function MajorMode.new(spec)
         highlight_query = spec.highlight_query,
         injection_query = spec.injection_query,
         extra_injected_grammars = spec.extra_injected_grammars,
+        indent_queries = spec.indent_queries,
         _trie = nil,
     }, MajorMode)
 end
@@ -120,5 +132,6 @@ end
 ---@field highlight_query string|nil (inherited)
 ---@field injection_query string|nil (inherited)
 ---@field extra_injected_grammars table<string,string>|nil (inherited)
+---@field indent_queries string|nil (inherited)
 
 return MajorMode

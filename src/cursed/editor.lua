@@ -903,6 +903,14 @@ function Editor:close_view(view)
         self.event_system:emit("buffer_close", buf, view)
     end
     self.event_system:emit("view_close", view)
+    -- Drop the shared parse-tree slot for this view so the table doesn't
+    -- outlive its documents (dead views don't hold a tree ref). Main held
+    -- any in-use acquired trees via its own ts_tree_copy refs, so a racing
+    -- acquire is unaffected.
+    if view._hl_view_id and view._hl_view_id ~= 0 then
+        local s = shared.SharedState.from_global()
+        s:release_tree(view._hl_view_id)
+    end
     table.remove(self.views, idx)
     if #self.views == 0 then
         self:set_active_view(0)

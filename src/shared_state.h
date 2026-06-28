@@ -9,6 +9,8 @@
 #include <sys/mman.h>
 #include <sys/event.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <tree_sitter/api.h>
 
 /* ── SharedState ────────────────────────────────────────────────────
  *
@@ -46,6 +48,35 @@ struct RingBuf {
     uintptr_t       wake_ident;        /* EVFILT_USER ident for wake */
 };
 
+/* ── Shared parse tree (highlight lane → main, mutex-guarded) ────────
+ *
+ * The highlight lane parses the document off-thread and publishes a
+ * snapshot of the resulting TSTree here, keyed by view_id. The main
+ * lane acquires (ts_tree_copy → its own refcount ref) to run
+ * tree-sitter-backed USER inputs (indent, imenu/xref, textobjects)
+ * WITHOUT a second parse on main and WITHOUT importing LuaJS values
+ * across the lua_State boundary.
+ *
+ * Invariant: main NEVER edits these trees. Only the lane writes
+ * (briefly — swap the slot pointer under the mutex during reparsing),
+ * so the mutex critical section is a few field writes; the lane's own
+ * old_tree is edited out-of-band and tree-sitter's copy-on-write
+ * (subtree refcounting) keeps a previously-published snapshot stable
+ * even while the lane incrementally re-edits its working tree.
+ */
+#define SHARED_TREE_CAP 64
+
+struct SharedTreeSlot {
+    uint32_t view_id;   /* 0 = empty slot */
+    uint32_t gen;       /* lane-side gen that produced `tree` */
+    TSTree  *tree;      /* lane's ts_tree_copy ref; slot-owned */
+};
+
+struct SharedTree {
+    pthread_mutex_t     lock;
+    struct SharedTreeSlot slots[SHARED_TREE_CAP];
+};
+
 struct SharedState {
     /* Ring buffers for lane communication */
     struct RingBuf outbox_io;
@@ -54,8 +85,11 @@ struct SharedState {
     struct RingBuf inbox_hl;    /* highlight → main */
     int            main_kq_fd;  /* central kqueue for main lane (tty, resize, inbox wakes) */
     int            io_kq_fd;    /* kqueue for IO lane (outbox wake) */
-    int            hl_kq_fd;    /* kqueue for highlight lane (outbox_hl wake) */
+    int            hl_kq_fd;   /* kqueue for highlight lane (outbox_hl wake) */
     _Atomic bool   running;
+
+    /* Shared parse-tree slot table (highlight → main). */
+    struct SharedTree shared_tree;
 };
 
 /* ── Global pointer (set by main.c before lanes start) ──────────── */
@@ -103,12 +137,24 @@ static inline struct SharedState *shared_state_alloc(void)
         return NULL;
     }
 
+    pthread_mutex_init(&ss->shared_tree.lock, NULL);
+    /* slots already zeroed by calloc (view_id=0 == empty, tree=NULL) */
+
     return ss;
 }
 
 static inline void shared_state_free(struct SharedState *ss)
 {
     if (!ss) return;
+    /* Drop any live shared-tree snapshots (lane already exitting; main
+     * held its own refs separately via ts_tree_copy on acquire). */
+    for (uint32_t i = 0; i < SHARED_TREE_CAP; i++) {
+        if (ss->shared_tree.slots[i].tree != NULL) {
+            ts_tree_delete(ss->shared_tree.slots[i].tree);
+            ss->shared_tree.slots[i].tree = NULL;
+        }
+    }
+    pthread_mutex_destroy(&ss->shared_tree.lock);
     if (ss->main_kq_fd >= 0) close(ss->main_kq_fd);
     if (ss->io_kq_fd >= 0) close(ss->io_kq_fd);
     if (ss->hl_kq_fd >= 0) close(ss->hl_kq_fd);
@@ -147,6 +193,97 @@ bool ring_pop(struct RingBuf *rb, struct Msg *msg)
     *msg = rb->entries[tail & (RING_CAP - 1)];
     atomic_store_explicit(&rb->tail, tail + 1, memory_order_release);
     return true;
+}
+
+/* ── Shared parse-tree slot table ───────────────────────────────────
+ *
+ * publish: lane calls after each successful parse with its TSTree*.
+ * The slot keeps its OWN ref (ts_tree_copy bumps the root subtree's
+ * atomic refcount) so the lane may subsequently ts_tree_edit its
+ * working old_tree (copy-on-write) without disturbing the snapshot.
+ * Old slot tree is freed outside the critical section. */
+void shared_tree_publish(struct SharedState *ss, uint32_t view_id, uint32_t gen, void *tree_ptr)
+{
+    if (!ss || view_id == 0 || tree_ptr == NULL) return;
+
+    TSTree *copy = ts_tree_copy((const TSTree *)tree_ptr);
+    TSTree *old_to_free = NULL;
+
+    pthread_mutex_lock(&ss->shared_tree.lock);
+    struct SharedTreeSlot *slot = NULL;   /* existing match */
+    struct SharedTreeSlot *empty = NULL;  /* first free slot */
+    struct SharedTreeSlot *victim = NULL;/* oldest-gen slot, for eviction */
+    uint32_t victim_gen = 0;
+    for (uint32_t i = 0; i < SHARED_TREE_CAP; i++) {
+        struct SharedTreeSlot *s = &ss->shared_tree.slots[i];
+        if (s->view_id == view_id) { slot = s; break; }
+        if (empty == NULL && s->view_id == 0) { empty = s; }
+        if (s->view_id != 0 && (victim == NULL || s->gen < victim_gen)) {
+            victim = s; victim_gen = s->gen;
+        }
+    }
+    if (slot == NULL) slot = (empty != NULL) ? empty : victim;
+    if (slot != NULL) {
+        old_to_free = slot->tree;
+        slot->tree = copy;
+        slot->gen = gen;
+        slot->view_id = view_id;
+    } else {
+        old_to_free = copy;  /* table full and nothing to evict: drop it */
+    }
+    pthread_mutex_unlock(&ss->shared_tree.lock);
+
+    if (old_to_free) ts_tree_delete(old_to_free);
+}
+
+/* acquire: main calls to read the latest published tree for a view.
+ * Returns a NEW ts_tree_copy the caller must ts_tree_delete (main wraps
+ * it in cursed.ts.Tree for RAII). *out_gen receives the publishing gen
+ * (0 on miss). Never call ts_tree_edit on the returned tree. */
+void *shared_tree_acquire(struct SharedState *ss, uint32_t view_id, uint32_t *out_gen)
+{
+    TSTree *result = NULL;
+    uint32_t gen = 0;
+    if (out_gen) *out_gen = 0;
+    if (!ss || view_id == 0) return NULL;
+
+    pthread_mutex_lock(&ss->shared_tree.lock);
+    for (uint32_t i = 0; i < SHARED_TREE_CAP; i++) {
+        struct SharedTreeSlot *s = &ss->shared_tree.slots[i];
+        if (s->view_id == view_id && s->tree != NULL) {
+            result = ts_tree_copy(s->tree);  /* main's own refcount ref */
+            gen = s->gen;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&ss->shared_tree.lock);
+
+    if (out_gen) *out_gen = gen;
+    return result;
+}
+
+/* release: drop a slot when its view is closed so dead views don't hold a
+ * tree ref indefinitely. Main holds its own refs separately, so callers
+ * racing with an in-flight acquire are unaffected. */
+void shared_tree_release(struct SharedState *ss, uint32_t view_id)
+{
+    TSTree *to_free = NULL;
+    if (!ss || view_id == 0) return;
+
+    pthread_mutex_lock(&ss->shared_tree.lock);
+    for (uint32_t i = 0; i < SHARED_TREE_CAP; i++) {
+        struct SharedTreeSlot *s = &ss->shared_tree.slots[i];
+        if (s->view_id == view_id) {
+            to_free = s->tree;
+            s->tree = NULL;
+            s->gen = 0;
+            s->view_id = 0;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&ss->shared_tree.lock);
+
+    if (to_free) ts_tree_delete(to_free);
 }
 
 #endif /* SHARED_STATE_H */

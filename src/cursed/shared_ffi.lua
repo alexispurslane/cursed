@@ -42,6 +42,16 @@ extern struct SharedState *g_shared_state;
 bool ring_push(struct RingBuf *rb, struct Msg *msg);
 bool ring_pop(struct RingBuf *rb, struct Msg *msg);
 
+/* ── Shared parse-tree slot table (highlight lane → main) ───────── */
+/* A lane-published TSTree snapshot, keyed by view_id, mutex-guarded in
+ * C (see shared_state.h). Lua never indexes the slot structs directly —
+ * only calls these helpers against a SharedState*. `tree` is opaque
+ * void* to Lua; callers cast to TSTree* via cursed.ts.Tree.new (which
+ * owns the ref via ts_tree_delete on GC). */
+void shared_tree_publish(struct SharedState *ss, uint32_t view_id, uint32_t gen, void *tree_ptr);
+void *shared_tree_acquire(struct SharedState *ss, uint32_t view_id, uint32_t *out_gen);
+void shared_tree_release(struct SharedState *ss, uint32_t view_id);
+
 /* ── Highlight lane request/response payloads ──────────────────── */
 
 /* MSG_HL_INITIALIZE_LANGUAGE: fixed header + variable query source bytes.

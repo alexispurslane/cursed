@@ -200,4 +200,22 @@ return {
             { "do", "end" },
         }),
     },
+    -- Syntax-aware indent (electric Return): when the cursor sits inside
+    -- one of these block nodes, Return adds one extra indent level on the
+    -- new line. The match is half-open [start, end): a cursor right after
+    -- `end` (at the node's end byte) is NOT inside → no extra indent, so
+    -- `end<RET>` stays at the current level rather than over-indenting.
+    indent_queries = [[
+[
+  (if_statement)
+  (elseif_statement)
+  (else_statement)
+  (for_statement)
+  (while_statement)
+  (repeat_statement)
+  (function_declaration)
+  (function_definition)
+  (do_statement)
+] @indent
+]],
 }
