@@ -24,6 +24,12 @@ return {
         for _ = 1, n do
             view:insert_char(ch)
         end
+        -- Electric pairs (auto-insert closer when the text left of the
+        -- cursor matches an active mode's `electric_openers`). Run once
+        -- after the typed characters land; the suffix check sees the
+        -- final left-of-cursor text. Not multiplied by universal_args:
+        -- a `then` is `then` regardless of repeat count.
+        view:electric_after_printable()
     end,
 
     -- Line navigation

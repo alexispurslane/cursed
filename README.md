@@ -27,7 +27,8 @@ Most of the editor concepts --- and keybindings --- are derived from Emacs, but 
 - Undoing something pops that snapshot off the undo stack and puts it on the redo stack; modifying something pops more snapshots onto the undo stack. This gives the full power of an undo/redo system where *no information loss is possible*, without the confusing "undo the undo" system of classic Emacs. In addition, full "undo/redo within selection" --- even multiple cursor selections! --- is supported at best-effort.
 - Full mouse and clipboard support out of the box.
 - Due to Lua's greater speed, the *entire editor*, besides a minimal C wrapper that only exists to boot the compiled bytecode in a way that allows for a standalone executable, and manage the threads and ring buffers, can be implemented in Lua. This takes Emacs's idea of being implemented in a scripting language with a C core to the extreme: even the display code can be overridden.
-- Tree-sitter grammars are provided with the editor, compiled statically into the binary with the default bytecode. This provides stability --- no more surprise version conflicts. We provide Rust, YAML, TOML, Bash, Markdown, Go, Python, Lua, C, and JSON highlighting out of the box, with nested syntax highlighting supported for all queries, and implemented by default for Markdown code fences.
+- Tree-sitter grammars are provided with the editor, compiled statically into the binary with the default bytecode. This provides stability --- no more surprise version conflicts. We provide Rust, YAML, TOML, Bash, Markdown, Go, Python, Lua, C, and JSON highlighting out of the box, with nested syntax highlighting supported for all queries, and implemented by default for Markdown code fences.- Tree-sitter-based auto indentation and dedentation on all complete syntax tree nodes
+- Combined the above with a built in pattern-based electric-pair system that can complete *keywords* after complex expressions, not just standered brackets, so that no tree sitter syntax node ever needs to be incomplete.
 
 ## Screenshots
 
@@ -122,6 +123,7 @@ just clean-vendor # also rebuild vendored LuaJIT / tree-sitter-lib from scratch
 ```
 
 Build artifacts land entirely in `build/`; nothing outside the repo is touched except `~/.config/cursed/` at runtime.
+
 
 
 

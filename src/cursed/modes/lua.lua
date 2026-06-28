@@ -218,4 +218,32 @@ return {
   (do_statement)
 ] @indent
 ]],
+    -- Electric pairs. Openers are suffix-matched against the text left
+    -- of the cursor on each printable keystroke; on match the closer is
+    -- auto-inserted. Bracket openers insert inline (`(|)`); block (keyword)
+    -- openers insert `<newline><body-indent><newline><opener-indent><closer>`
+    -- and relocate the cursor to the body line — so you never type `end`.
+    -- `word=true` enforces a leading word boundary so `append`/`send`/
+    -- `bend` don't trigger `end`.
+    electric_openers = {
+        -- Brackets: closer inserted right after the cursor.
+        { pattern = "%(", closer = ")" },
+        { pattern = "%[", closer = "]" },
+        { pattern = "%{", closer = "}" },
+        -- Keyword block openers: closer (`end`) pre-placed below at the
+        -- opener's indent, cursor on the indented body line.
+        { pattern = "then$", closer = "end", block = true, word = true },
+        { pattern = "do$", closer = "end", block = true, word = true },
+        { pattern = "function%s*[^%s]*%([^%)]*%)$", closer = "end", block = true, word = true },
+    },
+    -- Electric closers: on Return, if the line's trailing text matches,
+    -- snap that line's indent one unit LESS (to the opener's level) and
+    -- create the new line at that dedented indent.
+    electric_closers = {
+        { pattern = "end$", word = true },
+        { pattern = "else$", word = true },
+        { pattern = "elseif%s+[^%s]+$", word = true },
+        { pattern = "until%s+[^%s]+$", word = true },
+        { pattern = "%}$" },
+    },
 }
