@@ -225,6 +225,28 @@ local DEFAULT_MODELINE_SEGMENTS = {
         end,
     },
     {
+        -- LSP status: shows the language server serving the active view's
+        -- modes. Walks modes high→low precedence and surfaces the first
+        -- that declares `lsp_servers`; ⛏ srv = running, ⛏ srv— = declared
+        -- but no client (binary not on PATH). Reads live from
+        -- `lsp.active_clients` so exit/shutdown is reflected immediately.
+        bg = "modeline_bg",
+        fill = false,
+        format = function(_editor, view)
+            local lsp = require("cursed.lsp_client")
+            for i = #view._major_modes, 1, -1 do
+                local names = view._major_modes[i].lsp_servers
+                if names and #names > 0 then
+                    local srv, running = lsp.server_status_for(names)
+                    if srv then
+                        return running and (" ⛏ " .. srv .. " ") or (" ⛏ " .. srv .. "— ")
+                    end
+                end
+            end
+            return ""
+        end,
+    },
+    {
         bg = "modeline_bg",
         fill = true,
         format = function(editor, view)
@@ -294,6 +316,8 @@ local function pprint(val, depth)
 end
 
 ---@class Editor
+---@field main_kq table|nil editor's main kqueue instance (attached by main.lua); LSP stdout registered here
+---@field workspace_dir string|nil editor workspace root (cwd at startup, attached by main.lua); used as the LSP rootUri
 ---@field drain_hl_inbox fun()|nil inline inbox_hl drain (attached by main.lua) for the zero-flash sync-wait path
 ---@field views View[] list of open views
 ---@field active_view integer 1-based index into views
@@ -344,6 +368,7 @@ end
 ---@field _exit_code integer exit code surfaced by async tasks
 ---@field _damage_start_row integer|nil 0 = full screen, nil = derive from cursor, >0 = repaint from this row down
 ---@field _last_min_cursor_row integer|nil smallest cursor/anchor screen row of the previous render
+---@field _last_active_line integer|nil logical line that held the primary cursor at the previous render (drives active-line damage extent)
 ---@field _last_w integer|nil terminal width observed at last render
 ---@field _last_h integer|nil terminal height observed at last render
 ---@field _last_footer_rows integer|nil footer rows observed at last render
@@ -413,6 +438,7 @@ function Editor.new(term)
         _last_complex_command = nil, -- most recent command-with-args, for repeat-complex-command
         _damage_start_row = 0, -- full damage on first render
         _last_min_cursor_row = nil,
+        _last_active_line = nil,
         _last_w = nil,
         _last_h = nil,
         _last_footer_rows = nil,
@@ -2065,6 +2091,31 @@ function Editor:render()
         else
             damage_start_row = cur_min_cursor_row
         end
+        -- The active-line tint is painted across EVERY sub-row of the
+        -- active logical line (a wrapped line can span many screen
+        -- rows). `min(cur, last)` only guarantees the old cursor *cell*
+        -- is repainted; it does NOT cover the rest of the previously-
+        -- active line's sub-rows (which sit ABOVE the cursor when the
+        -- cursor was on a wrapped continuation row) nor the top of the
+        -- newly-active line when the cursor landed on a continuation
+        -- row. Without extending the damage to the tops of both the
+        -- previous and current active lines, those rows keep a stale
+        -- tint / stale cursor glyph — the "stuck cursor on the first
+        -- character after moving down" bug right after opening a file
+        -- whose first line wraps.
+        if view and view.file_loaded then
+            local cur_active = view:p().line
+            if cur_active ~= nil then
+                damage_start_row =
+                    math.min(damage_start_row, cursor_screen_row(view, cur_active, 0))
+                if self._last_active_line ~= nil and self._last_active_line ~= cur_active then
+                    damage_start_row = math.min(
+                        damage_start_row,
+                        cursor_screen_row(view, self._last_active_line, 0)
+                    )
+                end
+            end
+        end
     end
     local line_count_changed = false
     if view then
@@ -2376,6 +2427,7 @@ function Editor:render()
         self._last_scroll_sub_row = view and view.scroll_sub_row or nil
         self._last_line_count = view and view.buffer:line_count() or nil
         self._last_file_loaded = view and view.file_loaded or nil
+        self._last_active_line = (view and view.file_loaded) and view:p().line or nil
         self._damage_start_row = nil
     end
 

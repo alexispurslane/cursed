@@ -177,6 +177,10 @@ local LUA_HIGHLIGHT_QUERY = [[
 return {
     name = "lua",
     language = "lua",
+    -- First-wins list of LSP executable names to spawn when a view
+    -- activates the lua mode. The editor's centralized mode_enter
+    -- listener picks this up and manages the subprocess.
+    lsp_servers = { "lua-language-server", "lua-lsp" },
     highlight_query = LUA_HIGHLIGHT_QUERY,
     tab_width = 4,
     expand_tab = true,

@@ -63,6 +63,23 @@ function Kqueue:add_fd(fd)
     end
 end
 
+--- Unregister an fd's read-readiness watch (EV_DELETE on EVFILT_READ).
+--- Must be called when the fd reaches EOF / is closed so a perpetually
+--- ready EOF kevent doesn't busy-spin the main loop's select() (kqueue
+--- reports a pipe's EOF as a persistent read condition that EV_CLEAR
+--- does not auto-clear). No-op if the fd was never registered.
+---@param fd integer
+function Kqueue:del_fd(fd)
+    local nfd = tonumber(fd)
+    local ev = make_event(nfd, kq_ffi.EVFILT_READ, kq_ffi.EV_DELETE)
+    -- Errors here (e.g. EBADF after the fd was already closed, or ENOENT
+    -- because the filter was never added) are benign for our purpose:
+    -- we only want to STOP being woken for this fd.
+    pcall(function()
+        ffi.C.kevent(self.fd, ev, 1, nil, 0, nil)
+    end)
+end
+
 --- Register a user-event ident. Fires when another thread calls wake(ident).
 ---@param ident integer arbitrary uintptr_t (must match between add_wake + wake)
 function Kqueue:add_wake(ident)

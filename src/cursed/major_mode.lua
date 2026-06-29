@@ -80,6 +80,7 @@ local keybind = require("cursed.keybind")
 ---@field extra_injected_grammars table<string,string>|nil grammar name → query source, for grammars the injection_query references that have no MajorMode of their own (e.g. markdown_inline, referenced by markdown's injection query)
 ---@field indent_queries string|nil predicate-free tree-sitter query source; `@indent`-captured nodes add one indent level on Return when the cursor is inside them
 ---@field input_hooks table|nil flat list of input-hook specs (build with cursed.input_hook); matched as a suffix of left-of-cursor text and dispatched by View:_run_input_hooks
+---@field lsp_servers string[]|nil first-wins list of executable names to spawn as a language server subprocess when a view activates this mode (managed centrally by the editor)
 ---@field _trie table? lazily-built keybind trie for this mode's keybindings
 local MajorMode = {}
 MajorMode.__index = MajorMode
@@ -98,6 +99,7 @@ MajorMode.__index = MajorMode
 ---@field extra_injected_grammars? table<string,string>
 ---@field indent_queries? string
 ---@field input_hooks? table
+---@field lsp_servers? string[] first-wins list of LSP executable names to try when this mode activates
 
 --- Create a major mode template from a config spec table.
 --- Use :instantiate() to create per-view instances.
@@ -119,6 +121,7 @@ function MajorMode.new(spec)
         extra_injected_grammars = spec.extra_injected_grammars,
         indent_queries = spec.indent_queries,
         input_hooks = spec.input_hooks,
+        lsp_servers = spec.lsp_servers,
         _trie = nil,
     }, MajorMode)
 end
@@ -161,5 +164,6 @@ end
 ---@field extra_injected_grammars table<string,string>|nil (inherited)
 ---@field indent_queries string|nil (inherited)
 ---@field input_hooks table|nil (inherited)
+---@field lsp_servers string[]|nil (inherited from template)
 
 return MajorMode

@@ -21,6 +21,7 @@ local ColorScheme = require("cursed.colorscheme")
 local find_file = require("cursed.find_file")
 local log = require("cursed.log")
 local profile = require("cursed.profile")
+local lsp = require("cursed.lsp_client")
 
 ----------------------------------------------------------------------------------------------------
 -- Keybind building (config-aware)
@@ -722,6 +723,19 @@ local function main()
     main_kq:add_wake(assert(tonumber(ss._ptr.inbox_io.wake_ident)))
     main_kq:add_wake(assert(tonumber(ss._ptr.inbox_hl.wake_ident)))
 
+    -- Expose the editor's main kqueue + workspace root to the
+    -- editor-level LSP manager (registered in cursed.editor_listeners):
+    -- the centralized `mode_enter` listener spawns the language server
+    -- declared by a mode's `lsp_servers` and registers its stdout on
+    -- this kq. Read once at startup so all servers share one rootUri.
+    editor.main_kq = main_kq
+    do
+        local cwd_buf = ffi.new("char[4096]")
+        if ffi.C.getcwd(cwd_buf, 4096) ~= nil then
+            editor.workspace_dir = ffi.string(cwd_buf)
+        end
+    end
+
     -- Expose the inbox_hl drain as an editor method so views can
     -- synchronously drain lane responses inline (the zero-flash
     -- sync-wait path in View:_hl_wait_response). The closure captures
@@ -1021,13 +1035,20 @@ local function main()
             local events, n = main_kq:wait(0)
             for i = 0, n - 1 do
                 local ev = events[i]
-                if tonumber(ev.filter) == kq_ffi.EVFILT_USER then
+                local f = tonumber(ev.filter)
+                if f == kq_ffi.EVFILT_USER then
                     -- inbox_io (ident 1) carries file load/save replies;
                     -- inbox_hl (ident 2) carries highlight span replies.
                     if tonumber(ev.ident) == tonumber(ss._ptr.inbox_hl.wake_ident) then
                         drain_hl_inbox(editor, ss)
                     else
                         drain_inbox(editor, ss)
+                    end
+                elseif f == kq_ffi.EVFILT_READ then
+                    local fd = tonumber(ev.ident)
+                    ---@cast fd integer
+                    if not lsp.on_kqueue_read(fd) then
+                        log.warn("main", "lsp client exited", { fd = fd })
                     end
                 end
             end
@@ -1342,6 +1363,7 @@ local function main()
     end
 
     editor.event_system:emit("editor_close")
+    lsp.shutdown()
     term:shutdown()
     ss:stop()
 

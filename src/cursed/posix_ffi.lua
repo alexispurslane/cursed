@@ -20,13 +20,19 @@ long sysconf(int name);
 int gettimeofday(struct timeval *tv, void *tz);
 
 void free(void *ptr);
+void *malloc(unsigned long size);
 void *calloc(unsigned long nmemb, unsigned long size);
 void *realloc(void *ptr, unsigned long size);
 void *memcpy(void *dst, const void *src, unsigned long n);
+void *memmove(void *dst, const void *src, unsigned long n);
 
 ssize_t read(int fd, void *buf, size_t count);
 ssize_t write(int fd, const void *buf, size_t count);
 int pipe(int fildes[2]);
+
+int fcntl(int fd, int cmd, ...);
+
+int dup2(int oldfd, int newfd);
 
 struct pollfd {
     int   fd;
@@ -35,6 +41,8 @@ struct pollfd {
 };
 
 int poll(struct pollfd *fds, unsigned int nfds, int timeout);
+int printf(const char *fmt, ...);
+int access(const char *path, int mode);
 
 /* select(2) — macOS-friendly tty watching */
 struct timeval {
@@ -45,6 +53,14 @@ struct timeval {
 int select(int nfds, void *readfds, void *writefds, void *exceptfds, struct timeval *timeout);
 
 void _exit(int status);
+int fork(void);
+int waitpid(int pid, int *status, int options);
+int kill(int pid, int sig);
+
+int execvp(const char *command, char *const argv[]);
+int execlp(const char *command, ...);
+int putenv(char *str);
+char *getcwd(char *buf, size_t size);
 
 /* Ensure all output on a tty fd has been transmitted */
 int tcdrain(int fd);
@@ -83,6 +99,7 @@ local MAP_ANONYMOUS = 0x1000 -- macOS; Linux uses 0x20
 local _SC_PAGESIZE = 29
 local MAP_FAILED = ffi.cast("void *", -1)
 local POLLIN = 0x0001
+local O_NONBLOCK = 0x0004
 local POLLHUP = 0x0010
 local POLLNVAL = 0x0020
 local DT_DIR = 4
@@ -140,6 +157,7 @@ return {
     POLLIN = POLLIN,
     POLLHUP = POLLHUP,
     POLLNVAL = POLLNVAL,
+    O_NONBLOCK = O_NONBLOCK,
     DT_DIR = DT_DIR,
     DT_REG = DT_REG,
     O_WRONLY = O_WRONLY,

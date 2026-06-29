@@ -12,6 +12,7 @@
 --- `init.lua` against the global editor).
 
 local log = require("cursed.log")
+local lsp = require("cursed.lsp_client")
 
 local EditorListeners = {}
 
@@ -72,6 +73,45 @@ function EditorListeners.setup(editor)
                 name = cmd_name,
                 universal_args = ed.universal_args,
             }
+        end
+    end)
+
+    -- Centralized LSP activation (#mode_enter). Every mode transition
+    -- flows through one generic `mode_enter` event carrying the instance
+    -- + view; we check whether the entering mode declares `lsp_servers`
+    -- (a first-wins list of executable names inherited from its template
+    -- via __index) and, if so, spawn-or-get a language server subprocess
+    -- against the editor's workspace root, registering its stdout on the
+    -- editor's main kqueue so the main loop drains it via
+    -- `lsp.on_kqueue_read(fd)`. This is the SINGLE automatic,
+    -- editor-managed LSP hook — it fires for both the manual `*-mode`
+    -- toggle commands AND `activate_mode_for_filepath` (file open),
+    -- dedups per-executable, and needs no per-mode wiring.
+    es:on("mode_enter", function(ed, instance, _view)
+        if ed.main_kq == nil then
+            return -- kq not wired yet (pre-loop startup); nothing to spawn
+        end
+        local exe_names = instance.lsp_servers
+        if exe_names == nil or #exe_names == 0 then
+            return
+        end
+        if ed.workspace_dir == nil then
+            log.warn("event", "lsp spawn skipped: no workspace_dir", { mode = instance.name })
+            return
+        end
+        local on_message = function(msg)
+            log.debug("event", "lsp message", {
+                mode = instance.name,
+                method = msg and (msg.method or msg.id) or nil,
+            })
+        end
+        local on_exit = function(code)
+            log.info("event", "lsp exited", { mode = instance.name, code = code })
+        end
+        local client =
+            lsp.spawn_or_get(ed.main_kq, exe_names, ed.workspace_dir, on_message, on_exit)
+        if client == nil then
+            log.info("event", "lsp executable not found on PATH", { mode = instance.name })
         end
     end)
 end
