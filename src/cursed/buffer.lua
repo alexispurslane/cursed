@@ -1167,6 +1167,7 @@ function Buffer:insert_char(line, col, str)
     if #str == 0 then
         return line, col
     end
+    self.lsp_version = (self.lsp_version or 0) + 1
     return self:_insert_char_impl(line, col, str)
 end
 
@@ -1232,6 +1233,7 @@ function Buffer:delete_char(line, col, n)
     if n == 0 then
         return line, col
     end
+    self.lsp_version = (self.lsp_version or 0) + 1
     return self:_delete_char_impl(line, col, n)
 end
 
@@ -1613,7 +1615,7 @@ function Buffer:undo()
     log_pack(b, b.redo)
     log_apply_last(b, b.undo)
     log_pop(b.undo)
-
+    self.lsp_version = (self.lsp_version or 0) + 1
     return true
 end
 
@@ -1635,6 +1637,7 @@ function Buffer:redo()
     log_pack(b, b.undo)
     log_apply_last(b, b.redo)
     log_pop(b.redo)
+    self.lsp_version = (self.lsp_version or 0) + 1
 
     return true
 end

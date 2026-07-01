@@ -28,9 +28,12 @@ struct SharedState {
     struct RingBuf inbox_io;
     struct RingBuf outbox_hl;
     struct RingBuf inbox_hl;
+    struct RingBuf outbox_lsp;
+    struct RingBuf inbox_lsp;
     int            main_kq_fd;
     int            io_kq_fd;
     int            hl_kq_fd;
+    int            lsp_kq_fd;
     bool    running;
 };
 
@@ -126,6 +129,46 @@ struct HlSpan {
 struct HlName {
     char name[32];         /* NUL-padded capture name */
 };
+
+/* ── LSP lane payloads (mirror shared_state.h) ────────────────── */
+
+struct LspSpawnReq {
+    uint32_t exe_names_len;
+    uint32_t workspace_len;
+    uint32_t client_id;
+    /* followed by exe_names_len bytes, then workspace_len bytes */
+};
+
+struct LspSendReq {
+    uint32_t method_len;
+    uint32_t params_len;
+    uint32_t id;           /* 0 = notification, else request id */
+    uint32_t client_id;   /* route to this client (lane drops if unknown) */
+    /* followed by method_len bytes, then params_len bytes */
+};
+
+struct LspKillReq {
+    uint32_t client_id;   /* route kill to this client */
+    char     exe_name[64]; /* short basename, NUL-padded (logging only) */
+};
+
+struct LspHandshake {
+    char     exe_name[64]; /* short basename, NUL-padded */
+    uint32_t client_id;   /* main-assigned id; echoed by lane */
+    uint8_t  status;       /* LSP_STATUS_* code */
+    uint8_t  _pad[3];
+};
+
+struct LspDocSync {
+    uint32_t client_id;
+    uint32_t version;
+    uint8_t  kind;    /* LSP_DOC_OPEN / CHANGE / CLOSE */
+    uint8_t  _pad[3];
+    char     uri[512];
+    char     language_id[32];
+    uint8_t *text_ptr;
+    uint32_t text_len;
+};
 ]])
 
 ----------------------------------------------------------------------------------------------------
@@ -143,6 +186,21 @@ local MSG_FILE_INSERTED = 7
 local MSG_HL_INITIALIZE_LANGUAGE = 8
 local MSG_HL_QUERY = 9
 local MSG_HL_SPANS = 10
+local MSG_LSP_SPAWN = 11
+local MSG_LSP_SEND = 12
+local MSG_LSP_KILL = 13
+local MSG_LSP_HANDSHAKE = 14
+local MSG_LSP_DOC_SYNC = 15
+
+local LSP_STATUS_SPAWNING = 0
+local LSP_STATUS_READY = 1
+local LSP_STATUS_DEAD = 2
+local LSP_STATUS_KILLED = 3
+local LSP_STATUS_MISSING = 4
+
+local LSP_DOC_OPEN = 0
+local LSP_DOC_CHANGE = 1
+local LSP_DOC_CLOSE = 2
 
 ----------------------------------------------------------------------------------------------------
 -- Module export
@@ -161,4 +219,17 @@ return {
     MSG_HL_INITIALIZE_LANGUAGE = MSG_HL_INITIALIZE_LANGUAGE,
     MSG_HL_QUERY = MSG_HL_QUERY,
     MSG_HL_SPANS = MSG_HL_SPANS,
+    MSG_LSP_SPAWN = MSG_LSP_SPAWN,
+    MSG_LSP_SEND = MSG_LSP_SEND,
+    MSG_LSP_KILL = MSG_LSP_KILL,
+    MSG_LSP_HANDSHAKE = MSG_LSP_HANDSHAKE,
+    MSG_LSP_DOC_SYNC = MSG_LSP_DOC_SYNC,
+    LSP_STATUS_SPAWNING = LSP_STATUS_SPAWNING,
+    LSP_STATUS_READY = LSP_STATUS_READY,
+    LSP_STATUS_DEAD = LSP_STATUS_DEAD,
+    LSP_STATUS_KILLED = LSP_STATUS_KILLED,
+    LSP_STATUS_MISSING = LSP_STATUS_MISSING,
+    LSP_DOC_OPEN = LSP_DOC_OPEN,
+    LSP_DOC_CHANGE = LSP_DOC_CHANGE,
+    LSP_DOC_CLOSE = LSP_DOC_CLOSE,
 }

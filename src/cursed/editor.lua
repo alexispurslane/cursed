@@ -227,9 +227,11 @@ local DEFAULT_MODELINE_SEGMENTS = {
     {
         -- LSP status: shows the language server serving the active view's
         -- modes. Walks modes high→low precedence and surfaces the first
-        -- that declares `lsp_servers`; ⛏ srv = running, ⛏ srv— = declared
-        -- but no client (binary not on PATH). Reads live from
-        -- `lsp.active_clients` so exit/shutdown is reflected immediately.
+        -- that declares `lsp_servers`; glyph follows the lane-relayed
+        -- status: ready=⛏ srv, spawning=⛏ srv…, dead/killed=⛏ srv✝,
+        -- missing=⛏ srv—. Reads live from the client_id-keyed registry
+        -- (status echoes from the LSP lane so exit/crash/kill reflect
+        -- immediately).
         bg = "modeline_bg",
         fill = false,
         format = function(_editor, view)
@@ -237,9 +239,17 @@ local DEFAULT_MODELINE_SEGMENTS = {
             for i = #view._major_modes, 1, -1 do
                 local names = view._major_modes[i].lsp_servers
                 if names and #names > 0 then
-                    local srv, running = lsp.server_status_for(names)
+                    local srv, status = lsp.server_status_for(names)
                     if srv then
-                        return running and (" ⛏ " .. srv .. " ") or (" ⛏ " .. srv .. "— ")
+                        local suffix = ""
+                        if status == "spawning" then
+                            suffix = "…"
+                        elseif status == "dead" or status == "killed" then
+                            suffix = "✝"
+                        elseif status == "missing" then
+                            suffix = "—"
+                        end
+                        return (" ⛏ " .. srv .. suffix .. " ")
                     end
                 end
             end

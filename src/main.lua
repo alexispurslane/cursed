@@ -271,6 +271,20 @@ local function drain_hl_inbox(editor, ss)
     end
 end
 
+local function drain_lsp_inbox(editor, ss)
+    local msg = ss:pop(ss._ptr.inbox_lsp)
+    while msg ~= nil do
+        editor.event_system:emit("ring_buffer_message", msg.type, msg)
+        if msg.type == shared.MSG_LSP_HANDSHAKE then
+            local info = require("cursed.lsp_client").apply_handshake(msg.ptr)
+            if info ~= nil then
+                editor.event_system:emit("lsp_status", info.client_id, info.exe_name, info.status)
+            end
+        end
+        msg = ss:pop(ss._ptr.inbox_lsp)
+    end
+end
+
 ----------------------------------------------------------------------------------------------------
 -- Key processing (ported from old main.lua, adapted for View/Editor)
 ----------------------------------------------------------------------------------------------------
@@ -387,6 +401,10 @@ local function process_key(editor, view, trie, key_state, key_node, token, ev, p
                 goto feed_trie
             end
         end
+        -- Self-insert just ran via __printable. Emit post_command_hook so
+        -- observers (e.g. LSP didChange debounce) see the mutation; without
+        -- this, plain typing bypasses the command hook entirely.
+        editor.event_system:emit("post_command_hook", "__printable", view)
         -- Record self-insert for kmacro (only when minibuffer is
         -- inactive — minibuffer inputs are captured separately via
         -- the _recorded_mb_inputs stack)
@@ -722,6 +740,12 @@ local function main()
     local main_kq = Kqueue.wrap(ss._ptr.main_kq_fd)
     main_kq:add_wake(assert(tonumber(ss._ptr.inbox_io.wake_ident)))
     main_kq:add_wake(assert(tonumber(ss._ptr.inbox_hl.wake_ident)))
+    main_kq:add_wake(assert(tonumber(ss._ptr.inbox_lsp.wake_ident)))
+
+    -- Wire the LSP module's SharedState handle so it can enqueue
+    -- SPAWN/SEND/KILL to the LSP lane (outbox_lsp). The lane owns all
+    -- subprocess mgmt + JSON decode; main relays via this facade.
+    require("cursed.lsp_client").set_shared_state(ss)
 
     -- Expose the editor's main kqueue + workspace root to the
     -- editor-level LSP manager (registered in cursed.editor_listeners):
@@ -1038,18 +1062,19 @@ local function main()
                 local f = tonumber(ev.filter)
                 if f == kq_ffi.EVFILT_USER then
                     -- inbox_io (ident 1) carries file load/save replies;
-                    -- inbox_hl (ident 2) carries highlight span replies.
+                    -- inbox_hl (ident 2) carries highlight span replies;
+                    -- inbox_lsp (ident 3) carries LSP handshakes.
                     if tonumber(ev.ident) == tonumber(ss._ptr.inbox_hl.wake_ident) then
                         drain_hl_inbox(editor, ss)
+                    elseif tonumber(ev.ident) == tonumber(ss._ptr.inbox_lsp.wake_ident) then
+                        drain_lsp_inbox(editor, ss)
                     else
                         drain_inbox(editor, ss)
                     end
                 elseif f == kq_ffi.EVFILT_READ then
-                    local fd = tonumber(ev.ident)
-                    ---@cast fd integer
-                    if not lsp.on_kqueue_read(fd) then
-                        log.warn("main", "lsp client exited", { fd = fd })
-                    end
+                    -- All child-stdout drains now happen on the LSP lane;
+                    -- main no longer watches any LSP fd. (tty + resize
+                    -- are handled via termbox + the resizefd below.)
                 end
             end
         end
@@ -1072,6 +1097,7 @@ local function main()
         local drain_t0 = profile.now_us()
         drain_inbox(editor, ss)
         drain_hl_inbox(editor, ss)
+        drain_lsp_inbox(editor, ss)
         profile.span("main", "drain_inbox", drain_t0)
 
         -- File-load watchdog: re-check pending loads after the inbox

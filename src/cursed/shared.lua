@@ -90,7 +90,9 @@ function SharedState:stop()
     -- ring_push triggers EVFILT_USER on the consumer's kqueue,
     -- waking it so it can exit.
     self:push(self._ptr.outbox_io, { type = shared_ffi.MSG_SHUTDOWN })
+    self:push(self._ptr.outbox_io, { type = shared_ffi.MSG_SHUTDOWN })
     self:push(self._ptr.outbox_hl, { type = shared_ffi.MSG_SHUTDOWN })
+    self:push(self._ptr.outbox_lsp, { type = shared_ffi.MSG_SHUTDOWN })
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -280,6 +282,19 @@ return {
     MSG_HL_INITIALIZE_LANGUAGE = shared_ffi.MSG_HL_INITIALIZE_LANGUAGE,
     MSG_HL_QUERY = shared_ffi.MSG_HL_QUERY,
     MSG_HL_SPANS = shared_ffi.MSG_HL_SPANS,
+    MSG_LSP_SPAWN = shared_ffi.MSG_LSP_SPAWN,
+    MSG_LSP_SEND = shared_ffi.MSG_LSP_SEND,
+    MSG_LSP_KILL = shared_ffi.MSG_LSP_KILL,
+    MSG_LSP_HANDSHAKE = shared_ffi.MSG_LSP_HANDSHAKE,
+    MSG_LSP_DOC_SYNC = shared_ffi.MSG_LSP_DOC_SYNC,
+    LSP_STATUS_SPAWNING = shared_ffi.LSP_STATUS_SPAWNING,
+    LSP_STATUS_READY = shared_ffi.LSP_STATUS_READY,
+    LSP_STATUS_DEAD = shared_ffi.LSP_STATUS_DEAD,
+    LSP_STATUS_KILLED = shared_ffi.LSP_STATUS_KILLED,
+    LSP_STATUS_MISSING = shared_ffi.LSP_STATUS_MISSING,
+    LSP_DOC_OPEN = shared_ffi.LSP_DOC_OPEN,
+    LSP_DOC_CHANGE = shared_ffi.LSP_DOC_CHANGE,
+    LSP_DOC_CLOSE = shared_ffi.LSP_DOC_CLOSE,
     O_RDONLY = pffi.O_RDONLY,
     O_WRONLY = pffi.O_WRONLY,
     O_CREAT = pffi.O_CREAT,

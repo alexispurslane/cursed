@@ -1,774 +1,619 @@
---- LSP client: subprocess management and JSON-RPC over stdin/stdout.
+--- LSP client — main-side facade over the LSP lane.
 ---
---- Each client owns a spawned language server process with stdin/stdout
---- pipes. The main loop registers stdout on the central kqueue for
---- EVFILT_READ; when readable, main calls `client:drain()` to parse and
---- dispatch incoming messages.
+--- The actual subprocess management, JSON-RPC framing, and JSON
+--- decode/encode live in cursed.lsp_lane (a pthread + lua_State), so
+--- heavy JSON never runs on the main/render thread. This module is the
+--- thin main-side API the editor uses:
 ---
---- JSON-RPC framing: LSP uses Content-Length header lines over stdio:
----   Content-Length: 64\r\n\r\n{"jsonrpc":"2.0","id":1,...}
+---   - spawn_for_mode  → generate/reuse a client_id, enqueue MSG_LSP_SPAWN
+---     (idempotent: dedups by exe-name set so two modes sharing the same
+---     server binary don't double-spawn), and bind mode_name → client_id
+---   - request/notify   → enqueue MSG_LSP_SEND, routed by client_id
+---   - server_status_for → reflect ⛏ modeline status by looking up the
+---     live client for a mode's declared exe names
+---   - client_for_mode   → the client_id bound to a mode (for routing)
+---   - shutdown → enqueue KILL for every known client, then SHUTDOWN
+---
+--- Identity model: each running server has a main-assigned uint32
+--- client_id. Main mints it (so it can bind mode→id + dedup synchronously
+--- before the round-trip); the lane echoes it in every MSG_LSP_HANDSHAKE
+--- and uses it to route outbound SEND/KILL. The status registry is keyed
+--- by client_id; a reverse exe_name→client_id map lets the modeline look
+--- up "is the server for these declared names up?" without knowing ids.
+---
+--- Inbound decoded messages arrive as bespoke C structs per message type
+--- via inbox_lsp (MSG_LSP_HANDSHAKE today; diagnostics/completion/hover
+--- structs land as their consumers are wired).
 
 local ffi = require("ffi")
-local bit = require("bit")
-local pffi = require("cursed.posix_ffi")
+local constants = require("cursed.shared")
+local log = require("cursed.log")
+local json = require("cursed.json_ffi")
 
 --- Module exports table.
 --- @class LSPModule
 local M = {}
 
---- LSP clients keyed by executable path. One per mode.
---- Used for dedup when multiple views enter the same mode.
---- @type table<string, LSPClient>
-M.active_clients = {}
+----------------------------------------------------------------------------------------------------
+-- Registries (all main-side, all keyed off client_id)
+----------------------------------------------------------------------------------------------------
 
---- Module-level LSP handler that receives messages from all clients.
---- Stores the last message so the editor can inspect it.
-M.current_message = nil
+--- client_id → { exe_name, status (string), modes:set }.
+--- Populated from MSG_LSP_HANDSHAKE. Drives server_status_for + shutdown.
+--- Entries are KEPT for terminal statuses (dead/killed/missing) so the
+--- modeline can distinguish them; only "spawning"/"ready" count as live
+--- for dedup, and mode bindings are cleared on terminal so a re-enter
+--- re-spawns.
+--- @type table<integer, {exe_name:string, status:string, modes:table<string,boolean>}>
+M.clients = {}
 
---- Register LSP handlers on a mode's LSP client.
---- Called after spawn_or_get to set up dispatch.
---- @param client LSPClient
---- @param view any the view that owns this client
-local function register_client_handlers(client, view)
-    client.on_message = function(msg)
-        -- Store for editor inspector
-        M.current_message = msg
-        -- Dispatch to the view's lsp_handlers if available
-        if view._lsp_handlers and view._lsp_handlers then
-            local kind = msg.method and (msg.id and "request" or "notification")
-                or (msg.id and "response" or "unknown")
-            local handler = view._lsp_handlers[kind]
-            if handler then
-                pcall(handler, view, msg)
-            end
-        end
-    end
-    client.on_exit = function(code)
-        -- Clean up from active_clients
-        for exe, c in pairs(M.active_clients) do
-            if c == client then
-                M.active_clients[exe] = nil
-                break
-            end
-        end
-    end
+--- mode_name → client_id. The central "which server serves this mode?"
+--- binding the editor tracks. Set by spawn_for_mode; consulted by
+--- client_for_mode + cleared by unbind_mode.
+--- @type table<string, integer>
+M.mode_bindings = {}
+
+--- exe_name → client_id. Reverse lookup so server_status_for(names)
+--- (called by the modeline with a mode's declared exe list) resolves to
+--- the live client without callers needing to know ids.
+--- @type table<string, integer>
+M.exe_to_client = {}
+
+--- Open documents per client: client_id → { uri → {language_id, version} }.
+--- Tracks which docs we've didOpen'd on each server so we don't double-open
+--- (servers error on duplicate didOpen) and so didChange/didClose route
+--- correctly. Cleared on client death (drop_client_docs).
+--- @type table<integer, table<string, {language_id:string, version:integer}>>
+M._open_docs = {}
+
+--- Pending didOpens deferred until the client's initialize handshake
+--- completes (READY): client_id → { uri → {language_id, get_text} }.
+--- `get_text` snapshots the buffer lazily at flush time.
+--- @type table<integer, table<string, {language_id:string, get_text:function}>>
+M._pending_opens = {}
+
+--- Next client_id to assign. 0 is reserved ("unassigned"/notification).
+local _next_client_id = 1
+
+--- LSP_STATUS_* code (uint8 from the lane) → status string.
+--- Kept in sync with shared_state.h LSP_STATUS_*.
+local _STATUS_NAMES = {
+    [constants.LSP_STATUS_SPAWNING] = "spawning",
+    [constants.LSP_STATUS_READY] = "ready",
+    [constants.LSP_STATUS_DEAD] = "dead",
+    [constants.LSP_STATUS_KILLED] = "killed",
+    [constants.LSP_STATUS_MISSING] = "missing",
+}
+
+--- status string → is the process alive? (only spawning/ready are live;
+--- dead/killed/missing should be re-spawned on next mode_enter).
+local function is_live(status)
+    return status == "spawning" or status == "ready"
 end
 
---- Registered LSP clients keyed by executable path.
---- Used for dedup when multiple views enter the same mode.
---- @type table<string, LSPClient>
-M.active_clients = {}
+----------------------------------------------------------------------------------------------------
+-- SharedState access (set once from main.lua)
+----------------------------------------------------------------------------------------------------
 
---- LSPClient prototype for instance methods.
---- @class LSPClient
---- @field stdout_fd integer
---- @field stdin_fd integer
---- @field pid integer
---- @field running boolean
---- @field exe_name string|nil short name of the spawned binary (set by spawn_or_get; basename of the resolved path)
---- @field on_message function|nil
---- @field on_exit function|nil
---- @field kqueue table|nil the editor's main kqueue (set by spawn; used to delete the read watch on EOF)
---- @field pending table
---- @field next_id number
---- @field read_buf integer malloc'd buffer pointer
---- @field read_total number total bytes written
---- @field read_head number oldest unconsumed byte offset
---- @field read_unread number read_total - read_head  -- cached
---- @field awaiting_body number|nil body bytes still needed
---- @field buffer_capacity number
-local LSPClient = {}
+local function ss()
+    return M._ss
+end
 
-local _clients_by_fd = {}
+----------------------------------------------------------------------------------------------------
+-- Outbound payload builders (lane frees each struct after consuming)
+----------------------------------------------------------------------------------------------------
 
---- Find executable on PATH.
---- @param names string[]
---- @return string|nil
-function M.find_executable(names)
-    local path = os.getenv("PATH")
-    if not path then
-        return nil
+--- @param exe_names string[]
+--- @param workspace_dir string
+--- @param client_id integer
+local function enqueue_spawn(exe_names, workspace_dir, client_id)
+    local s = ss()
+    if s == nil then
+        return
     end
-    for _, name in ipairs(names) do
-        for segment in path:gmatch("[^:]+") do
-            local candidate = segment .. "/" .. name
-            local f = io.open(candidate, "r")
-            if f then
-                f:close()
-                return candidate
-            end
+    local blob = table.concat(exe_names, "\0")
+    if #blob > 0 then
+        blob = blob .. "\0"
+    end
+    local total = ffi.sizeof("struct LspSpawnReq") + #blob + #workspace_dir
+    local buf = ffi.C.calloc(1, total)
+    local req = ffi.cast("struct LspSpawnReq *", buf)
+    req.exe_names_len = #blob
+    req.workspace_len = #workspace_dir
+    req.client_id = client_id
+    local base = ffi.cast("char *", buf) + ffi.sizeof("struct LspSpawnReq")
+    ffi.copy(base, blob, #blob)
+    ffi.copy(base + #blob, workspace_dir, #workspace_dir)
+    s:push(s._ptr.outbox_lsp, { type = constants.MSG_LSP_SPAWN, ptr = buf })
+end
+
+--- @param method string
+--- @param params table|nil
+--- @param id integer 0 = notification, else request id
+--- @param client_id integer
+local function enqueue_send(method, params, id, client_id)
+    local s = ss()
+    if s == nil then
+        return
+    end
+    local params_json = ""
+    if params ~= nil then
+        -- Outbound params are small/infrequent (initialize/completion
+        -- request); encode on main via yyjson (correct + fast). The
+        -- heavy DECODE of inbound responses runs in the lane.
+        local enc, err = json.encode(params)
+        if enc == nil then
+            log.warn("lsp", "param encode failed", { error = err, method = method })
+            return
+        end
+        params_json = enc
+    end
+    local total = ffi.sizeof("struct LspSendReq") + #method + #params_json
+    local buf = ffi.C.calloc(1, total)
+    local req = ffi.cast("struct LspSendReq *", buf)
+    req.method_len = #method
+    req.params_len = #params_json
+    req.id = id
+    req.client_id = client_id
+    local base = ffi.cast("char *", buf) + ffi.sizeof("struct LspSendReq")
+    ffi.copy(base, method, #method)
+    ffi.copy(base + #method, params_json, #params_json)
+    s:push(s._ptr.outbox_lsp, { type = constants.MSG_LSP_SEND, ptr = buf })
+end
+
+----------------------------------------------------------------------------------------------------
+-- Dedup + spawn entry point
+----------------------------------------------------------------------------------------------------
+
+--- Find a live client whose exe_name matches any of `exe_names`
+--- (first-wins against the declared list). Returns its client_id, or
+--- nil if none. Used so two modes declaring the same server binary
+--- share one process.
+--- @param exe_names string[]
+--- @return integer|nil
+local function find_live_client(exe_names)
+    for _, name in ipairs(exe_names) do
+        local cid = M.exe_to_client[name]
+        if cid and M.clients[cid] and is_live(M.clients[cid].status) then
+            return cid
         end
     end
     return nil
 end
 
---- @param v any
---- @return string
-function M.json_encode(v)
-    if v == nil then
-        return "null"
-    elseif type(v) == "boolean" then
-        return v and "true" or "false"
-    elseif type(v) == "number" then
-        return tostring(v)
-    elseif type(v) == "string" then
-        return '"'
-            .. v:gsub("\\", "\\")
-                :gsub('"', "\\")
-                :gsub("\n", "\\n")
-                :gsub("\r", "\\r")
-                :gsub("\t", "\\t")
-            .. '"'
-    elseif type(v) == "table" then
-        local is_array = true
-        for k in pairs(v) do
-            if type(k) ~= "number" or k < 1 or k ~= math.floor(k) or k > #v then
-                is_array = false
-                break
-            end
-        end
-        if is_array and #v > 0 then
-            local parts = {}
-            for i = 1, #v do
-                parts[i] = M.json_encode(v[i])
-            end
-            return "[" .. table.concat(parts, ",") .. "]"
-        end
-        local parts = {}
-        for k, val in pairs(v) do
-            parts[#parts + 1] = M.json_encode(tostring(k)) .. ":" .. M.json_encode(val)
-        end
-        return "{" .. table.concat(parts, ",") .. "}"
-    end
-    return "null"
-end
-
---- Minimal JSON decode.
---- @param s string
---- @return any
-function M.json_decode(s)
-    local pos = { 1 }
-    --- Declare all functions for mutual recursion, then assign
-    local skip_ws, parse_value, parse_literal, parse_string, parse_object, parse_array, parse_number
-
-    skip_ws = function()
-        while pos[1] <= #s do
-            local c = s:sub(pos[1], pos[1])
-            if c == " " or c == "\n" or c == "\r" or c == "\t" then
-                pos[1] = pos[1] + 1
-            else
-                break
-            end
-        end
-    end
-
-    parse_number = function()
-        local start = pos[1]
-        while pos[1] <= #s and s:sub(pos[1], pos[1]):match("[-+0-9.eE]") do
-            pos[1] = pos[1] + 1
-        end
-        local num = tonumber(s:sub(start, pos[1] - 1))
-        if not num then
-            error("Invalid number")
-        end
-        return num
-    end
-
-    parse_literal = function()
-        local start = pos[1]
-        local t4 = s:sub(start, start + 3)
-        if t4 == "true" then
-            pos[1] = pos[1] + 4
-            return true
-        end
-        if t4 == "null" then
-            pos[1] = pos[1] + 4
-            return nil
-        end
-        local t5 = s:sub(start, start + 4)
-        if t5 == "false" then
-            pos[1] = pos[1] + 5
-            return false
-        end
-        return nil
-    end
-
-    parse_string = function()
-        pos[1] = pos[1] + 1
-        local out = {}
-        while pos[1] <= #s do
-            local ch = s:sub(pos[1], pos[1])
-            if ch == "\\" then
-                pos[1] = pos[1] + 1
-                local esc = s:sub(pos[1], pos[1])
-                if esc == '"' then
-                    out[#out + 1] = '"'
-                elseif esc == "\\" then
-                    out[#out + 1] = "\\"
-                elseif esc == "n" then
-                    out[#out + 1] = "\n"
-                elseif esc == "r" then
-                    out[#out + 1] = "\r"
-                elseif esc == "t" then
-                    out[#out + 1] = "\t"
-                elseif esc == "u" then
-                    out[#out + 1] = "\\u" .. s:sub(pos[1] + 1, pos[1] + 4)
-                    pos[1] = pos[1] + 4
-                else
-                    out[#out + 1] = esc
-                end
-                pos[1] = pos[1] + 1
-            elseif ch == '"' then
-                pos[1] = pos[1] + 1
-                return table.concat(out)
-            else
-                out[#out + 1] = ch
-                pos[1] = pos[1] + 1
-            end
-        end
-        error("Unterminated string")
-    end
-
-    parse_object = function()
-        pos[1] = pos[1] + 1
-        local t = {}
-        while true do
-            skip_ws()
-            if s:sub(pos[1], pos[1]) == "}" then
-                pos[1] = pos[1] + 1
-                return t
-            end
-            if not s:sub(pos[1], pos[1]):match('"') then
-                error("Expected string key")
-            end
-            local key = parse_string()
-            skip_ws()
-            if s:sub(pos[1], pos[1]) == ":" then
-                pos[1] = pos[1] + 1
-            end
-            t[key] = parse_value()
-            skip_ws()
-            if s:sub(pos[1], pos[1]) == "," then
-                pos[1] = pos[1] + 1
-            else
-                pos[1] = pos[1] + 1
-                break
-            end
-        end
-        return t
-    end
-
-    parse_array = function()
-        pos[1] = pos[1] + 1
-        local t = {}
-        local i = 1
-        while true do
-            skip_ws()
-            if s:sub(pos[1], pos[1]) == "]" then
-                pos[1] = pos[1] + 1
-                return t
-            end
-            t[i] = parse_value()
-            i = i + 1
-            skip_ws()
-            if s:sub(pos[1], pos[1]) == "," then
-                pos[1] = pos[1] + 1
-            else
-                pos[1] = pos[1] + 1
-                break
-            end
-        end
-        return t
-    end
-
-    parse_value = function()
-        skip_ws()
-        if pos[1] > #s then
-            return nil
-        end
-        local ch = s:sub(pos[1], pos[1])
-        if ch == '"' then
-            return parse_string()
-        end
-        if ch == "{" then
-            return parse_object()
-        end
-        if ch == "[" then
-            return parse_array()
-        end
-        if
-            s:sub(pos[1], pos[1] + 3) == "true"
-            or s:sub(pos[1], pos[1] + 4) == "false"
-            or s:sub(pos[1], pos[1] + 3) == "null"
-        then
-            return parse_literal()
-        end
-        return parse_number()
-    end
-
-    skip_ws()
-    if pos[1] > #s then
-        return nil
-    end
-    return parse_value()
-end
-
--- Reassign new_client to local var so we can expose create_raw.
-local new_client
-
---- @param stdout_fd integer
---- @param stdin_fd integer
---- @param pid integer
---- @return LSPClient
-new_client = function(stdout_fd, stdin_fd, pid)
-    return setmetatable({
-        stdout_fd = stdout_fd,
-        stdin_fd = stdin_fd,
-        pid = pid,
-        running = true,
-        exe_name = nil,
-        on_message = nil,
-        on_exit = nil,
-        pending = {},
-        next_id = 1,
-        read_buf = ffi.cast("uint8_t *", ffi.C.malloc(65536)),
-        read_total = 0,
-        read_head = 0,
-        read_unread = 0,
-        awaiting_body = nil,
-        buffer_capacity = 65536,
-    }, { __index = LSPClient })
-end
-
---- @param msg table
-function LSPClient:send_frame(msg)
-    local body = M.json_encode(msg)
-    local header = ("Content-Length: %d\r\n\r\n"):format(#body)
-    ffi.C.write(self.stdin_fd, header, #header)
-    ffi.C.write(self.stdin_fd, body, #body)
-end
-
---- @param method string
---- @param params table
---- @return number
-function LSPClient:request(method, params)
-    local id = self.next_id
-    self.next_id = id + 1
-    self.pending[id] = {}
-    self:send_frame({
-        jsonrpc = "2.0",
-        id = id,
-        method = method,
-        params = params,
-    })
-    return id
-end
-
---- @param method string
---- @param params table
-function LSPClient:notify(method, params)
-    self:send_frame({
-        jsonrpc = "2.0",
-        method = method,
-        params = params,
-    })
-end
-
---- @param id number
---- @param result any
-function LSPClient:response(id, result)
-    self:send_frame({
-        jsonrpc = "2.0",
-        id = id,
-        result = result,
-    })
-end
-
---- Tear down a dead client's fd bookkeeping. Called from `drain` on EOF
---- (n <= 0) so the kqueue read watch for a closed/EOF'd stdoutPIPE does
---- not keep select() busy-spinning. Idempotent.
-function LSPClient:_teardown_dead()
-    if self._dead then
-        return
-    end
-    self._dead = true
-    self.running = false
-    local fd = self.stdout_fd
-    _clients_by_fd[fd] = nil
-    -- Drop from active_clients so server_status_for reflects "off" and a
-    -- later spawn_or_get re-spawns instead of returning this corpse.
-    for exe, c in pairs(M.active_clients) do
-        if c == self then
-            M.active_clients[exe] = nil
-        end
-    end
-    if self.kqueue then
-        self.kqueue:del_fd(fd)
-    end
-    pcall(function()
-        ffi.C.close(fd)
-    end)
-end
-
---- @return boolean alive
-function LSPClient:drain()
-    local buf = ffi.new("uint8_t[8192]")
-    -- Max 8192 bytes/block (`read(2)` returns chunk size, syscall
-    -- size limit). 0+chucks would be lazy/buffered: process is fine.
-    local fd = self.stdout_fd
-    local n = tonumber(ffi.C.read(fd, buf, 8192)) or 0
-
-    if n <= 0 then
-        -- EOF or read error on the child's stdout. The kqueue
-        -- EVFILT_READ filter reports a pipe EOF as a PERSISTENT ready
-        -- condition — EV_CLEAR does not auto-clear it — so unless we
-        -- explicitly delete the watch here, select() would wake every
-        -- loop iteration (busy-spin, thousands of renders/sec). Tear
-        -- the fd down fully: delete the kevent, drop it from the
-        -- fd→client map and active_clients, close the fd.
-        self:_teardown_dead()
-        if self.on_exit ~= nil and not self._exit_fired then
-            self._exit_fired = true
-            self.on_exit(0)
-        end
-        return false
-    end
-
-    if self.read_total + n > self.buffer_capacity then
-        local new_cap = self.buffer_capacity * 2
-        ---@diagnostic disable-next-line: cast-local-type
-        self.read_buf = ffi.cast("uint8_t *", ffi.C.realloc(self.read_buf, new_cap))
-        self.buffer_capacity = new_cap
-    end
-
-    ffi.C.memmove(self.read_buf + self.read_total, buf, n)
-    self.read_total = self.read_total + n
-    self.read_unread = self.read_total - self.read_head
-
-    while true do
-        if self.awaiting_body ~= nil then
-            if self.read_unread < self.awaiting_body then
-                break
-            end
-            local body_text = ffi.string(self.read_buf + self.read_head, self.awaiting_body)
-            self.read_head = self.read_head + self.awaiting_body
-            self.read_unread = self.read_total - self.read_head
-            self.awaiting_body = nil
-            local ok, parsed = pcall(M.json_decode, body_text)
-            if ok and parsed then
-                self:_dispatch(parsed)
-            end
-        else
-            -- Find \r\n\r\n
-            local crlf_pos = -1
-            local bp = self.read_buf + self.read_head
-            local ur = self.read_unread
-            for i = 0, ur - 4 do
-                if bp[i] == 13 and bp[i + 1] == 10 and bp[i + 2] == 13 and bp[i + 3] == 10 then
-                    crlf_pos = i
-                    break
-                end
-            end
-
-            if crlf_pos < 0 then
-                break
-            end
-
-            self.read_head = self.read_head + crlf_pos + 4
-            self.read_unread = self.read_total - self.read_head
-            local hdr_text = ffi.string(self.read_buf + self.read_head - crlf_pos - 4, crlf_pos)
-
-            local cl = 0
-            for line in hdr_text:gmatch("[^\r\n]+") do
-                local name, value = line:match("^([%w-_]+):%s*(.-)$")
-                if name and name:lower() == "content-length" then
-                    cl = tonumber(value) or 0
-                end
-            end
-
-            if cl <= 0 then
-                break
-            end
-
-            if self.read_unread < cl then
-                self.awaiting_body = cl
-                break
-            end
-
-            local body_text = ffi.string(self.read_buf + self.read_head, cl)
-            self.read_head = self.read_head + cl
-            self.read_unread = self.read_total - self.read_head
-            local ok, parsed = pcall(M.json_decode, body_text)
-            if ok and parsed then
-                self:_dispatch(parsed)
-            end
-        end
-
-        if
-            self.read_unread > 0
-            and self.read_unread < self.buffer_capacity / 4
-            and self.read_head > 4096
-        then
-            self:_compact()
-        end
-    end
-
-    if self.read_unread == 0 then
-        self.read_head = 0
-        self.read_total = 0
-    end
-
-    return self.running
-end
-
---- Compact unread bytes to front of buffer.
-function LSPClient:_compact()
-    local unread = self.read_total - self.read_head
-    if unread == 0 then
-        self.read_head = 0
-        self.read_total = 0
-        return
-    end
-    ffi.C.memmove(self.read_buf, self.read_buf + self.read_head, unread)
-    self.read_total = unread
-    self.read_head = 0
-end
-
---- @param msg table
-function LSPClient:_dispatch(msg)
-    if msg.id ~= nil then
-        local pending = self.pending[msg.id]
-        if pending then
-            self.pending[msg.id] = nil
-            if msg.error ~= nil then
-                if pending.reject then
-                    pcall(pending.reject, msg.error)
-                end
-            elseif pending.resolve then
-                pcall(pending.resolve, msg.result)
-            end
-        end
-    end
-    if self.on_message ~= nil then
-        pcall(self.on_message, msg)
-    end
-end
-
---- @param signal string "TERM" or "KILL"
-function LSPClient:kill(signal)
-    if self.pid == 0 or not self.running then
-        return
-    end
-    local sig = signal == "KILL" and 9 or 15
-    ffi.C.kill(self.pid, sig)
-
-    local ws = ffi.new("int[1]")
-    for _ = 1, 50 do
-        local rv = ffi.C.waitpid(self.pid, ws, 0x1) -- WNOHANG
-        if rv == self.pid then
-            break
-        end
-        ffi.C.usleep(1000)
-    end
-
-    ffi.C.free(self.read_buf)
-    self.read_buf = nil
-    -- Close the stdout fd + drop the kqueue watch + remove from the
-    -- fd→client map (shares the EOF-teardown path so a killed client
-    -- doesn't leave a perpetually-ready kevent busy-spinning select()).
-    self:_teardown_dead()
-    if self.on_exit ~= nil and not self._exit_fired then
-        self._exit_fired = true
-        self.on_exit(sig == 9 and -1 or 0)
-    end
-end
-
---- Spawn a language server subprocess.
----
---- Registers stdout on the provided kqueue for EVFILT_READ.
---- Automatically sends the `initialize` request and `initialized` notification.
---- @param main_kqueue table the editor's main kqueue instance
---- @param executable string absolute path to LSP binary
---- @param workspace_dir string workspace root directory
---- @param on_message function|nil notification callback: fn(msg)
---- @param on_exit function|nil exit callback: fn(exit_code)
---- @return LSPClient
-function M.spawn(main_kqueue, executable, workspace_dir, on_message, on_exit)
-    ---@type integer[2]
-    local stdin_pipe = ffi.new("int[2]")
-    assert(pffi.C.pipe(stdin_pipe) == 0, "pipe(stdin) failed")
-
-    ---@type integer[2]
-    local stdout_pipe = ffi.new("int[2]")
-    assert(pffi.C.pipe(stdout_pipe) == 0, "pipe(stdout) failed")
-
-    local pid = ffi.C.fork()
-    assert(pid >= 0, "fork() failed")
-
-    if pid == 0 then
-        -- Child process
-        ffi.C.close(tonumber(stdin_pipe[1]))
-        ffi.C.close(tonumber(stdout_pipe[0]))
-        ffi.C.dup2(tonumber(stdin_pipe[0]), 0)
-        ffi.C.dup2(tonumber(stdout_pipe[1]), 1)
-        ffi.C.close(tonumber(stdin_pipe[0]))
-        ffi.C.close(tonumber(stdout_pipe[1]))
-
-        -- putenv(3) takes a mutable `char *` and keeps the pointer (no
-        -- copy); a Lua string is immutable const char[] and FFI rejects
-        -- it ("cannot convert 'string' to 'char *'"). Build a writable
-        -- C buffer. It only needs to live until execvp() (which replaces
-        -- the image) — but execvp can fail, so stack-scope is incorrect;
-        -- heap-allocate and leak on the exec-fail _exit(127) path.
-        local envstr = ("LSP_WORKSPACE=%s"):format(workspace_dir)
-        local envbuf = ffi.cast("char *", ffi.C.malloc(#envstr + 1))
-        ffi.copy(envbuf, envstr)
-        envbuf[#envstr] = 0
-        ffi.C.putenv(envbuf)
-
-        local cstr = ffi.new("char[?]", #executable + 1)
-        ffi.copy(cstr, executable)
-        local argv = ffi.new("char *[2]")
-        argv[0] = cstr
-        argv[1] = nil
-        ffi.C.execvp(cstr, argv)
-        ffi.C._exit(127)
-    end
-
-    -- Parent process
-    pffi.C.close(tonumber(stdin_pipe[0]))
-    pffi.C.close(tonumber(stdout_pipe[1]))
-
-    local child_stdout_fd = tonumber(stdout_pipe[0])
-    local child_stdin_fd = tonumber(stdin_pipe[1])
-    ---@cast child_stdout_fd integer
-    ---@cast child_stdin_fd integer
-    ---@cast pid integer
-
-    -- Non-blocking stdout: F_GETFL=3, F_SETFL=4, O_NONBLOCK=4
-    local flags = ffi.C.fcntl(child_stdout_fd, 3)
-    ffi.C.fcntl(child_stdout_fd, 4, bit.bor(flags, 4))
-
-    local client = new_client(child_stdout_fd, child_stdin_fd, pid)
-    client.on_message = on_message
-    client.on_exit = on_exit
-    ---@diagnostic disable-next-line: inject-field
-    client.kqueue = main_kqueue
-
-    -- Register stdout on main kqueue
-    main_kqueue:add_fd(child_stdout_fd)
-
-    _clients_by_fd[client.stdout_fd] = client
-
-    -- Send initialize
-    client:request("initialize", {
-        processId = pid,
-        rootUri = "file://" .. workspace_dir,
-        capabilities = {},
-    })
-
-    return client
-end
-
---- Clean up all LSP clients.
-function M.shutdown()
-    -- Notify all active clients
-    for exe, client in pairs(M.active_clients) do
-        client:kill("TERM")
-        M.active_clients[exe] = nil
-    end
-    for _, client in pairs(_clients_by_fd) do
-        client:kill("TERM")
-    end
-    _clients_by_fd = {}
-end
-
---- Get or spawn an LSP client for a mode.
---- First-wins: tries each executable name and returns the first match.
---- If a client for one of these executables is already running, returns it.
---- Registers stdout on the provided kqueue.
---- @param main_kqueue table Kqueue instance (has add_fd)
+--- Get-or-spawn an LSP client for a mode and bind mode_name → client_id.
+--- Dedups by exe name set (two modes with the same lsp_servers share one
+--- process). The matching legacy entry point `spawn_or_get` delegates
+--- here. No fork happens on the main thread; this enqueues to the lane.
+--- @param mode_name string the major-mode instance name (binding key)
 --- @param exe_names string[] first-wins list of executable names
 --- @param workspace_dir string workspace root directory
---- @param on_message function|nil optional callback for incoming messages
---- @param on_exit function|nil optional callback for process exit
---- @return LSPClient|nil
-function M.spawn_or_get(main_kqueue, exe_names, workspace_dir, on_message, on_exit)
-    -- Check for already-running client
-    for _, exe in ipairs(exe_names) do
-        local c = M.active_clients[exe]
-        if c and c.running then
-            return c
-        end
+--- @return integer client_id the id assigned/bound (0 if nothing to spawn)
+function M.spawn_for_mode(mode_name, exe_names, workspace_dir)
+    if M._ss == nil then
+        return 0
+    end
+    if exe_names == nil or #exe_names == 0 then
+        return 0
     end
 
-    -- Find first matching executable on PATH
-    local found = M.find_executable(exe_names)
-    if not found then
-        return nil
+    -- Already bound for this mode? Reuse if still live (a dead/killed
+    -- binding falls through to re-spawn below).
+    local bound = M.mode_bindings[mode_name]
+    if bound and M.clients[bound] and is_live(M.clients[bound].status) then
+        return bound
     end
 
-    -- Spawn new client
-    local client = M.spawn(main_kqueue, found, workspace_dir, on_message, on_exit)
-    client.exe_name = found:match("([^/]+)$")
-    M.active_clients[found] = client
-    return client
+    -- Dedup: a live client for any of these exe names already exists →
+    -- bind this mode to it (don't spawn a second process).
+    local existing = find_live_client(exe_names)
+    local client_id
+    if existing then
+        client_id = existing
+    else
+        client_id = _next_client_id
+        _next_client_id = _next_client_id + 1
+        enqueue_spawn(exe_names, workspace_dir, client_id)
+        -- Provisional registry entry so server_status_for reflects
+        -- "spawning" (the lane will correct to missing if the binary
+        -- isn't on PATH, or ready on the initialize response).
+        M.clients[client_id] = {
+            exe_name = exe_names[1],
+            status = "spawning",
+            modes = {},
+        }
+        M.exe_to_client[exe_names[1]] = client_id
+    end
+
+    -- Bind mode → client_id (overwrite any stale binding for this mode).
+    M.mode_bindings[mode_name] = client_id
+    local entry = M.clients[client_id]
+    if entry then
+        entry.modes[mode_name] = true
+    end
+
+    return client_id
 end
 
---- Status of the first server (running or not) among the given
---- (short) executable names. Used by the editor's modeline and any
---- status lookup that wants to answer "is the LSP for this mode up?".
---- Spawns nothing; reflects current state of `active_clients`.
+--- Legacy entry point preserved for editor_listeners / editor.lua: takes
+--- a (now-unused) kqueue + callbacks and returns a placeholder so the old
+--- "client == nil ⇒ not found" branch keeps its semantics. Delegates to
+--- spawn_for_mode with a mode key derived from exe_names[1].
+--- @param _main_kqueue any unused — lane owns its kq
+--- @param exe_names string[]
+--- @param workspace_dir string
+--- @param _on_message any unused — inbound is via inbox_lsp
+--- @param _on_exit any unused — lane relays handshakes
+--- @return LSPClient|nil placeholder; nil if no ss wired
+function M.spawn_or_get(_main_kqueue, exe_names, workspace_dir, _on_message, _on_exit)
+    if M._ss == nil then
+        return nil
+    end
+    if exe_names == nil or #exe_names == 0 then
+        return nil
+    end
+    local mode_key = exe_names[1]
+    local id = M.spawn_for_mode(mode_key, exe_names, workspace_dir)
+    if id == 0 then
+        return nil
+    end
+    return { _placeholder = true, client_id = id }
+end
+
+--- The client_id bound to a mode (which server serves this mode?), or nil.
+--- @param mode_name string
+--- @return integer|nil
+function M.client_for_mode(mode_name)
+    return M.mode_bindings[mode_name]
+end
+
+--- Drop a mode's binding (e.g. on mode_exit if the server isn't shared).
+--- Does NOT kill the server — other modes may still use it.
+--- @param mode_name string
+function M.unbind_mode(mode_name)
+    local cid = M.mode_bindings[mode_name]
+    if cid == nil then
+        return
+    end
+    M.mode_bindings[mode_name] = nil
+    local entry = M.clients[cid]
+    if entry then
+        entry.modes[mode_name] = nil
+    end
+end
+
+----------------------------------------------------------------------------------------------------
+-- Outbound requests / notifications
+----------------------------------------------------------------------------------------------------
+
+--- Send a request to the server bound to a mode.
+--- @param mode_name string
+--- @param method string
+--- @param params table|nil
+--- @param id integer request id (caller-allocated; lane owns id 1 = initialize)
+function M.request_for_mode(mode_name, method, params, id)
+    local cid = M.mode_bindings[mode_name]
+    if cid == nil then
+        return
+    end
+    enqueue_send(method, params, id, cid)
+end
+
+--- Send a notification to the server bound to a mode.
+--- @param mode_name string
+--- @param method string
+--- @param params table|nil
+function M.notify_for_mode(mode_name, method, params)
+    local cid = M.mode_bindings[mode_name]
+    if cid == nil then
+        return
+    end
+    enqueue_send(method, params, 0, cid)
+end
+
+--- Send a request by explicit client_id. Kept for callers that track an
+--- id directly rather than a mode name.
+--- @param client_id integer
+--- @param method string
+--- @param params table|nil
+--- @param id integer request id
+function M.request(client_id, method, params, id)
+    enqueue_send(method, params, id, client_id)
+end
+
+--- Send a notification by explicit client_id.
+--- @param client_id integer
+--- @param method string
+--- @param params table|nil
+function M.notify(client_id, method, params)
+    enqueue_send(method, params, 0, client_id)
+end
+
+----------------------------------------------------------------------------------------------------
+-- Document synchronization (didOpen / didChange / didClose)
+--
+-- Full-text sync: main hands the buffer's full text as a malloc'd
+-- pointer (Buffer:write_text_direct) to the lane; the lane builds the
+-- JSON-RPC notification envelope itself, so NO JSON encode of the
+-- (potentially large) text happens on the main thread. Main only does
+-- the calloc + memcpy of the doc header (uri/language_id) + transfers
+-- the text buffer pointer (ownership → lane frees).
+--
+-- Readiness gating: a server only accepts didOpen AFTER its initialize
+-- handshake completes (status == ready). Main mints the version counter
+-- but DEFERS the actual didOpen until the READY handshake lands. Callers
+-- record intent via sync_open_for_mode (sets the buffer's lsp_* fields +
+-- marks want_open); the `lsp_status` READY transition in drain_lsp_inbox
+-- flushes pending opens for that client via flush_pending_opens below.
+----------------------------------------------------------------------------------------------------
+
+--- Build + push a struct LspDocSync. Takes ownership of `text_ptr`
+--- (the lane frees it). text_ptr may be nil for close.
+--- @param client_id integer
+--- @param kind integer constants.LSP_DOC_*
+--- @param uri string
+--- @param language_id string
+--- @param version integer
+--- @param text_ptr any malloc'd char* (ownership transfers) or nil
+--- @param text_len integer
+local function enqueue_doc_sync(client_id, kind, uri, language_id, version, text_ptr, text_len)
+    local s = ss()
+    if s == nil then
+        if text_ptr ~= nil then
+            ffi.C.free(text_ptr)
+        end
+        return
+    end
+    local d = ffi.cast("struct LspDocSync *", ffi.C.calloc(1, ffi.sizeof("struct LspDocSync")))
+    d.client_id = client_id
+    d.version = version
+    d.kind = kind
+    ffi.copy(d.uri, uri, math.min(#uri, 511))
+    ffi.copy(d.language_id, language_id, math.min(#language_id, 31))
+    d.text_ptr = text_ptr
+    d.text_len = text_len
+    s:push(s._ptr.outbox_lsp, { type = constants.MSG_LSP_DOC_SYNC, ptr = d })
+end
+
+--- Is this client ready to accept didOpen (initialize handshake done)?
+--- @param client_id integer
+--- @return boolean
+function M.is_ready(client_id)
+    local entry = M.clients[client_id]
+    return entry ~= nil and entry.status == "ready"
+end
+
+--- Record intent to open a document for a client. If the client is
+--- already ready, emits didOpen immediately; else defers until the
+--- READY handshake (flush_pending_opens, called from drain_lsp_inbox).
+--- `get_text` is a zero-arg function returning (text_ptr, text_len)
+--- called lazily at flush time, so we don't snapshot the buffer text
+--- until the moment we actually send.
+--- @param client_id integer
+--- @param uri string
+--- @param language_id string
+--- @param get_text fun():(any, integer) returns malloc'd char* + len
+function M.sync_open(client_id, uri, language_id, get_text)
+    if M._ss == nil or client_id == 0 then
+        return
+    end
+    -- De-dup: don't open the same uri twice on the same client.
+    local open = M._open_docs[client_id]
+    if open and open[uri] then
+        return
+    end
+    if M.is_ready(client_id) then
+        local ptr, len = get_text()
+        enqueue_doc_sync(client_id, constants.LSP_DOC_OPEN, uri, language_id, 0, ptr, len)
+        M._open_docs[client_id] = M._open_docs[client_id] or {}
+        M._open_docs[client_id][uri] = { language_id = language_id, version = 0 }
+    else
+        -- Defer. Stored without text; captured at flush.
+        M._pending_opens[client_id] = M._pending_opens[client_id] or {}
+        M._pending_opens[client_id][uri] = { language_id = language_id, get_text = get_text }
+    end
+end
+
+--- Flush pending didOpen requests for a client now that it's READY.
+--- Called from main.lua's drain_lsp_inbox on the ready transition.
+--- @param client_id integer
+function M.flush_pending_opens(client_id)
+    local pending = M._pending_opens[client_id]
+    if pending == nil then
+        return
+    end
+    M._pending_opens[client_id] = nil
+    for uri, info in pairs(pending) do
+        local ptr, len = info.get_text()
+        info.get_text = nil -- drop closure reference so the buffer can GC
+        enqueue_doc_sync(client_id, constants.LSP_DOC_OPEN, uri, info.language_id, 0, ptr, len)
+        M._open_docs[client_id] = M._open_docs[client_id] or {}
+        M._open_docs[client_id][uri] = { language_id = info.language_id, version = 0 }
+    end
+end
+
+--- Send a full-text didChange. No-op if the doc isn't open yet (the
+--- pending didOpen will carry the latest text). `get_text` snapshots
+--- the buffer lazily at call time.
+--- @param client_id integer
+--- @param uri string
+--- @param version integer
+--- @param get_text fun():(any, integer) returns malloc'd char* + len
+function M.sync_change(client_id, uri, version, get_text)
+    if M._ss == nil or client_id == 0 then
+        return
+    end
+    local open = M._open_docs[client_id]
+    if open == nil or open[uri] == nil then
+        return -- not open yet; didOpen will carry latest text
+    end
+    local ptr, len = get_text()
+    -- language_id unused for CHANGE (doc already open); pass empty.
+    enqueue_doc_sync(client_id, constants.LSP_DOC_CHANGE, uri, "", version, ptr, len)
+    open[uri].version = version
+end
+
+--- Last version we relayed to the server for (client_id, uri), or -1 if
+--- the doc isn't open. Used by the editor's debounce to decide whether a
+--- didChange is pending (buf.lsp_version > sent).
+--- @param client_id integer
+--- @param uri string
+--- @return integer
+function M.doc_sent_version(client_id, uri)
+    local open = M._open_docs[client_id]
+    if open == nil or open[uri] == nil then
+        return -1
+    end
+    return open[uri].version
+end
+
+--- Send didClose for a document + drop it from the open registry.
+--- Also clears any pending open for this uri.
+--- @param client_id integer
+--- @param uri string
+function M.sync_close(client_id, uri)
+    if M._ss == nil or client_id == 0 then
+        return
+    end
+    local open = M._open_docs[client_id]
+    local lang_id = open and open[uri] and open[uri].language_id or ""
+    if open and open[uri] then
+        enqueue_doc_sync(client_id, constants.LSP_DOC_CLOSE, uri, lang_id, 0, nil, 0)
+        open[uri] = nil
+    end
+    local pending = M._pending_opens[client_id]
+    if pending then
+        pending[uri] = nil
+    end
+end
+
+--- Drop ALL open documents for a client (e.g. on the client's death:
+--- the server's doc state is gone with the process). Does NOT send
+--- didClose (the server is gone).
+--- @param client_id integer
+function M.drop_client_docs(client_id)
+    M._open_docs[client_id] = nil
+    M._pending_opens[client_id] = nil
+end
+
+----------------------------------------------------------------------------------------------------
+-- Status (modeline ⛏)
+----------------------------------------------------------------------------------------------------
+
+--- Status of the first server among the given short executable names.
+--- Returns the name + a status string ("spawning"/"ready"/"dead"/
+--- "killed"/"missing") so the modeline can render a distinct glyph.
+--- Looks up a registered client by declared exe name; if a spawn was
+--- requested but no client exists yet, falls back to "missing".
 --- @param exe_names string[] first-wins list of executable names
 --- @return string|nil name short name of the matching server
---- @return boolean running whether that server's client is alive
+--- @return string status status string ("missing" if none found)
 function M.server_status_for(exe_names)
     for _, name in ipairs(exe_names) do
-        for _, client in pairs(M.active_clients) do
-            if client.exe_name == name then
-                return name, client.running
+        local cid = M.exe_to_client[name]
+        if cid then
+            local entry = M.clients[cid]
+            if entry and entry.status ~= nil then
+                return name, entry.status
             end
         end
     end
-    -- Declared in the mode spec but not spawned (typically: binary
-    -- not found on PATH). Surface the first declared name so the
-    -- modeline can show "declared, off" rather than silently empty.
     if exe_names[1] then
-        return exe_names[1], false
+        return exe_names[1], "missing"
     end
-    return nil, false
+    return nil, "missing"
 end
 
---- Main loop dispatcher. Called on kqueue EVFILT_READ.
---- @param fd integer
---- @return boolean alive
-function M.on_kqueue_read(fd)
-    local client = _clients_by_fd[fd]
-    if not client then
-        return true
+----------------------------------------------------------------------------------------------------
+-- Shutdown / cleanup
+---------------------------------------------------------------------------------------------------
+
+--- Kill every known client + SHUTDOWN the lane. Wipes registries.
+function M.shutdown()
+    local s = ss()
+    if s == nil then
+        return
     end
-    return client:drain()
+    for cid, entry in pairs(M.clients) do
+        local req =
+            ffi.cast("struct LspKillReq *", ffi.C.calloc(1, ffi.sizeof("struct LspKillReq")))
+        req.client_id = cid
+        ffi.copy(req.exe_name, entry.exe_name, math.min(#entry.exe_name, 63))
+        s:push(s._ptr.outbox_lsp, { type = constants.MSG_LSP_KILL, ptr = req })
+    end
+    s:push(s._ptr.outbox_lsp, { type = constants.MSG_SHUTDOWN })
+    M.clients = {}
+    M.mode_bindings = {}
+    M.exe_to_client = {}
 end
 
---- Lightweight client factory for standalone / non-editor use.
---- Does NOT register stdout on any kqueue. Callers must use poll()/select()
---- to discover readability and then call `client:drain()`.
----
---- Also does NOT send `initialize` — callers decide what to do.
---- @param child_stdout_fd integer parent's read-end fd for child stdout
---- @param child_stdin_fd integer parent's write-end fd for child stdin
---- @param pid integer child process ID
---- @param on_message function|nil
---- @param on_exit function|nil
---- @return LSPClient
-function M.create_raw(child_stdout_fd, child_stdin_fd, pid, on_message, on_exit)
-    ---@cast child_stdout_fd integer
-    ---@cast child_stdin_fd integer
-    ---@cast pid integer
-    local client = new_client(child_stdout_fd, child_stdin_fd, pid)
-    client.on_message = on_message
-    client.on_exit = on_exit
-    return client
+----------------------------------------------------------------------------------------------------
+-- Inbound (MSG_LSP_HANDSHAKE from the lane)
+----------------------------------------------------------------------------------------------------
+
+--- Consume a MSG_LSP_HANDSHAKE (called from main.lua's drain_lsp_inbox).
+--- Updates the client_id-keyed registry with the relayed status. The id
+--- was main-assigned at SPAWN time; the lane only echoes it + the status.
+--- Entries are KEPT for terminal statuses (dead/killed/missing) so the
+--- modeline distinguishes them; mode bindings pointing at a terminal
+--- client are cleared so a re-enter re-spawns. Frees the struct.
+--- @param ptr any struct LspHandshake*
+--- @return {client_id:integer, exe_name:string, status:string}|nil parsed info for the caller to emit as an event
+function M.apply_handshake(ptr)
+    if ptr == nil then
+        return nil
+    end
+    local hs = ffi.cast("struct LspHandshake *", ptr)
+    local cid = tonumber(hs.client_id)
+    ---@cast cid integer
+    local name = ffi.string(hs.exe_name, 64)
+    local nul = name:find("%z")
+    if nul then
+        name = name:sub(1, nul - 1)
+    end
+    local status = _STATUS_NAMES[tonumber(hs.status)] or "missing"
+
+    -- Upsert. Preserve the modes set across handshakes (a re-spawn of
+    -- the same id reuses the entry).
+    local entry = M.clients[cid]
+    if entry == nil then
+        entry = { exe_name = name, status = status, modes = {} }
+        M.clients[cid] = entry
+    end
+    local prev_status = entry.status
+    entry.exe_name = name
+    entry.status = status
+    M.exe_to_client[name] = cid
+
+    -- On a terminal status, clear this client's mode bindings so a
+    -- later spawn_for_mode for those modes re-spawns (the dead entry
+    -- stays in the registry so the modeline keeps showing srv✝/srv—).
+    if not is_live(status) then
+        for mode_name, mb_cid in pairs(M.mode_bindings) do
+            if mb_cid == cid then
+                M.mode_bindings[mode_name] = nil
+            end
+        end
+        -- The server process is gone; its document state is too. Drop
+        -- our open-doc registry for it (no didClose — nobody to send to).
+        M.drop_client_docs(cid)
+    end
+
+    -- On a READY transition, flush any didOpens deferred while the
+    -- client was still SPAWNING (mode_enter can fire before the
+    -- initialize response lands).
+    if status == "ready" and prev_status ~= "ready" then
+        M.flush_pending_opens(cid)
+    end
+
+    ffi.C.free(ptr)
+    return { client_id = cid, exe_name = name, status = status, prev_status = prev_status }
+end
+
+--- Install the SharedState wrapper (called once from main.lua after init).
+--- @param s any SharedState
+function M.set_shared_state(s)
+    M._ss = s
 end
 
 return M

@@ -7,6 +7,9 @@
  * Lane architecture:
  *   - Main lane: runs in the main thread (termbox, rendering, piece table writes)
  *   - IO lane: runs in its own pthread + lua_State (file I/O, mmap)
+ *   - Highlight lane: runs in its own pthread + lua_State (tree-sitter parse + query)
+ *   - LSP lane: runs in its own pthread + lua_State (subprocess mgmt + JSON-RPC
+ *     framing + JSON decode/encode, so heavy JSON never runs on main)
  *   - Communication via lock-free ring buffers in SharedState
  *
  * Build with: just build   (produces a static binary)
@@ -186,6 +189,39 @@ static void *highlight_lane_thread(void *arg)
     return NULL;
 }
 
+/* ── LSP lane thread ──────────────────────────────────────────────── */
+
+static void *lsp_lane_thread(void *arg)
+{
+    struct IOLaneArgs *lsp_args = (struct IOLaneArgs *)arg;
+    lua_State *L = lsp_args->L;
+    free(lsp_args);
+
+    size_t mod_len = 0;
+    const char *mod_bc = find_module("cursed.lsp_lane", &mod_len);
+
+    if (mod_bc == NULL) {
+        fprintf(stderr, "cursed: lsp_lane module not found\n");
+        return NULL;
+    }
+
+    int status = luaL_loadbuffer(L, mod_bc, mod_len, "cursed.lsp_lane");
+    if (status != LUA_OK) {
+        fprintf(stderr, "cursed: lsp_lane: failed to load bytecode: %s\n",
+                lua_tostring(L, -1));
+        return NULL;
+    }
+
+    status = lua_pcall(L, 0, 0, 0);
+    if (status != LUA_OK) {
+        fprintf(stderr, "cursed: lsp_lane: runtime error: %s\n",
+                lua_tostring(L, -1));
+        return NULL;
+    }
+
+    return NULL;
+}
+
 /* ── Run main lane ───────────────────────────────────────────────── */
 
 static int run_main(lua_State *L)
@@ -271,6 +307,39 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+    /* Create LSP lane state + thread (owns subprocess mgmt + JSON-RPC framing
+     * + JSON decode/encode so heavy JSON never runs on the main thread). */
+    lua_State *lsp_L = create_lane_state();
+    if (lsp_L == NULL) {
+        pthread_cancel(io_thread);
+        pthread_join(io_thread, NULL);
+        lua_close(io_L);
+        pthread_cancel(hl_thread);
+        pthread_join(hl_thread, NULL);
+        lua_close(hl_L);
+        shared_state_free(g_shared_state);
+        return EXIT_FAILURE;
+    }
+    setup_lane_globals(lsp_L, 0, NULL);
+
+    struct IOLaneArgs *lsp_args = malloc(sizeof(*lsp_args));
+    lsp_args->L = lsp_L;
+
+    pthread_t lsp_thread;
+    rc = pthread_create(&lsp_thread, NULL, lsp_lane_thread, lsp_args);
+    if (rc != 0) {
+        fprintf(stderr, "cursed: failed to create LSP lane thread\n");
+        lua_close(lsp_L);
+        pthread_cancel(io_thread);
+        pthread_join(io_thread, NULL);
+        lua_close(io_L);
+        pthread_cancel(hl_thread);
+        pthread_join(hl_thread, NULL);
+        lua_close(hl_L);
+        shared_state_free(g_shared_state);
+        return EXIT_FAILURE;
+    }
+
     /* Create main lane state */
     lua_State *main_L = create_lane_state();
     if (main_L == NULL) {
@@ -280,6 +349,9 @@ int main(int argc, char *argv[])
         pthread_cancel(hl_thread);
         pthread_join(hl_thread, NULL);
         lua_close(hl_L);
+        pthread_cancel(lsp_thread);
+        pthread_join(lsp_thread, NULL);
+        lua_close(lsp_L);
         shared_state_free(g_shared_state);
         return EXIT_FAILURE;
     }
@@ -294,6 +366,8 @@ int main(int argc, char *argv[])
     lua_close(io_L);
     pthread_join(hl_thread, NULL);
     lua_close(hl_L);
+    pthread_join(lsp_thread, NULL);
+    lua_close(lsp_L);
 
     /* Free shared state (orig.data munmap'd by main lane before exit) */
     shared_state_free(g_shared_state);

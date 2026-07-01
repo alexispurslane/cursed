@@ -130,6 +130,21 @@ compile-vendor mode="release":
             -c {{VENDOR_DIR}}/termbox2/termbox2_impl.c -o {{BUILD_DIR}}/termbox2.o
     fi
 
+    # yyjson (MIT, two-file C JSON lib) + the FFI shim that re-exports
+    # yyjson's inline builders/getters as real symbols for LuaJIT FFI.
+    if [ ! -f {{BUILD_DIR}}/yyjson.o ] || [ {{VENDOR_DIR}}/yyjson/yyjson.c -nt {{BUILD_DIR}}/yyjson.o ]; then
+        echo "vendored yyjson not built — compiling"
+        clang $CFLAGS -DMACOSX_DEPLOYMENT_TARGET={{MACOSX_DEPLOYMENT_TARGET}} \
+            -I{{VENDOR_DIR}}/yyjson \
+            -c {{VENDOR_DIR}}/yyjson/yyjson.c -o {{BUILD_DIR}}/yyjson.o
+    fi
+    if [ ! -f {{BUILD_DIR}}/yyjson_shim.o ] || [ {{VENDOR_DIR}}/yyjson/yyjson_shim.c -nt {{BUILD_DIR}}/yyjson_shim.o ]; then
+        echo "vendored yyjson shim not built — compiling"
+        clang $CFLAGS -DMACOSX_DEPLOYMENT_TARGET={{MACOSX_DEPLOYMENT_TARGET}} \
+            -I{{VENDOR_DIR}}/yyjson \
+            -c {{VENDOR_DIR}}/yyjson/yyjson_shim.c -o {{BUILD_DIR}}/yyjson_shim.o
+    fi
+
     # TRE (POSIX regex, non-backtracking) — built via autotools
     if [ ! -f {{VENDOR_DIR}}/tre/lib/.libs/libtre.a ]; then
         echo "vendored TRE not built — compiling"
@@ -163,7 +178,7 @@ compile-binary mode="release":
     mkdir -p {{BUILD_DIR}}
 
     # Gather all object files
-    objs="{{BUILD_DIR}}/ts_lib.o {{BUILD_DIR}}/termbox2.o"
+    objs="{{BUILD_DIR}}/ts_lib.o {{BUILD_DIR}}/termbox2.o {{BUILD_DIR}}/yyjson.o {{BUILD_DIR}}/yyjson_shim.o"
     for lang in {{PARSERS}}; do
         objs="$objs {{BUILD_DIR}}/parser_${lang}.o"
         if [ -f "{{BUILD_DIR}}/scanner_${lang}.o" ]; then
