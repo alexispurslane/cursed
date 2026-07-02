@@ -709,6 +709,16 @@ commands.save = function(view, editor)
     editor:save()
 end
 
+--- Manual completion trigger (Emacs `M-/`-style, here bound to `alt-/`).
+--- Pops the in-buffer completion menu at the cursor NOW, bypassing the
+--- auto-popup debounce + min-prefix gate, and forces the active source to
+--- re-query (so a manual request always fires even when stale cache exists).
+commands.complete = function(_view, editor)
+    if editor.completion_menu ~= nil then
+        editor.completion_menu:force_open()
+    end
+end
+
 commands.save_as = function(view, editor)
     local filepath = editor.universal_args and editor.universal_args[2]
     editor:read_from_minibuffer({

@@ -7,6 +7,7 @@
 
 local TO = require("cursed.textobject")
 local IH = require("cursed.input_hook")
+local completers = require("cursed.completers")
 
 -- This spec file runs AFTER the global `editor` exists (see
 -- `cursed.config`), so it can register per-mode event handlers on
@@ -181,6 +182,10 @@ return {
     -- activates the lua mode. The editor's centralized mode_enter
     -- listener picks this up and manages the subprocess.
     lsp_servers = { "lua-language-server", "lua-lsp" },
+    -- In-buffer completion source: the general-purpose LSP completer
+    -- (uses whatever lsp server is bound to this view's buffer). The
+    -- editor's mode_dispatch resolves this lazily + caches the closure.
+    completer = completers.lsp,
     highlight_query = LUA_HIGHLIGHT_QUERY,
     tab_width = 4,
     expand_tab = true,

@@ -6,8 +6,17 @@
 --- field on this module before commands reference it.
 
 local find_file = require("cursed.find_file")
+local utf8 = require("cursed.utf8")
+local log = require("cursed.log")
 
 local completers = {}
+
+--- Lazy require of the LSP facade. kep lazy (loaded on first use of the
+--- LSP completer) so this module stays safe to require at config load
+--- time before the LSP subsystem is wired.
+local function lsp()
+    return require("cursed.lsp_client")
+end
 
 ----------------------------------------------------------------------------------------------------
 -- Helpers
@@ -293,6 +302,390 @@ function completers.yes_no_all()
         end
         return results
     end
+end
+
+----------------------------------------------------------------------------------------------------
+-- LSP completion (in-buffer, general purpose)
+--
+-- Mode- and server-agnostic completion source: it uses whichever LSP
+-- client is bound to the current view's buffer (buf.lsp_client_id),
+-- whatever the major mode it came from. Major modes reference this
+-- factory via `completer = completers.lsp` in their spec; the editor's
+-- `mode_dispatch` (below) resolves the active mode's source at runtime.
+--
+-- Bridging the async (request/response) LSP model to the
+-- CompletionMenu's synchronous `fn(ctx) -> items` interface is done via
+-- a prefix-scoped cache:
+--   • On each call it MAY fire a textDocument/completion request — when
+--     the cache is empty, when the prefix is not an extension of the
+--     cached one (user deleted/backtracked), when the cursor left the
+--     cached line/position, when a trigger character was just typed, or
+--     when the last list was marked incomplete and the prefix grew.
+--   • It returns the cached items, client-side-filtered by the current
+--     prefix, so the popup stays populated (stale) while a response is
+--     in flight. When the response lands, the cache is updated and a
+--     menu re-tick is scheduled so the fresh items appear.
+--
+-- Follow-ups not in this cut: relaying serverCapabilities (true trigger
+-- chars / positionEncoding negotiation), textEdit-range acceptance, and
+-- snippet expansion (insertTextFormat 2).
+----------------------------------------------------------------------------------------------------
+
+--- Convert a 0-based byte column on a line to a 0-based UTF-16
+--- code-unit offset (LSP position.character). Walks codepoints in the
+--- line text up to the byte column, counting 2 units for supplementary-
+--- plane codepoints (>= U+10000). LSP defaults to UTF-16 when no
+--- positionEncoding is negotiated (our initialize doesn't).
+--- @param line_text string
+--- @param byte_col integer 0-based byte offset of the cursor
+--- @return integer
+local function byte_col_to_utf16(line_text, byte_col)
+    local units = 0
+    local i = 1
+    -- Include bytes [1, byte_col] (1-based) = the substring before the
+    -- 0-based cursor offset.
+    local limit = byte_col
+    while i <= limit and i <= #line_text do
+        local cp, ni = utf8.decode(line_text, i)
+        units = units + (cp >= 0x10000 and 2 or 1)
+        if ni <= i then
+            break
+        end
+        i = ni
+    end
+    return units
+end
+
+--- Map an LSP CompletionItem (label/insertText/detail/...) into the
+--- CompletionMenu's item shape `{ text, metadata }`. The menu's accept
+--- replaces the trailing word left of the cursor with `text`; for v1 we
+--- use `insertText` (or `label`), deferring textEdit-range / snippet
+--- handling. `detail` (when present) rides along as the metadata column.
+--- @param it table CompletionItem
+--- @return {text:string, metadata:string?}|nil nil when the item has no usable label
+local function map_lsp_item(it)
+    local text = it.insertText or it.label
+    if text == nil or text == "" then
+        return nil
+    end
+    local detail = it.detail
+    return { text = text, metadata = (detail ~= nil and detail ~= "") and detail or nil }
+end
+
+--- Build the general-purpose LSP completion source.
+--- @param editor Editor
+--- @return Completer
+function completers.lsp(editor)
+    --- client_id -> cache entry: { line, char, prefix, items (mapped),
+    ---                              is_incomplete, pending }
+    local caches = {}
+
+    --- Schedule a CompletionMenu re-tick so a just-arrived response
+    --- swaps its items into the popup. Runs on the main thread (the
+    --- response callback fires during drain_lsp_inbox, outside _tick).
+    local function retick()
+        editor:schedule_after(0, function()
+            local m = editor.completion_menu
+            if m ~= nil then
+                m:_tick()
+            end
+            return true
+        end)
+    end
+
+    ---@type Completer
+    local fn = setmetatable({}, {
+        __call = function(_, ctx)
+            local buf = ctx.buf
+            if buf == nil or buf.lsp_client_id == nil then
+                log.info("lsp_complete", "completer_skip", { reason = "no_buffer_or_no_client" })
+                return {}
+            end
+            local cid = buf.lsp_client_id
+            local uri = buf.lsp_uri
+            if cid == nil or uri == nil or not lsp().is_ready(cid) then
+                log.info(
+                    "lsp_complete",
+                    "completer_skip",
+                    { reason = "not_ready", cid = cid, uri = uri }
+                )
+                return {}
+            end
+            ---@cast cid integer
+            -- Only query once the doc is didOpen'd on the server (a
+            -- pre-didOpen request usually errors / returns empty).
+            if lsp().doc_sent_version(cid, uri) < 0 then
+                log.info(
+                    "lsp_complete",
+                    "completer_skip",
+                    { reason = "doc_not_open", cid = cid, uri = uri }
+                )
+                return {}
+            end
+
+            local prefix = ctx.prefix
+            local line = ctx.line
+            local line_text = buf:line_text(line) or ""
+            if #line_text > 0 and line_text:byte(#line_text) == 10 then
+                line_text = line_text:sub(1, #line_text - 1)
+            end
+            local char = byte_col_to_utf16(line_text, ctx.col)
+
+            local c = caches[cid] or {}
+            caches[cid] = c
+
+            -- Was a trigger character (single byte) just typed? Use the
+            -- server-published triggerCharacters for this client (relayed via
+            -- the initialize handshake) so we send triggerKind=2 + force a
+            -- request the instant the context changes. nil before the READY
+            -- handshake delivers capabilities.
+            local trig = false
+            local trig_char
+            local tset = lsp().trigger_chars_for(cid)
+            if tset ~= nil and ctx.col > 0 then
+                local prev = line_text:byte(ctx.col) -- 1-based index of byte before 0-based cursor
+                if prev ~= nil then
+                    local ch = string.char(prev)
+                    if tset[ch] then
+                        trig = true
+                        trig_char = ch
+                    end
+                end
+            end
+
+            local changed_pos = c.line ~= line or c.char ~= char
+            local non_ext = c.prefix ~= nil and prefix:sub(1, #c.prefix) ~= c.prefix
+
+            local force = ctx.force == true
+
+            local need_req
+            if c.items == nil then
+                need_req = true -- first query for this client
+            elseif force or trig or changed_pos then
+                need_req = true
+            else
+                local prefix_changed = c.prefix == nil or prefix:sub(1, #c.prefix) ~= c.prefix
+                need_req = prefix_changed and (c.is_incomplete or non_ext)
+            end
+
+            if need_req and not c.pending then
+                local rline, rchar, rtrig = line, char, trig_char
+                c.line = line
+                c.char = char
+                c.prefix = prefix
+                c.pending = true
+                log.info("lsp_complete", "completer_requesting", {
+                    cid = cid,
+                    line = rline,
+                    character = rchar,
+                    prefix = prefix,
+                    trigger = rtrig,
+                    reason = c.items == nil and "first"
+                        or (trig and "trigger" or (changed_pos and "pos_changed" or "prefix_grew")),
+                })
+                lsp().request_completion(
+                    cid,
+                    uri,
+                    { line = rline, character = rchar },
+                    rtrig,
+                    function(result, is_error)
+                        c.pending = false
+                        if is_error or result == nil then
+                            if c.items == nil then
+                                c.items = {}
+                            end
+                            log.info("lsp_complete", "completer_response", {
+                                cid = cid,
+                                is_error = is_error,
+                                result_nil = result == nil,
+                                kept_stale_count = c.items ~= nil and #c.items or 0,
+                            })
+                            return
+                        end
+                        local raw_items, incomplete
+                        if type(result) == "table" then
+                            if result.items ~= nil then
+                                raw_items = result.items
+                                incomplete = result.isIncomplete == true
+                            else
+                                raw_items = result
+                                incomplete = false
+                            end
+                        end
+                        local mapped = {}
+                        if type(raw_items) == "table" then
+                            for _, it in ipairs(raw_items) do
+                                local m = it ~= nil and type(it) == "table" and map_lsp_item(it)
+                                    or nil
+                                if m ~= nil then
+                                    mapped[#mapped + 1] = m
+                                end
+                            end
+                        end
+                        c.items = mapped
+                        c.is_incomplete = incomplete
+                        log.info("lsp_complete", "completer_response", {
+                            cid = cid,
+                            is_error = false,
+                            raw_count = type(raw_items) == "table" and #raw_items or 0,
+                            mapped_count = #mapped,
+                            is_incomplete = incomplete,
+                        })
+                        retick()
+                    end
+                )
+            end
+
+            --- Client-side-filter the (possibly stale) cached items by prefix.
+            local items = c.items
+            if items == nil or prefix == nil or prefix == "" then
+                log.info(
+                    "lsp_complete",
+                    "completer_returning",
+                    { cid = cid, count = 0, reason = "no_cache" }
+                )
+                return items or {}
+            end
+            local pl = prefix:lower()
+            local out = {}
+            for _, it in ipairs(items) do
+                local t = it.text or ""
+                if t:lower():sub(1, #pl) == pl then
+                    out[#out + 1] = it
+                end
+            end
+            log.info("lsp_complete", "completer_returning", {
+                cid = cid,
+                cached_count = #items,
+                filtered_count = #out,
+                prefix = prefix,
+            })
+            return out
+        end,
+    })
+
+    --- Completion triggerCharacters set for the current view's bound
+    --- client (table<char,boolean>), or nil. Lets the menu fast-path a
+    --- trigger char without going through the (deeper) main closure.
+    function fn.trigger_chars()
+        local view = editor:current_view()
+        local buf = view and view.buffer
+        local cid2 = buf and buf.lsp_client_id
+        if cid2 == nil then
+            return nil
+        end
+        ---@cast cid2 integer
+        return lsp().trigger_chars_for(cid2)
+    end
+
+    --- Is a completion request in flight for the current view's client?
+    --- Drives the menu's keep-open-loading behaviour: a pending (resp.
+    --- empty-cache) source should NOT close the popup while a request is
+    --- in flight; the retick on response will populate it.
+    function fn.pending()
+        local view = editor:current_view()
+        local buf = view and view.buffer
+        local cid2 = buf and buf.lsp_client_id
+        if cid2 == nil then
+            return false
+        end
+        ---@cast cid2 integer
+        local c = caches[cid2]
+        return c ~= nil and c.pending == true
+    end
+
+    return fn
+end
+
+----------------------------------------------------------------------------------------------------
+-- Per-mode completer dispatcher
+--
+-- The CompletionMenu holds ONE completer for the whole editor. Major
+-- modes declare their own `completer` factory (e.g. `completers.lsp`);
+-- this dispatcher resolves the active view's highest-precedence mode
+-- that declares one and delegates to a (cached) instance of it. Falls
+-- back to `completers.buffer_words` when no active mode declares a
+-- source, so files without an LSP (base mode) still get dabbrev.
+----------------------------------------------------------------------------------------------------
+
+--- Build the editor-wide per-mode completer dispatcher.
+--- @param editor Editor
+--- @return Completer
+function completers.mode_dispatch(editor)
+    local built = {} -- factory (function identity) -> closure
+    local fallback
+
+    --- Resolve the active view's highest-precedence mode-declared source
+    --- closure (lazily built + cached), or nil when no mode declares one
+    --- (caller falls back to buffer_words).
+    local function resolve(ctx)
+        local factory
+        local view = ctx and ctx.view or editor:current_view()
+        if view ~= nil and view._major_modes ~= nil then
+            for i = #view._major_modes, 1, -1 do
+                local m = view._major_modes[i]
+                if m.completer ~= nil then
+                    factory = m.completer
+                    break
+                end
+            end
+        end
+        if factory == nil then
+            return nil
+        end
+        local fn = built[factory]
+        if fn == nil then
+            fn = factory(editor)
+            built[factory] = fn
+        end
+        return fn
+    end
+
+    ---@type Completer
+    local dispatch = setmetatable({}, {
+        __call = function(_, ctx)
+            local fn = resolve(ctx)
+            if fn == nil then
+                if fallback == nil then
+                    fallback = completers.buffer_words(editor)
+                end
+                local view = ctx.view
+                log.info("lsp_complete", "dispatch_fallback_buffer_words", {
+                    n_modes = view and view._major_modes and #view._major_modes or 0,
+                })
+                return fallback(ctx)
+            end
+            if ctx.view ~= nil and ctx.view._major_modes ~= nil and #ctx.view._major_modes > 0 then
+                log.info("lsp_complete", "dispatch_resolved", {
+                    source = "lsp",
+                    mode = ctx.view._major_modes[#ctx.view._major_modes].name,
+                })
+            end
+            return fn(ctx)
+        end,
+    })
+
+    --- Delegate to the active source's trigger_chars (if it exposes one).
+    --- nil for buffer_words / sources without the hook → the menu's
+    --- immediate-on-trigger fast-path simply doesn't fire.
+    function dispatch.trigger_chars()
+        local fn = resolve(nil)
+        if fn == nil or fn.trigger_chars == nil then
+            return nil
+        end
+        return fn.trigger_chars()
+    end
+
+    --- Delegate to the active source's pending flag (if it exposes one).
+    function dispatch.pending()
+        local fn = resolve(nil)
+        if fn == nil or fn.pending == nil then
+            return false
+        end
+        return fn.pending()
+    end
+
+    return dispatch
 end
 
 ----------------------------------------------------------------------------------------------------

@@ -187,6 +187,16 @@ end
 ---@field col integer 0-based cursor byte col
 ---@field prefix string the trailing [%w_]* run left of the cursor
 ---@field word_start_col integer 0-based byte col where the prefix starts
+---@field force boolean|nil true when the menu was triggered manually / via a trigger char (bypass the source's stale-cache shortcuts)
+
+--- A completion source: a callable table (via __call) returning items,
+--- plus optional hooks the menu queries without entering the main
+--- closure. Plain-function sources (e.g. buffer_words) lack the hooks;
+--- the menu's trigger-fast-path / keep-open-loading checks guard for nil.
+---@class Completer
+---@field __call fun(self, ctx: CompCtx): (string|{text:string,metadata:string?})[]
+---@field trigger_chars? fun(): table<string,boolean>|nil server-declared single-byte triggers for the active client
+---@field pending? fun(): boolean is a request currently in flight for the active client
 
 --- Build a completion context from the current cursor: the word being
 --- completed is the trailing run of word bytes (`[%w_]`) immediately
@@ -226,7 +236,7 @@ end
 
 ---@class CompletionMenu
 ---@field _editor Editor owning editor
----@field _completer function|nil source: fun(ctx: CompCtx): table items
+---@field _completer Completer|nil source: callable table returning items + optional trigger_chars/pending hooks
 ---@field active boolean whether the popup is currently shown
 ---@field _items table current completion items (string | {text,metadata})
 ---@field _selected integer 1-based index of the highlighted item (0 = none)
@@ -236,6 +246,7 @@ end
 ---@field _min_prefix integer min prefix length to auto-open (config)
 ---@field _debounce_us integer auto-popup debounce window (config)
 ---@field _debounce_task table|nil scheduled debounce handle
+---@field _loading boolean true while a source request is in flight and the popup holds a loading placeholder (set by _tick, reset by close/response)
 ---@field _handlers table|nil {render=fn, post_command=fn} for teardown
 local CompletionMenu = {}
 CompletionMenu.__index = CompletionMenu
@@ -267,6 +278,7 @@ local function new(editor, opts)
         _min_prefix = opts.min_prefix or DEFAULTS.min_prefix,
         _debounce_us = opts.debounce_us or DEFAULTS.debounce_us,
         _debounce_task = nil,
+        _loading = false,
         _handlers = nil,
     }, CompletionMenu)
     return self
@@ -279,7 +291,7 @@ end
 --- Install the completion source: `fn(ctx) -> items`, where `items` is a
 --- list of bare strings or `{ text, metadata }`. Replaces any prior
 --- source. The editor installs `completers.buffer_words` by default.
----@param fn function fun(ctx: CompCtx): table
+---@param fn Completer source
 function CompletionMenu:set_completer(fn)
     self._completer = fn
 end
@@ -301,17 +313,48 @@ function CompletionMenu:close()
     self._items = {}
     self._selected = 0
     self._scroll = 0
+    self._loading = false
+end
+
+--- Single-byte char string immediately left of the cursor (the last
+--- inserted char after a __printable), or nil. Used by the trigger-char
+--- fast-path to decide whether to pop the menu immediately (bypassing the
+--- debounce) when the active source declares that char as a trigger.
+--- @param view View|nil
+--- @return string|nil
+local function char_before_cursor(view)
+    if view == nil or not view.file_loaded then
+        return nil
+    end
+    local buf = view.buffer
+    local p = view:p()
+    local col = p.col or 0
+    if col <= 0 then
+        return nil
+    end
+    local line_text = buf:line_text(p.line or 0) or ""
+    if #line_text > 0 and line_text:byte(#line_text) == 10 then
+        line_text = line_text:sub(1, #line_text - 1)
+    end
+    local b = line_text:byte(col) -- 1-based index → byte before 0-based cursor
+    if b == nil then
+        return nil
+    end
+    return string.char(b)
 end
 
 --- Open/refresh from the configured source against the current cursor.
 --- Opens (selected = 1, scroll = 0) when not yet active; otherwise
---- refreshes in place. Closes when the prefix is too short, the source
---- returns no items, or there is no view/buffer.
-function CompletionMenu:_tick()
+--- refreshes in place. `force` (manual trigger / trigger-char fast-path)
+--- skips the min-prefix gate AND keeps the popup open in a loading state
+--- when the source has a request in flight but no cached items yet.
+function CompletionMenu:_tick(force)
+    local forced = force == true
     log.info("completion_menu", "tick_start", {
         active = self.active,
         selected = self._selected,
         scroll = self._scroll,
+        force = forced,
     })
     local editor = self._editor
     if editor.minibuffer and editor.minibuffer.active then
@@ -326,7 +369,7 @@ function CompletionMenu:_tick()
         self:close()
         return
     end
-    if #ctx.prefix < self._min_prefix then
+    if not forced and #ctx.prefix < self._min_prefix then
         log.info("completion_menu", "tick_close_short_prefix", {
             prefix = ctx.prefix,
             min = self._min_prefix,
@@ -340,7 +383,10 @@ function CompletionMenu:_tick()
         self:close()
         return
     end
-    local ok, items = pcall(fn, ctx)
+    ctx.force = forced
+    local ok, items = pcall(function()
+        return fn(ctx)
+    end)
     if not ok then
         log.error("completion_menu", "completer error", { error = tostring(items) })
         self:close()
@@ -358,10 +404,26 @@ function CompletionMenu:_tick()
         selected = self._selected,
     })
     if #items == 0 then
+        -- A source with a request in flight (e.g. the LSP source on its
+        -- very first query for a position) returns empty until the
+        -- response lands and reticks. Keep the popup open as a loading
+        -- placeholder instead of snapping closed, so manual/trigger
+        -- completions feel responsive. The retick on response replaces
+        -- the placeholder with real items.
+        local pending = type(fn.pending) == "function" and fn.pending()
+        if pending then
+            self._loading = true
+            self._items = {}
+            self._selected = 0
+            self._scroll = 0
+            self.active = true
+            log.info("completion_menu", "tick_open_loading")
+            return
+        end
         self:close()
         return
     end
-    local was_active = self.active
+    local was_active = self.active and not self._loading
     self._items = items
     if not was_active then
         self._selected = 1
@@ -375,6 +437,7 @@ function CompletionMenu:_tick()
     end
     self:_ensure_visible()
     self.active = true
+    self._loading = false
     log.info("completion_menu", "tick_open", {
         was_active = was_active,
         new_selected = self._selected,
@@ -398,6 +461,15 @@ function CompletionMenu:_schedule()
         self:_tick()
         return true -- one-shot: schedule_after re-queues falsy returns
     end)
+end
+
+--- Manual trigger (`M-/`): pop the menu NOW at the cursor, bypassing the
+--- debounce AND the min-prefix gate, and force the source to re-query
+--- (ctx.force) so it fires a request even when stale cache exists. Holds
+--- a loading placeholder while the request is in flight.
+function CompletionMenu:force_open()
+    log.info("completion_menu", "force_open")
+    self:_tick(true)
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -625,6 +697,24 @@ function CompletionMenu:_on_post_command(editor, cmd_name, view)
     if view == nil or not view.file_loaded then
         self:close()
         return
+    end
+    if
+        cmd_name == "__printable"
+        and self._completer ~= nil
+        and type(self._completer.trigger_chars) == "function"
+    then
+        -- Trigger-character fast-path: if the char just inserted (the one
+        -- immediately left of the cursor) is a server-declared trigger
+        -- char, pop the menu NOW instead of debouncing — LSP servers
+        -- return context-sensitive completions after e.g. `.`/`:`/`(` and
+        -- the value of immediacy is lost behind a 120ms debounce.
+        local ch = char_before_cursor(view)
+        local set = self._completer.trigger_chars()
+        if ch ~= nil and set ~= nil and set[ch] then
+            log.info("completion_menu", "post_command_trigger_now", { char = ch })
+            self:_tick(true)
+            return
+        end
     end
     if cmd_name ~= nil and KEEP_ALIVE_COMMANDS[cmd_name] then
         self:_schedule()

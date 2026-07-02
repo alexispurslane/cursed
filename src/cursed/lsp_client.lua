@@ -59,6 +59,13 @@ M.mode_bindings = {}
 --- @type table<string, integer>
 M.exe_to_client = {}
 
+--- client_id → completion triggerCharacters set (table<char,boolean>).
+--- Populated from the READY handshake (serverCapabilities); drives the
+--- editor's immediate-on-trigger-char completion fast-path. Cleared on
+--- terminal status.
+--- @type table<integer, table<string,boolean>>
+M.trigger_chars = {}
+
 --- Open documents per client: client_id → { uri → {language_id, version} }.
 --- Tracks which docs we've didOpen'd on each server so we don't double-open
 --- (servers error on duplicate didOpen) and so didChange/didClose route
@@ -377,6 +384,69 @@ function M.request_format(client_id, uri, opts, callback)
 end
 
 ----------------------------------------------------------------------------------------------------
+-- Completion (textDocument/completion)
+--
+-- Mirrors request_format: mints a main-owned request id + enqueues a
+-- textDocument/completion request. The result (a CompletionList or
+-- CompletionItem[] or null) flows back via apply_response → the supplied
+-- callback, decoded on the lane and re-encoded as just the `result`
+-- field, so the (potentially large) list crosses the boundary as one
+-- small JSON blob and main only does the final decode + dispatch.
+--
+-- `position.character` is a 0-based UTF-16 code-unit offset per the LSP
+-- spec; callers must convert from the buffer's 0-based byte col.
+----------------------------------------------------------------------------------------------------
+
+--- LSP CompletionTriggerKind values (spec). 1=Invoked, 2=TriggerCharacter,
+--- 3=TriggerForIncompleteCompletions.
+local COMPLETION_TRIGGER_INVOKED = 1
+local COMPLETION_TRIGGER_CHARACTER = 2
+
+--- Request completions for a document on the server bound to
+--- `client_id`. `position` is `{ line = L, character = C }` with L a
+--- 0-based line and C a 0-based UTF-16 code-unit offset. `trigger` is an
+--- optional single character the user just typed (forces triggerKind=2).
+--- `callback` receives the decoded result (a CompletionList
+--- `{items=,isIncomplete=}`, a CompletionItem[] array, or nil for null).
+--- No-op + returns nil if the server isn't ready.
+--- @param client_id integer
+--- @param uri string file:// URI
+--- @param position {line:integer, character:integer} LSP position
+--- @param trigger string? single trigger character just typed, or nil
+--- @param callback fun(result:any, is_error:boolean)
+--- @return integer|nil id the request id, or nil if not ready
+function M.request_completion(client_id, uri, position, trigger, callback)
+    if not M.is_ready(client_id) then
+        log.info("lsp_complete", "request_skipped_not_ready", { client_id = client_id, uri = uri })
+        return nil
+    end
+    local id = M.mint_request_id(callback)
+    local ctx
+    if trigger ~= nil and trigger ~= "" then
+        ctx = {
+            triggerKind = COMPLETION_TRIGGER_CHARACTER,
+            triggerCharacter = trigger,
+        }
+    else
+        ctx = { triggerKind = COMPLETION_TRIGGER_INVOKED }
+    end
+    log.info("lsp_complete", "request_enqueued_main_to_lane", {
+        client_id = client_id,
+        id = id,
+        uri = uri,
+        line = position.line,
+        character = position.character,
+        trigger = trigger,
+    })
+    enqueue_send("textDocument/completion", {
+        textDocument = { uri = uri },
+        position = position,
+        context = ctx,
+    }, id, client_id)
+    return id
+end
+
+----------------------------------------------------------------------------------------------------
 -- Document synchronization (didOpen / didChange / didClose)
 --
 -- Full-text sync: main hands the buffer's full text as a malloc'd
@@ -428,6 +498,15 @@ end
 function M.is_ready(client_id)
     local entry = M.clients[client_id]
     return entry ~= nil and entry.status == "ready"
+end
+
+--- Completion triggerCharacters set for a client (table<char,boolean>), or
+--- nil if none / not yet relayed. Used by the completion source to send
+--- triggerKind=2 AND by the menu's immediate-on-trigger fast-path.
+--- @param client_id integer
+--- @return table<string,boolean>|nil
+function M.trigger_chars_for(client_id)
+    return M.trigger_chars[client_id]
 end
 
 --- Record intent to open a document for a client. If the client is
@@ -595,6 +674,7 @@ function M.shutdown()
     M.clients = {}
     M.mode_bindings = {}
     M.exe_to_client = {}
+    M.trigger_chars = {}
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -623,6 +703,16 @@ function M.apply_handshake(ptr)
     end
     local status = _STATUS_NAMES[tonumber(hs.status)] or "missing"
 
+    -- trigger_chars (NUL-terminated, 0..63 single chars). Captured once
+    -- on the READY handshake from serverCapabilities; echoed on every
+    -- subsequent handshake for this client (empty until capabilities
+    -- arrive). Build the lookup set lazily.
+    local tc_raw = ffi.string(hs.trigger_chars, 64)
+    local tc_nul = tc_raw:find("%z")
+    if tc_nul then
+        tc_raw = tc_raw:sub(1, tc_nul - 1)
+    end
+
     -- Upsert. Preserve the modes set across handshakes (a re-spawn of
     -- the same id reuses the entry).
     local entry = M.clients[cid]
@@ -644,9 +734,17 @@ function M.apply_handshake(ptr)
                 M.mode_bindings[mode_name] = nil
             end
         end
-        -- The server process is gone; its document state is too. Drop
-        -- our open-doc registry for it (no didClose — nobody to send to).
+        -- The server process is gone; its doc state is too. Drop
+        -- our open-doc registry for it (no didClose — nobody to send to)
+        -- and forget its trigger chars (a re-spawn will re-publish them).
         M.drop_client_docs(cid)
+        M.trigger_chars[cid] = nil
+    elseif #tc_raw > 0 then
+        local set = {}
+        for i = 1, #tc_raw do
+            set[tc_raw:sub(i, i)] = true
+        end
+        M.trigger_chars[cid] = set
     end
 
     -- On a READY transition, flush any didOpens deferred while the
@@ -694,6 +792,13 @@ function M.apply_response(ptr)
             log.warn("lsp", "response decode failed", { id = id, error = derr, bytes = rlen })
         end
     end
+    log.info("lsp_complete", "response_decoded_lane_to_main", {
+        client_id = cid,
+        id = id,
+        is_error = is_err,
+        result_bytes = rlen,
+        has_callback = M._pending_requests[id] ~= nil,
+    })
     ffi.C.free(ptr)
     local cb = M._pending_requests[id]
     if cb ~= nil then

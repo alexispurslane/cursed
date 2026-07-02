@@ -391,6 +391,12 @@ struct LspHandshake {
     uint32_t client_id;   /* main-assigned id; echoed by lane */
     uint8_t  status;         /* LSP_STATUS_* code */
     uint8_t  _pad[3];
+    /* Completion triggerCharacters from serverCapabilities.
+     * Populated once on the READY (initialize-response) transition
+     * (a NUL-terminated concatenation of single chars; empty when the
+     * server declares none or before capabilities arrive). Drives the
+     * editor's immediate-on-trigger-char completion fast-path. */
+    char     trigger_chars[64];
 };
 
 /* MSG_LSP_DOC_SYNC (main → lsp): document synchronization so the

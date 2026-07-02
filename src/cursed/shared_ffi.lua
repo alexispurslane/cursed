@@ -157,6 +157,7 @@ struct LspHandshake {
     uint32_t client_id;   /* main-assigned id; echoed by lane */
     uint8_t  status;       /* LSP_STATUS_* code */
     uint8_t  _pad[3];
+    char     trigger_chars[64]; /* completionProvider.triggerCharacters, NUL-term */
 };
 
 struct LspDocSync {

@@ -76,6 +76,7 @@ local function new_client(stdout_fd, stdin_fd, pid, client_id, exe_name)
         client_id = client_id,
         exe_name = exe_name,
         status = STATUS.SPAWNING,
+        trigger_chars = "", -- populated from initialize result capabilities
         next_id = 1,
         read_buf = ffi.cast("uint8_t *", ffi.C.malloc(65536)),
         read_total = 0,
@@ -94,6 +95,9 @@ local function send_handshake(client)
     ffi.copy(hs.exe_name, client.exe_name, math.min(#client.exe_name, 63))
     hs.client_id = client.client_id
     hs.status = client.status
+    if client.trigger_chars ~= nil and #client.trigger_chars > 0 then
+        ffi.copy(hs.trigger_chars, client.trigger_chars, math.min(#client.trigger_chars, 63))
+    end
     ss:push(ss._ptr.inbox_lsp, { type = constants.MSG_LSP_HANDSHAKE, ptr = hs })
 end
 
@@ -140,6 +144,14 @@ local function relay_response(client, msg)
     resp.error_present = err_present and 1 or 0
     if rlen > 0 then
         ffi.copy(ffi.cast("char *", buf) + ffi.sizeof("struct LspResponse"), raw, rlen)
+    end
+    if (tonumber(msg.id) or 0) > 1 then
+        log.info("lsp_complete", "lane_relaying_response_to_main", {
+            client_id = client.client_id,
+            id = msg.id,
+            result_bytes = rlen,
+            is_error = err_present,
+        })
     end
     ss:push(ss._ptr.inbox_lsp, { type = constants.MSG_LSP_RESPONSE, ptr = buf })
 end
@@ -335,12 +347,44 @@ function LSPClient:_dispatch(msg)
             -- `initialized` notification so the modeline flips on the
             -- next frame.
             self.status = STATUS.READY
+            -- Pull completionProvider.triggerCharacters out of the
+            -- serverCapabilities; relay via the handshake so main can
+            -- drive the immediate-on-trigger-char completion fast-path.
+            pcall(function()
+                local caps = msg.result and msg.result.capabilities
+                local cp = caps and caps.completionProvider
+                local tc = cp and cp.triggerCharacters
+                if type(tc) == "table" then
+                    local s = {}
+                    for _, c in ipairs(tc) do
+                        if type(c) == "string" and #c >= 1 then
+                            s[#s + 1] = c:sub(1, 1)
+                        end
+                    end
+                    local joined = table.concat(s)
+                    if joined ~= (self.trigger_chars or "") then
+                        self.trigger_chars = joined
+                        log.info("lsp_lane", "captured trigger chars", {
+                            exe = self.exe_name,
+                            chars = joined,
+                        })
+                    end
+                end
+            end)
             send_handshake(self)
             -- Send `initialized` notification as the handshake's second leg.
             pcall(function()
                 self:notify("initialized", {})
             end)
         else
+            if (tonumber(msg.id) or 0) > 1 and msg.method == nil then
+                log.info("lsp_complete", "lane_inbound_response_from_server", {
+                    client_id = self.client_id,
+                    id = msg.id,
+                    has_result = msg.result ~= nil,
+                    has_error = msg.error ~= nil,
+                })
+            end
             relay_response(self, msg)
         end
         return
@@ -566,6 +610,14 @@ local function handle_send(msg)
         return
     end
     if id ~= 0 then
+        if method == "textDocument/completion" then
+            log.info("lsp_complete", "lane_sending_request_to_server", {
+                client_id = client_id,
+                id = id,
+                line = params and params.position and params.position.line,
+                character = params and params.position and params.position.character,
+            })
+        end
         client:request(method, params)
     else
         client:notify(method, params)

@@ -81,6 +81,7 @@ local keybind = require("cursed.keybind")
 ---@field indent_queries string|nil predicate-free tree-sitter query source; `@indent`-captured nodes add one indent level on Return when the cursor is inside them
 ---@field input_hooks table|nil flat list of input-hook specs (build with cursed.input_hook); matched as a suffix of left-of-cursor text and dispatched by View:_run_input_hooks
 ---@field lsp_servers string[]|nil first-wins list of executable names to spawn as a language server subprocess when a view activates this mode (managed centrally by the editor)
+---@field completer function|nil factory `fun(editor): fun(ctx): table` producing this mode's in-buffer completion source (e.g. `completers.lsp`). The editor's `mode_dispatch` resolver instantiates it lazily + caches it; falls back to `buffer_words` when nil.
 ---@field _trie table? lazily-built keybind trie for this mode's keybindings
 local MajorMode = {}
 MajorMode.__index = MajorMode
@@ -100,6 +101,7 @@ MajorMode.__index = MajorMode
 ---@field indent_queries? string
 ---@field input_hooks? table
 ---@field lsp_servers? string[] first-wins list of LSP executable names to try when this mode activates
+---@field completer? function factory `fun(editor): fun(ctx): table` for this mode's in-buffer completion source (resolved at runtime by the editor's `mode_dispatch`)
 
 --- Create a major mode template from a config spec table.
 --- Use :instantiate() to create per-view instances.
@@ -122,6 +124,7 @@ function MajorMode.new(spec)
         indent_queries = spec.indent_queries,
         input_hooks = spec.input_hooks,
         lsp_servers = spec.lsp_servers,
+        completer = spec.completer,
         _trie = nil,
     }, MajorMode)
 end
@@ -165,5 +168,6 @@ end
 ---@field indent_queries string|nil (inherited)
 ---@field input_hooks table|nil (inherited)
 ---@field lsp_servers string[]|nil (inherited from template)
+---@field completer function|nil (inherited from template)
 
 return MajorMode

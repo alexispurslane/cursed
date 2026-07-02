@@ -94,6 +94,9 @@ return {
     -- LSP formatting (textDocument/formatting). "i" for indent.
     ["alt-i"] = "format",
 
+    -- Manual completion at point (forces the in-buffer popup now).
+    ["alt-/"] = "complete",
+
     -- Execute command
     ["alt-x"] = "execute_command",
 

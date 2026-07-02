@@ -474,7 +474,7 @@ function Editor.new(term)
     -- source: buffer-word dabbrev, which dogfoods the whole loop
     -- end-to-end without requiring LSP; swap via set_completer.
     editor.completion_menu = CompletionMenu.new(editor)
-    editor.completion_menu:set_completer(completers.buffer_words(editor))
+    editor.completion_menu:set_completer(completers.mode_dispatch(editor))
     editor.completion_menu:setup()
     return editor
 end

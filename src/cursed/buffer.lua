@@ -20,6 +20,11 @@ local gc = require("cursed.gc")
 ---@class Buffer
 ---@field _ptr any struct Buffer *
 ---@field _munmapped boolean true after explicit munmap; prevents GC double-free
+---@field lsp_client_id integer|nil LSP client bound to this buffer (set by the mode_enter doc-sync listener)
+---@field lsp_uri string|nil file:// URI relayed to the server via didOpen/didChange/didClose
+---@field lsp_language_id string|nil LSP languageId (e.g. "lua") sent on didOpen
+---@field lsp_version integer monotonically-incrementing doc version, bumped on every mutation (insert/delete/undo/redo)
+---@field _lsp_debounce_task table|nil pending didChange debounce handle (cancellable)
 local Buffer = {}
 Buffer.__index = Buffer
 
