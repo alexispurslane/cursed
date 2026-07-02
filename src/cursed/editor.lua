@@ -2285,164 +2285,6 @@ function Editor:render()
         end
     end
 
-    --- Unified completion-list renderer shared by the inline minibuffer
-    --- and the floating palette. Geometry is parameterized (x, y, width,
-    --- max_visible) so both call sites paint identically, just at
-    --- different sizes. Draws a scrollbar on the far right when the list
-    --- overflows. Background `bg` is the surrounding bg (default_bg for
-    --- inline, the box interior bg for palette). Reads mb._completions /
-    --- _comp_index / _comp_scroll directly.
-    --- print_highlighted: print a completion-text row with matched
-    --- substrings (per match_byte_set) drawn in a distinct fg + style so
-    --- the user can see WHY each candidate matched — the signature
-    --- readability cue of a great command palette (Helm/ido style).
-    --- Splits into contiguous matched / unmatched byte-runs and prints
-    --- each run with its own fg, advancing by cell width so multi-byte
-    --- chrome stays aligned. `mset` nil → single unmatch-fg pass (no
-    --- highlighting), preserving the pre-highlight look on empty query.
-    local function print_highlighted(
-        cx,
-        cy,
-        text,
-        matched_fg,
-        unmatch_fg,
-        bg_p,
-        mset,
-        matched_style
-    )
-        local n = #text
-        if n == 0 then
-            return
-        end
-        local sx = cx
-        local run_start = 1
-        local cur = mset and mset[1] or false
-        if mset == nil then
-            cur = false
-        end
-        for i = 2, n + 1 do
-            local m = (mset ~= nil) and (mset[i] or false) or false
-            if m ~= cur or i == n + 1 then
-                local seg_end = i - 1
-                if seg_end >= run_start then
-                    local sub = text:sub(run_start, seg_end)
-                    local fg = cur and matched_fg or unmatch_fg
-                    if cur and matched_style then
-                        fg = bit.bor(fg, matched_style)
-                    end
-                    fp(sx, cy, sub, fg, bg_p)
-                    sx = sx + cell_len(sub)
-                end
-                run_start = i
-                cur = m
-            end
-        end
-    end
-
-    local function paint_completions(x, y, width, max_visible, bg)
-        local completions = mb._completions
-        local total = #completions
-        if total == 0 then
-            return
-        end
-        local selected = mb._comp_index or 0
-        local scroll = mb._comp_scroll or 0
-        local n = math.min(total - scroll, max_visible)
-        if n <= 0 then
-            return
-        end
-        -- Reserve a scrollbar gutter on the far right only when the
-        -- list actually overflows; otherwise the full width is usable.
-        local needs_sb = total > max_visible
-        local list_w = needs_sb and (width - 1) or width
-        local cur_fg = ui("cursor_fg")
-        local cur_bg = ui("cursor_bg")
-        local norm_fg = ui("minibuffer_prompt")
-        local meta_fg = ui("minibuffer_metadata")
-        -- Match-highlighting colors (Helm/ido style): matched chars pop,
-        -- unmatched recede. On the non-selected rows matched chars use
-        -- the bright default fg (bold) over dim-gray unmatched text; on
-        -- the selected bar matched chars use the blue accent (bold)
-        -- over the natural dark cursor_fg so they read on the light bar.
-        local bright_fg = ui("minibuffer_text")
-        local dim_fg = meta_fg
-        local accent_fg = norm_fg
-        local query = mb:view_text()
-
-        -- Metadata column: longest displayed text + 2-space gap.
-        local max_text = 0
-        for i = 1, n do
-            local tlen = cell_len(completers.comp_text(completions[scroll + i]))
-            if tlen > max_text then
-                max_text = tlen
-            end
-        end
-        local meta_col = max_text + 2
-        local show_meta = meta_col + 4 <= list_w
-
-        for i = 1, n do
-            local ci = scroll + i
-            local row = y + i - 1
-            local item = completions[ci]
-            local text = truncate_cells(completers.comp_text(item), list_w)
-            local meta = show_meta and completers.comp_meta(item) or nil
-            if ci == selected then
-                -- Full-width reverse-video bar: fill the row with the
-                -- selection bg first, then print text + meta on top so
-                -- the highlight is contiguous across the gap.
-                fp(x, row, string.rep(" ", list_w), cur_fg, cur_bg)
-                local mset = match_byte_set(text, query)
-                if next(mset) then
-                    print_highlighted(x, row, text, accent_fg, cur_fg, cur_bg, mset, tb.bold)
-                else
-                    fp(x, row, text, cur_fg, cur_bg)
-                end
-                if meta and meta_col + cell_len(meta) <= list_w then
-                    fp(x + meta_col, row, meta, cur_fg, cur_bg)
-                end
-            else
-                local mset = match_byte_set(text, query)
-                if next(mset) then
-                    print_highlighted(x, row, text, bright_fg, dim_fg, bg, mset, tb.bold)
-                else
-                    fp(x, row, text, norm_fg, bg)
-                end
-                if meta and meta_col + cell_len(meta) <= list_w then
-                    fp(x + meta_col, row, meta, meta_fg, bg)
-                end
-            end
-        end
-
-        -- Scrollbar: a 1-column gutter on the far right. Track = dim │,
-        -- thumb = █ over the slice of the list currently in view.
-        if needs_sb then
-            local sb_col = x + width - 1
-            local track_fg = ui("scrollbar_track")
-            local thumb_fg = ui("scrollbar_thumb")
-            local scrollable = math.max(1, total - n)
-            local thumb_size = math.max(1, math.floor(n * n / total))
-            local thumb_top = math.floor(scroll / scrollable * (n - thumb_size))
-            if thumb_top < 0 then
-                thumb_top = 0
-            elseif thumb_top > n - thumb_size then
-                thumb_top = n - thumb_size
-            end
-            for i = 0, n - 1 do
-                local on_thumb = i >= thumb_top and i < thumb_top + thumb_size
-                fp(
-                    sb_col,
-                    y + i,
-                    on_thumb and "█" or "│",
-                    on_thumb and thumb_fg or track_fg,
-                    bg
-                )
-            end
-        end
-    end
-
-    -- Footer rows: modeline + optional completions row + minibuffer/eval
-    local has_completions = mb and mb.active and mb.completion and #mb._completions > 0
-
     --- Persist the render damage state for next frame.
     ---@param cur_min_cursor_row integer
     function Editor:_finish_damage_state(
@@ -2481,7 +2323,6 @@ function Editor:render()
 
     local buf = view.buffer
     local line_count = buf:line_count()
-    local max_y = h - footer_rows - 1
 
     -- Gutter width + centered text column. Centralized in View:text_geometry
     -- so the mouse click→buffer mapping stays in lockstep with what's
@@ -2494,6 +2335,16 @@ function Editor:render()
         term:present()
         return
     end
+
+    -- Paint minibuffer chrome (inline bottom strip / floating palette)
+    -- via the overlay float sink, and capture how many rows it reserved
+    -- below the modeline — the "move-up" amount the buffer region must
+    -- shrink by. The eval result, when shown, also lives in this region
+    -- (just below the modeline); count + paint its row separately below.
+    local mb_tail = self.minibuffer:_render(self, w, h, fp)
+    local eval_rows = (not (mb and mb.active) and self._eval_result) and 1 or 0
+    local footer_tail = mb_tail + eval_rows
+    local max_y = h - footer_tail - 2
 
     -- Soft wrapping: set wrap_width to the text area width
     -- so the cache stays consistent with the current window size.
@@ -2903,159 +2754,14 @@ function Editor:render()
     -- append sections via `editor.modeline_segments`. Separators are
     -- auto-calculated (alternating ◢/◣) with colors derived from adjacent
     -- segment bg colors; text color is auto-detected from bg luminance.
-    local modeline_y = h - footer_rows
+    local modeline_y = h - footer_tail - 1
     self:render_modeline(view, w, modeline_y, fp)
 
-    -- Minibuffer — inline bottom strip (search, find-file, read-char,
-    -- query-replace, …). NOT used for M-x, which renders as a centered
-    -- floating palette (see the `mb.palette` branch below). The
-    -- modeline's accent bg already separates the inline strip from the
-    -- buffer; no spare row for a border rule (footer_rows accounts for
-    -- exactly modeline + minibuffer + completions).
-    if mb and mb.active and not mb.palette then
-        local mb_view = mb.view
-        local mb_buf = mb_view.buffer
-        local prompt = mb.prompt
-        local line_count = mb_buf:line_count()
-        local line_offset = modeline_y + 1
-
-        for li = 0, line_count - 1 do
-            local line_text = mb_buf:line_text(li)
-            -- Strip trailing newline for display
-            if #line_text > 0 and line_text:byte(#line_text) == 10 then
-                line_text = line_text:sub(1, #line_text - 1)
-            end
-            local row = line_offset + li
-            if li == 0 then
-                -- First line: prompt + text
-                fp(0, row, prompt, ui("minibuffer_prompt"), ui("default_bg"))
-                fp(#prompt, row, line_text, ui("minibuffer_text"), ui("default_bg"))
-            else
-                -- Subsequent lines: full width
-                fp(0, row, line_text, ui("minibuffer_text"), ui("default_bg"))
-            end
-        end
-
-        -- Cursor position: the hardware caret is hidden (see top of
-        -- render), so we draw the caret as a reverse-video cell, gated
-        -- on the blink phase, just like the main view.
-        local cursor_row = line_offset + mb_view:p().line
-        local cursor_col
-        if mb_view:p().line == 0 then
-            cursor_col = #prompt + mb_view:p().col
-        else
-            cursor_col = mb_view:p().col
-        end
-        if self._blink_on and cursor_col < w then
-            local lt = mb_buf:line_text(mb_view:p().line)
-            if #lt > 0 and lt:byte(#lt) == 10 then
-                lt = lt:sub(1, #lt - 1)
-            end
-            local bcol = mb_view:p().col
-            local ch = lt:sub(bcol + 1, bcol + 1)
-            if #ch == 0 then
-                ch = " "
-            end
-            -- Mode-aware caret: the minibuffer uses an underline BAR
-            -- (char in the cursor accent color + underline style bit)
-            -- so input contexts read distinctly from the main view's
-            -- reverse-video block caret.
-            local bar_fg = bit.bor(ui("cursor_bg"), tb.underline)
-            fp(cursor_col, cursor_row, ch, bar_fg, ui("default_bg"))
-        end
-
-        -- Completions: shared renderer (inline geometry — full width,
-        -- starting below the input row). Scrollbar + metadata handled
-        -- inside the helper.
-        if has_completions then
-            paint_completions(0, line_offset + line_count, w, 5, ui("default_bg"))
-        end
-    elseif mb and mb.active and mb.palette then
-        -- Command-palette mode (M-x): render the minibuffer as a
-        -- centered floating box over the buffer, with rounded borders
-        -- and the completions listed inside. Width and height are
-        -- derived from the content + viewport, clamped to safe bounds.
-        -- Painted ON TOP of already-rendered buffer rows (a solid bg
-        -- box overwrites whatever was there), so footer_rows doesn't
-        -- need to reserve space for it.
-        local mb_view = mb.view
-        local mb_buf = mb_view.buffer
-        local prompt = mb.prompt
-        local prompt_w = cell_len(prompt)
-
-        -- Box dimensions.
-        local box_w = math.min(math.max(48, prompt_w + 24), w - 4)
-        local box_x = math.floor((w - box_w) / 2)
-        -- Rows: top border + input + (completions) + bottom border.
-        local n_comp = 0
-        if has_completions then
-            n_comp = math.min(#mb._completions - (mb._comp_scroll or 0), 5)
-        end
-        local box_h = 2 + 1 + n_comp + 1
-        local box_y = math.floor((h - box_h) / 2)
-
-        -- Glow accent border: vivid blue accent (minibuffer_prompt,
-        -- base0D) + bold instead of the dim neutral border, so the
-        -- floating box reads as the focused surface against the now-
-        -- blackened backdrop. Same accent the prompt + selected-bar
-        -- match-highlight use, tying the palette's chrome together.
-        local border_fg = bit.bor(ui("minibuffer_prompt"), tb.bold)
-        local bg = ui("default_bg")
-        local prompt_fg = ui("minibuffer_prompt")
-        local text_fg = ui("minibuffer_text")
-        local meta_fg = ui("minibuffer_metadata")
-
-        -- Clear the box interior with default_bg so it floats over the
-        -- buffer cleanly.
-        for r = 0, box_h - 1 do
-            fp(box_x, box_y + r, string.rep(" ", box_w), bg, bg)
-        end
-
-        -- Top border: ╭─...─╮
-        fp(box_x, box_y, "╭" .. string.rep("─", box_w - 2) .. "╮", border_fg, bg)
-
-        -- Input row: prompt + text.
-        local input_y = box_y + 1
-        fp(box_x + 1, input_y, prompt, prompt_fg, bg)
-        do
-            local lt = mb_buf:line_text(0)
-            if #lt > 0 and lt:byte(#lt) == 10 then
-                lt = lt:sub(1, #lt - 1)
-            end
-            local max_text = box_w - 2 - prompt_w
-            fp(box_x + 1 + prompt_w, input_y, truncate_cells(lt, max_text), text_fg, bg)
-        end
-
-        -- Caret (underline bar, same as inline minibuffer).
-        if self._blink_on then
-            local lt = mb_buf:line_text(0)
-            if #lt > 0 and lt:byte(#lt) == 10 then
-                lt = lt:sub(1, #lt - 1)
-            end
-            local bcol = mb_view:p().col
-            local cursor_col = box_x + 1 + prompt_w + bcol
-            if cursor_col < box_x + box_w - 1 then
-                local ch = lt:sub(bcol + 1, bcol + 1)
-                if #ch == 0 then
-                    ch = " "
-                end
-                local bar_fg = bit.bor(ui("cursor_bg"), tb.underline)
-                fp(cursor_col, input_y, ch, bar_fg, bg)
-            end
-        end
-
-        -- Completions: shared renderer (palette geometry — interior
-        -- width, below the input row). Same paint path as inline.
-        if has_completions and n_comp > 0 then
-            paint_completions(box_x + 1, input_y + 1, box_w - 2, 5, bg)
-        end
-
-        -- Bottom border: ╰─...─╯
-        fp(box_x, box_y + box_h - 1, "╰" .. string.rep("─", box_w - 2) .. "╯", border_fg, bg)
-    -- Eval result (in minibuffer row when not active)
-    elseif self._eval_result then
-        local eval_row = modeline_y + 1
-        fp(0, eval_row, "=> " .. self._eval_result, ui("status_message"), ui("default_bg"))
+    -- Eval result row, shown when the minibuffer is inactive. (The
+    -- inline strip / floating palette chrome was already painted by
+    -- Minibuffer:_render above, near the top of render.)
+    if eval_rows > 0 then
+        fp(0, modeline_y + 1, "=> " .. self._eval_result, ui("status_message"), ui("default_bg"))
     end
 
     ov:emit_render()

@@ -871,4 +871,3 @@ end
 CompletionMenu.new = new
 return CompletionMenu
 
-

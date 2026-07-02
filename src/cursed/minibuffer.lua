@@ -20,8 +20,64 @@
 
 local View = require("cursed.view").View
 local Buffer = require("cursed.buffer").Buffer
+local bit = require("bit")
+local tb = require("cursed.tb")
+local ColorScheme = require("cursed.colorscheme")
+local completers = require("cursed.completers")
 
 local COMP_MAX_VISIBLE = 5
+
+----------------------------------------------------------------------------------------------------
+-- UI color + cell-width / truncation / match-highlight helpers.
+-- Compact local copies (mirroring completion_menu.lua) so this module
+-- is self-contained and doesn't reach into the editor's privates.
+----------------------------------------------------------------------------------------------------
+
+--- Resolve a UI chrome color from the active colorscheme, falling back
+--- to the terminal default during early startup (no scheme loaded yet).
+---@param name string UI concept key in CONCEPT_SLOTS
+---@return integer color
+local function ui(name)
+    local scheme = ColorScheme.active
+    if scheme == nil then
+        return tb.color_default
+    end
+    return scheme:color(name)
+end
+
+--- Display width of `s` in terminal cells: codepoint count. Assumes no
+--- double-wide CJK (true for cursed's chrome).
+---@param s string
+---@return integer
+local function cell_len(s)
+    local _, n = s:gsub("[^\128-\191]", "")
+    return n
+end
+
+--- Truncate `s` to at most `max` display cells, never splitting a
+--- multibyte codepoint.
+---@param s string
+---@param max integer max cells
+---@return string
+local function truncate_cells(s, max)
+    if max <= 0 then
+        return ""
+    end
+    local cells = 0
+    local byte_end = 0
+    local i = 1
+    while i <= #s do
+        local b = s:byte(i)
+        local len = b < 0x80 and 1 or b < 0xE0 and 2 or b < 0xF0 and 3 or 4
+        if cells + 1 > max then
+            break
+        end
+        byte_end = i + len - 1
+        cells = cells + 1
+        i = i + len
+    end
+    return s:sub(1, byte_end)
+end
 
 ----------------------------------------------------------------------------------------------------
 -- Completion item helpers (backward compatible)
@@ -49,6 +105,81 @@ local function comp_meta(item)
         return item.metadata
     end
     return nil
+end
+
+--- Set of byte positions in `display` covered by the first occurrence
+--- of each whitespace-separated term of `query`. Drives match-
+--- highlighting in the list (matched chars pop, unmatched recede).
+---@param display string visible (already-truncated) item text
+---@param query string the prefix/word being completed
+---@return table set of byte-index -> true (1-based, inclusive)
+local function match_byte_set(display, query)
+    local set = {}
+    if not query or query == "" then
+        return set
+    end
+    local lower = display:lower()
+    for term in query:lower():gmatch("%S+") do
+        local i, j = lower:find(term, 1, true)
+        if i then
+            for b = i, j do
+                set[b] = true
+            end
+        end
+    end
+    return set
+end
+
+--- Print one completion-text row with matched substrings (per
+--- `match_byte_set`) drawn in a distinct fg + style so the user can see
+--- WHY each candidate matched. Splits into contiguous matched /
+--- unmatched byte-runs and prints each with its own fg, advancing by
+--- cell width so multi-byte chrome stays aligned. `mset` nil → single
+--- unmatch-fg pass (no highlighting).
+---@param fp function float-print sink (x, y, text, fg, bg)
+---@param cx integer screen col
+---@param cy integer screen row
+---@param text string
+---@param matched_fg integer
+---@param unmatch_fg integer
+---@param bg_p integer
+---@param mset table|nil
+---@param matched_style integer|nil additional style bits OR'd onto matched fg
+local function print_highlighted(
+    fp,
+    cx,
+    cy,
+    text,
+    matched_fg,
+    unmatch_fg,
+    bg_p,
+    mset,
+    matched_style
+)
+    local n = #text
+    if n == 0 then
+        return
+    end
+    local sx = cx
+    local run_start = 1
+    local cur = (mset ~= nil) and (mset[1] or false) or false
+    for i = 2, n + 1 do
+        local m = (mset ~= nil) and (mset[i] or false) or false
+        if m ~= cur or i == n + 1 then
+            local seg_end = i - 1
+            if seg_end >= run_start then
+                local sub = text:sub(run_start, seg_end)
+                local fg = cur and matched_fg or unmatch_fg
+                if cur and matched_style then
+                    fg = bit.bor(fg, matched_style)
+                end
+                fp(sx, cy, sub, fg, bg_p)
+                sx = sx + cell_len(sub)
+            end
+            run_start = i
+            cur = m
+        end
+    end
 end
 
 ---@class Minibuffer
@@ -528,6 +659,288 @@ function Minibuffer:deactivate()
     self.auto_accept = false
     self._auto_accepting = false
     self.palette = false
+end
+
+----------------------------------------------------------------------------------------------------
+-- View: render
+--
+-- Painted from `Editor:render` just before the buffer paint loop
+-- (an EARLY synchronous call). The returned count drives the buffer-
+-- region narrowing (`max_y` / `modeline_y`): the inline bottom strip
+-- reserves its input rows + visible completions below the modeline, so
+-- the editor shrinks the viewport that many rows up to make room; the
+-- floating palette (M-x) floats centered over the buffer and reserves
+-- nothing. Composes via the overlay float sink so it stacks with the
+-- modeline, in-buffer completion popup, and extension overlays.
+----------------------------------------------------------------------------------------------------
+
+--- Render the minibuffer chrome (inline bottom strip / floating palette)
+--- and return how many screen rows the buffer region must reserve
+--- below the modeline for this surface — the "move-up" count.
+--- Inline strip reserves `input_rows + comp_visible_rows`; the floating
+--- palette reserves 0. No-op (returns 0) when inactive.
+---@param editor Editor owning editor (for term dims + `_blink_on`)
+---@param w integer terminal width
+---@param h integer terminal height
+---@param fp function float-print sink (x, y, text, fg, bg)
+---@return integer mb_tail rows reserved below the modeline this frame
+function Minibuffer:_render(editor, w, h, fp)
+    if not self.active then
+        return 0
+    end
+
+    local bg_default = ui("default_bg")
+    if self.palette then
+        self:_render_palette(editor, w, h, fp, bg_default)
+        return 0
+    end
+
+    local mb_tail = self:input_rows() + self:comp_visible_rows()
+    self:_render_inline(editor, w, h, fp, bg_default, mb_tail)
+    return mb_tail
+end
+
+--- Render the inline bottom strip: prompt + multiline input, an
+--- underline-bar caret (gated on the editor's blink phase), and the
+--- completion list below the input rows. Painted into rows
+--- `[h - mb_tail, h - 1]` so it sits just below the modeline
+--- (`h - mb_tail - 1`).
+---@param editor Editor
+---@param w integer terminal width
+---@param h integer terminal height
+---@param fp function float-print sink
+---@param bg_default integer default_bg color
+---@param mb_tail integer total rows this surface reserves (input + comp)
+function Minibuffer:_render_inline(editor, w, h, fp, bg_default, mb_tail)
+    local line_offset = h - mb_tail -- == modeline_y + 1
+    local mb_view = self.view
+    local mb_buf = mb_view.buffer
+    local line_count = mb_buf:line_count()
+    local prompt = self.prompt
+    local prompt_w = cell_len(prompt)
+    local prompt_fg = ui("minibuffer_prompt")
+    local text_fg = ui("minibuffer_text")
+
+    for li = 0, line_count - 1 do
+        local line_text = mb_buf:line_text(li)
+        -- Strip trailing newline for display.
+        if #line_text > 0 and line_text:byte(#line_text) == 10 then
+            line_text = line_text:sub(1, #line_text - 1)
+        end
+        local row = line_offset + li
+        if li == 0 then
+            -- First line: prompt + text
+            fp(0, row, prompt, prompt_fg, bg_default)
+            fp(prompt_w, row, line_text, text_fg, bg_default)
+        else
+            -- Subsequent lines: full width
+            fp(0, row, line_text, text_fg, bg_default)
+        end
+    end
+
+    -- Caret: hardware caret is hidden; drawn as a reverse-video cell
+    -- (underline-bar style here so input contexts read distinctly from
+    -- the main view's block caret) gated on the editor's blink phase.
+    local mb_pos = mb_view:p()
+    local cursor_row = line_offset + mb_pos.line
+    local cursor_col = mb_pos.line == 0 and (prompt_w + mb_pos.col) or mb_pos.col
+    if editor._blink_on and cursor_col < w then
+        local lt = mb_buf:line_text(mb_pos.line)
+        if #lt > 0 and lt:byte(#lt) == 10 then
+            lt = lt:sub(1, #lt - 1)
+        end
+        local ch = lt:sub(mb_pos.col + 1, mb_pos.col + 1)
+        if #ch == 0 then
+            ch = " "
+        end
+        local bar_fg = bit.bor(ui("cursor_bg"), tb.underline)
+        fp(cursor_col, cursor_row, ch, bar_fg, bg_default)
+    end
+
+    -- Completion list: full width, starting below the input rows.
+    if self.completion and #self._completions > 0 then
+        self:_paint_completions(0, line_offset + line_count, w, COMP_MAX_VISIBLE, bg_default, fp)
+    end
+end
+
+--- Render the floating centered palette (M-x): a solid-bordered box
+--- over the buffer with rounded corners, prompt + input on the second
+--- row, and completions listed inside. Reserves no bottom rows.
+---@param editor Editor
+---@param w integer terminal width
+---@param h integer terminal height
+---@param fp function float-print sink
+---@param bg_default integer default_bg color
+function Minibuffer:_render_palette(editor, w, h, fp, bg_default)
+    local mb_view = self.view
+    local mb_buf = mb_view.buffer
+    local prompt = self.prompt
+    local prompt_w = cell_len(prompt)
+
+    -- Box dimensions.
+    local box_w = math.min(math.max(48, prompt_w + 24), w - 4)
+    local box_x = math.floor((w - box_w) / 2)
+    local n_comp = 0
+    if self.completion and #self._completions > 0 then
+        n_comp = math.min(#self._completions - (self._comp_scroll or 0), COMP_MAX_VISIBLE)
+    end
+    local box_h = 2 + 1 + n_comp + 1
+    local box_y = math.floor((h - box_h) / 2)
+
+    local border_fg = bit.bor(ui("minibuffer_prompt"), tb.bold)
+    local prompt_fg = ui("minibuffer_prompt")
+    local text_fg = ui("minibuffer_text")
+
+    -- Clear the box interior with default_bg so it floats cleanly.
+    for r = 0, box_h - 1 do
+        fp(box_x, box_y + r, string.rep(" ", box_w), bg_default, bg_default)
+    end
+
+    -- Top border: ╭─...─╮
+    fp(box_x, box_y, "╭" .. string.rep("─", box_w - 2) .. "╮", border_fg, bg_default)
+
+    -- Input row: prompt + text.
+    local input_y = box_y + 1
+    fp(box_x + 1, input_y, prompt, prompt_fg, bg_default)
+    do
+        local lt = mb_buf:line_text(0)
+        if #lt > 0 and lt:byte(#lt) == 10 then
+            lt = lt:sub(1, #lt - 1)
+        end
+        local max_text = box_w - 2 - prompt_w
+        fp(box_x + 1 + prompt_w, input_y, truncate_cells(lt, max_text), text_fg, bg_default)
+    end
+
+    -- Caret (underline bar, same as inline strip).
+    if editor._blink_on then
+        local lt = mb_buf:line_text(0)
+        if #lt > 0 and lt:byte(#lt) == 10 then
+            lt = lt:sub(1, #lt - 1)
+        end
+        local bcol = mb_view:p().col
+        local cursor_col = box_x + 1 + prompt_w + bcol
+        if cursor_col < box_x + box_w - 1 then
+            local ch = lt:sub(bcol + 1, bcol + 1)
+            if #ch == 0 then
+                ch = " "
+            end
+            local bar_fg = bit.bor(ui("cursor_bg"), tb.underline)
+            fp(cursor_col, input_y, ch, bar_fg, bg_default)
+        end
+    end
+
+    -- Completions inside the box.
+    if n_comp > 0 then
+        self:_paint_completions(box_x + 1, input_y + 1, box_w - 2, COMP_MAX_VISIBLE, bg_default, fp)
+    end
+
+    -- Bottom border: ╰─...─╯
+    fp(
+        box_x,
+        box_y + box_h - 1,
+        "╰" .. string.rep("─", box_w - 2) .. "╯",
+        border_fg,
+        bg_default
+    )
+end
+
+--- Unified completion-list renderer shared by the inline strip and the
+--- floating palette. Paints up to `max_visible` items starting at (x, y)
+--- over a `bg` background, draws a scrollbar on the far right when the
+--- list overflows, and Helm/ido-style match-highlights each row.
+---@param x integer screen col
+---@param y integer screen row
+---@param width integer list width (cells)
+---@param max_visible integer max rows to paint
+---@param bg integer surrounding bg color
+---@param fp function float-print sink (x, y, text, fg, bg)
+function Minibuffer:_paint_completions(x, y, width, max_visible, bg, fp)
+    local completions = self._completions
+    local total = #completions
+    if total == 0 then
+        return
+    end
+    local selected = self._comp_index or 0
+    local scroll = self._comp_scroll or 0
+    local n = math.min(total - scroll, max_visible)
+    if n <= 0 then
+        return
+    end
+    -- Reserve a scrollbar gutter on the far right only when the list
+    -- actually overflows; otherwise the full width is usable.
+    local needs_sb = total > max_visible
+    local list_w = needs_sb and (width - 1) or width
+    local cur_fg = ui("cursor_fg")
+    local cur_bg = ui("cursor_bg")
+    local norm_fg = ui("minibuffer_prompt")
+    local meta_fg = ui("minibuffer_metadata")
+    local bright_fg = ui("minibuffer_text")
+    local dim_fg = meta_fg
+    local accent_fg = norm_fg
+    local query = self:view_text()
+
+    -- Metadata column: longest displayed text + 2-space gap.
+    local max_text = 0
+    for i = 1, n do
+        local tlen = cell_len(comp_text(completions[scroll + i]))
+        if tlen > max_text then
+            max_text = tlen
+        end
+    end
+    local meta_col = max_text + 2
+    local show_meta = meta_col + 4 <= list_w
+
+    for i = 1, n do
+        local ci = scroll + i
+        local row = y + i - 1
+        local item = completions[ci]
+        local text = truncate_cells(comp_text(item), list_w)
+        local meta = show_meta and comp_meta(item) or nil
+        if ci == selected then
+            -- Full-width reverse-video bar: fill the row with the
+            -- selection bg first, then print text + meta on top.
+            fp(x, row, string.rep(" ", list_w), cur_fg, cur_bg)
+            local mset = match_byte_set(text, query)
+            if next(mset) then
+                print_highlighted(fp, x, row, text, accent_fg, cur_fg, cur_bg, mset, tb.bold)
+            else
+                fp(x, row, text, cur_fg, cur_bg)
+            end
+            if meta and meta_col + cell_len(meta) <= list_w then
+                fp(x + meta_col, row, meta, cur_fg, cur_bg)
+            end
+        else
+            local mset = match_byte_set(text, query)
+            if next(mset) then
+                print_highlighted(fp, x, row, text, bright_fg, dim_fg, bg, mset, tb.bold)
+            else
+                fp(x, row, text, norm_fg, bg)
+            end
+            if meta and meta_col + cell_len(meta) <= list_w then
+                fp(x + meta_col, row, meta, meta_fg, bg)
+            end
+        end
+    end
+
+    -- Scrollbar: a 1-column gutter on the far right. Track = dim │,
+    -- thumb = █ over the slice of the list currently in view.
+    if needs_sb then
+        local sb_col = x + width - 1
+        local track_fg = ui("scrollbar_track")
+        local thumb_fg = ui("scrollbar_thumb")
+        local scrollable = math.max(1, total - n)
+        local thumb_size = math.max(1, math.floor(n * n / total))
+        local thumb_top = math.floor(scroll / scrollable * (n - thumb_size))
+        if thumb_top < 0 then
+            thumb_top = 0
+        elseif thumb_top > n - thumb_size then
+            thumb_top = n - thumb_size
+        end
+        for i = 0, n - 1 do
+            local on_thumb = i >= thumb_top and i < thumb_top + thumb_size
+            fp(sb_col, y + i, on_thumb and "█" or "│", on_thumb and thumb_fg or track_fg, bg)
+        end
+    end
 end
 
 ----------------------------------------------------------------------------------------------------
