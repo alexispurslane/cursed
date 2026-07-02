@@ -739,14 +739,14 @@ function CompletionMenu:_render(editor)
         end
     end
 
-    local bg = ui("default_bg")
+    local bg = ui("popup_bg")
     local border_fg = bit.bor(ui("minibuffer_border"), tb.bold)
     local cur_fg = ui("cursor_fg")
     local cur_bg = ui("cursor_bg")
     local norm_fg = ui("minibuffer_prompt")
     local meta_fg = ui("minibuffer_metadata")
     local bright_fg = ui("minibuffer_text")
-    local dim_fg = meta_fg
+    local dim_fg = ui("completion_dim")
     local accent_fg = norm_fg
 
     local function fp(x, y, text, fg, b)
@@ -870,4 +870,3 @@ end
 
 CompletionMenu.new = new
 return CompletionMenu
-

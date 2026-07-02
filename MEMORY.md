@@ -34,4 +34,5 @@ so the agent can pick up context across sessions.
 
 ## Heavily Read
 
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/editor.lua (9 reads) — Found the root cause. In `tick_background_tasks`, when a deadline task fires, `d
+- src/cursed/minibuffer.lua (5 reads) — Now let me find where the Module export section starts so I can insert `_render`
+- src/cursed/editor.lua (15 reads) — This is a large render function. Let me continue reading it and find where the m

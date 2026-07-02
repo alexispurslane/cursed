@@ -132,6 +132,10 @@ local CONCEPT_SLOTS = {
     -- a muted bg with bright fg so it reads as secondary chrome.
     modeline_pos_fg = 0x06,
     modeline_pos_bg = 0x02,
+    -- popup_bg: floating popup background (completion menu / palette).
+    -- base01 is one step lighter than default_bg (base00) so the
+    -- popup reads as a distinct floating surface over the buffer.
+    popup_bg = 0x01,
     -- border: thin separators — the minibuffer/completions top rule
     -- and any future panel dividers.
     border = 0x02,
@@ -140,6 +144,10 @@ local CONCEPT_SLOTS = {
     -- Track = dim │, thumb = █ over the visible portion of the list.
     scrollbar_track = 0x03,
     scrollbar_thumb = 0x04,
+    -- completion_dim: non-matched text on non-selected completion
+    -- rows. base04 is brighter than base03 (minibuffer_metadata) so
+    -- the dim text stays readable instead of receding into the bg.
+    completion_dim = 0x04,
 }
 
 -- Capture name → concept. Tree-sitter queries use the standard
