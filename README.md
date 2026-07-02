@@ -28,7 +28,9 @@ Most of the editor concepts --- and keybindings --- are derived from Emacs, but 
 - Full mouse and clipboard support out of the box.
 - Due to Lua's greater speed, the *entire editor*, besides a minimal C wrapper that only exists to boot the compiled bytecode in a way that allows for a standalone executable, and manage the threads and ring buffers, can be implemented in Lua. This takes Emacs's idea of being implemented in a scripting language with a C core to the extreme: even the display code can be overridden.
 - Tree-sitter grammars are provided with the editor, compiled statically into the binary with the default bytecode. This provides stability --- no more surprise version conflicts. We provide Rust, YAML, TOML, Bash, Markdown, Go, Python, Lua, C, and JSON highlighting out of the box, with nested syntax highlighting supported for all queries, and implemented by default for Markdown code fences.- Tree-sitter-based auto indentation and dedentation on all complete syntax tree nodes
-- Combined the above with a built in pattern-based electric-pair system that can complete *keywords* after complex expressions, not just standered brackets, so that no tree sitter syntax node ever needs to be incomplete.
+- Combined the above with a built in pattern-based electric-pair system that can complete *keywords* after complex expressions, not just standered brackets, so that no tree sitter syntax node ever needs to be incomplete
+- Communication with the LSP (finding the binaries, spawning the processes, managing their lifecycle, encoding and decoding JSON messages) is handled on a separate thread which communicates asynchronously with the main thread in packed C structs, and JSON is handled by the extremely fast yyjson C library, allowing for LSP support to be extremely fast and totally nonblocking.
+- Generalized, unified in-buffer completion system that can accept the exact same "completer" higher-order-function interface as Minibuffers, uses the same interior rendering of options, is extremely fast and seamless, and supports dabbrev by default.
 
 ## Screenshots
 
@@ -123,6 +125,7 @@ just clean-vendor # also rebuild vendored LuaJIT / tree-sitter-lib from scratch
 ```
 
 Build artifacts land entirely in `build/`; nothing outside the repo is touched except `~/.config/cursed/` at runtime.
+
 
 
 
