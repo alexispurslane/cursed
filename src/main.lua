@@ -280,6 +280,8 @@ local function drain_lsp_inbox(editor, ss)
             if info ~= nil then
                 editor.event_system:emit("lsp_status", info.client_id, info.exe_name, info.status)
             end
+        elseif msg.type == shared.MSG_LSP_RESPONSE then
+            require("cursed.lsp_client").apply_response(msg.ptr)
         end
         msg = ss:pop(ss._ptr.inbox_lsp)
     end

@@ -56,15 +56,15 @@
  * Inbound (lane → main) — bespoke per message type; extended as
  * features land. v1 relays only the handshake (initialize response):
  *   MSG_LSP_HANDSHAKE  ptr = struct LspHandshake*; arg = unused
- *   (diagnostics, completion, hover, etc. get their own structs when
- *   their consumers are wired; until then the lane decodes and drops
- *   them off-main.)
+ *   MSG_LSP_RESPONSE   ptr = struct LspResponse* (lane relays a request
+ *                      result back to main; main dispatches by id)
  */
 #define MSG_LSP_SPAWN      11 /* main → lsp: ptr = struct LspSpawnReq* */
 #define MSG_LSP_SEND       12 /* main → lsp: ptr = struct LspSendReq* */
 #define MSG_LSP_KILL       13 /* main → lsp: ptr = struct LspKillReq* */
 #define MSG_LSP_HANDSHAKE  14 /* lsp → main: ptr = struct LspHandshake* */
 #define MSG_LSP_DOC_SYNC   15 /* main → lsp: ptr = struct LspDocSync* (didOpen/didChange/didClose, full-text sync) */
+#define MSG_LSP_RESPONSE   16 /* lsp → main: ptr = struct LspResponse* (generic request-result relay) */
 
 /* ── LSP server status codes (carried in LspHandshake.status) ──────── */
 #define LSP_STATUS_SPAWNING 0   /* spawned, initialize response not yet received */
@@ -409,6 +409,29 @@ struct LspDocSync {
     char     language_id[32]; /* LSP languageId (e.g. "lua"), NUL-padded */
     uint8_t *text_ptr;      /* malloc'd full-buffer text (NULL for CLOSE); lane frees */
     uint32_t text_len;     /* byte length of text_ptr */
+};
+
+/* MSG_LSP_RESPONSE (lane → main): the lane relays a response to a
+ * main-owned request (textDocument/formatting today; completion /
+ * hover / signatureHelp later). The lane owns the JSON-RPC socket and
+ * decodes the full message to a Lua table; it then RE-ENCODES just the
+ * `result` field (which may be null, an array of TextEdits, etc.) via
+ * yyjson and ships it as a JSON string. Main decodes the small result
+ * via yyjson + dispatches by `id` against its pending-request registry.
+ * This keeps the lane generic (no knowledge of TextEdit shape) while
+ * keeping the (potentially large) full-message decode off-main: only the
+ * result substring crosses the boundary, and only the small-result
+ * decode runs on main.
+ * Lane frees this struct (and the trailing result bytes) after pushing.
+ * error_present is non-zero when `msg.error` was set (LSP error reply);
+ * result_len is 0 for a null result. */
+struct LspResponse {
+    uint32_t client_id;    /* which server replied */
+    uint32_t id;            /* request id main minted; dispatch key */
+    uint32_t result_len;   /* bytes of trailing result JSON (no NUL); 0 = null */
+    uint8_t  error_present;/* 1 = this is an error reply (result carries `error`) */
+    uint8_t  _pad[3];
+    /* followed by result_len bytes of JSON */
 };
 
 #endif /* SHARED_STATE_H */

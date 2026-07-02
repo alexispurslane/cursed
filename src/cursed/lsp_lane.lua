@@ -110,6 +110,40 @@ local function send_missing(client_id, exe_name)
     ss:push(ss._ptr.inbox_lsp, { type = constants.MSG_LSP_HANDSHAKE, ptr = hs })
 end
 
+--- Relay a response to a main-owned request back to main.
+--- Re-encodes just the `result` (or `error`) field as a JSON string and
+--- ships it in a struct LspResponse; main decodes the (small) result via
+--- yyjson + dispatches by id. Keeps the lane generic about result shape.
+--- msg.result / msg.error are Lua tables (or nil) from json_ffi.decode.
+local function relay_response(client, msg)
+    local raw
+    local err_present = false
+    if msg.error ~= nil then
+        raw = json.encode(msg.error)
+        err_present = true
+    else
+        raw = json.encode(msg.result)
+    end
+    if raw == nil then
+        raw = "null"
+    end
+    local rlen = #raw
+    local total = ffi.sizeof("struct LspResponse") + rlen
+    local buf = ffi.C.calloc(1, total)
+    if buf == nil then
+        return
+    end
+    local resp = ffi.cast("struct LspResponse *", buf)
+    resp.client_id = client.client_id
+    resp.id = msg.id
+    resp.result_len = rlen
+    resp.error_present = err_present and 1 or 0
+    if rlen > 0 then
+        ffi.copy(ffi.cast("char *", buf) + ffi.sizeof("struct LspResponse"), raw, rlen)
+    end
+    ss:push(ss._ptr.inbox_lsp, { type = constants.MSG_LSP_RESPONSE, ptr = buf })
+end
+
 ----------------------------------------------------------------------------------------------------
 -- Framing + send
 ----------------------------------------------------------------------------------------------------
@@ -290,10 +324,12 @@ end
 --- C struct + main-side consumer as its feature lands (extension point).
 --- @param msg table parsed JSON-RPC message
 function LSPClient:_dispatch(msg)
-    -- initialize response (id-matched). The request was sent at spawn.
+    -- A response (id set, method nil). id == 1 is the lane-owned
+    -- initialize handshake; anything else is a main-owned request whose
+    -- result we relay back generically so the lane stays shape-agnostic
+    -- (TextEdit[] today, completions/hover tomorrow) — main dispatches
+    -- by id against its pending-request registry.
     if msg.id ~= nil and msg.method == nil then
-        -- A response. For v1 the only request we own is initialize
-        -- (id == 1); mark initialized + relay handshake.
         if tonumber(msg.id) == 1 then
             -- initialize response → READY. Mark + relay before the
             -- `initialized` notification so the modeline flips on the
@@ -304,6 +340,8 @@ function LSPClient:_dispatch(msg)
             pcall(function()
                 self:notify("initialized", {})
             end)
+        else
+            relay_response(self, msg)
         end
         return
     end

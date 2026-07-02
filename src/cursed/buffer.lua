@@ -1559,6 +1559,94 @@ function Buffer:snapshot_text_range(log, entry_idx, start_line, start_col, end_l
     return table.concat(parts)
 end
 
+----------------------------------------------------------------------------------------------------
+-- LSP text edits (textDocument/formatting etc.)
+--
+-- LSP describes edits as Range replacements: the half-open range
+-- [start..end) (0-based line + UTF-16/byte character) is replaced by
+-- newText. We collapse a range to a single forward char count spanning
+-- any newlines (the newline between lines counts as 1 char), then reuse
+-- the existing delete_char (which joins lines across the boundary) +
+-- insert (which splits on newlines). Edits are applied in REVERSE
+-- document order so an edit's coordinates stay valid for later
+-- (earlier-in-doc) edits. v1 treats LSP "character" as a byte offset,
+-- which is correct for ASCII and the common case; multi-byte column
+-- mapping is a future refinement (the View already tracks it).
+----------------------------------------------------------------------------------------------------
+
+--- Count forward chars (incl. newlines as 1) from (start_line,start_col)
+--- to (end_line,end_col). 0-based, exclusive end.
+--- @param sl integer start line
+--- @param sc integer start char
+--- @param el integer end line
+--- @param ec integer end char
+--- @return integer
+function Buffer:chars_between(sl, sc, el, ec)
+    if sl == el then
+        return ec - sc
+    end
+    local count = (self:line_len(sl) - 1) - sc
+    for li = sl + 1, el - 1 do
+        count = count + (self:line_len(li) - 1) + 1
+    end
+    count = count + 1 + ec
+    return count
+end
+
+--- Apply an array of LSP TextEdits to the buffer as ONE undo group.
+--- Each edit = { range = { start = {line,character}, end = {line,character} },
+--- newText = string }. Edits may be in any order; they're sorted
+--- descending by start position and applied last-first so coordinates
+--- of not-yet-applied (earlier) edits stay valid. Returns the number of
+--- edits actually applied (0 if the array is empty/null).
+--- Does NOT move cursors — the caller (View) re-clamps afterward.
+--- @param edits table|nil array of TextEdits, or nil
+--- @return integer applied
+function Buffer:apply_lsp_edits(edits)
+    if edits == nil then
+        return 0
+    end
+    local n = #edits
+    if n == 0 then
+        return 0
+    end
+    -- Sort a copy descending by (start.line, start.character). Apply
+    -- right-to-left so earlier edits' positions are unaffected.
+    local sorted = {}
+    for i = 1, n do
+        sorted[i] = edits[i]
+    end
+    table.sort(sorted, function(a, b)
+        local sa, sb = a.range.start, b.range.start
+        if sa.line ~= sb.line then
+            return sa.line > sb.line
+        end
+        return sa.character > sb.character
+    end)
+
+    self:begin_edit()
+    local applied = 0
+    for i = 1, n do
+        local e = sorted[i]
+        local r = e.range
+        local sl = r.start.line
+        local sc = r.start.character
+        local el = r["end"].line
+        local ec = r["end"].character
+        local cnt = self:chars_between(sl, sc, el, ec)
+        if cnt > 0 then
+            self:delete_char(sl, sc, cnt)
+        end
+        local newText = e.newText
+        if newText ~= nil and #newText > 0 then
+            self:insert(sl, sc, newText)
+        end
+        applied = applied + 1
+    end
+    self:end_edit()
+    return applied
+end
+
 --- Begin an edit group. Snapshots the piece table on the first call.
 function Buffer:begin_edit()
     local b = self._ptr

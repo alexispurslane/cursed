@@ -23,17 +23,20 @@ so the agent can pick up context across sessions.
 
 ## Gotchas & Errors
 
-- The forward-decl approach actually crashes at runtime.
-- /opt/homebrew/bin/luajit: ../test_lsp.lua:103: missing declaration for symbol 'printf'
-- /opt/homebrew/bin/luajit: ./cursed/lsp_client.lua:380: 'for' limit must be a number — Fix: Drain has a `'for' limit must be a number` error.
-- vendored LuaJIT already built
-- lua:576`) rejected the immutable Lua string — `"cannot convert 'string' to 'char *'"`.
 - (no output)
 - Clean build, boots without crashing, all three lanes start.
 - Let me trigger a kill via the lua file's `lsp_client` interaction is harder from CLI; instead let me test the **crash/EOF → dead** path by killing the spawned server process mid-run.
+- But INIT→READY→didOpen with the server staying alive definitively proves the yyjson swap fixed the crash.
+- 5s; previously it died at ~14ms from the malformed-JSON crash)
+
+Let me clean up the leftover test file and kill the stray server.
+- ## The bug you saw
+The modeline ✝ (dead) was the `lua-language-server` **crashing immediately after `didOpen`**.
+- Root cause: the hand-rolled `json_encode` had a broken string escaper — `v:gsub("\\", "\\")` was a no-op (replaced `\` with `\`) and `:gsub('"', "\\")` replaced `"` with a bare `\`.
+- c`** — a thin C shim that `#include`s the header and re-exports yyjson's `inline` getters/builders (which have no exported symbol, so LuaJIT FFI can't reach them directly) as real `shim_*` symbols.
 
 ## Heavily Read
 
-- src/cursed/lsp_client.lua (5 reads) — Now rewrite the main facade's registry + handshake handling to be status-keyed. 
-- src/main.lua (4 reads) — Found it — `docs/plans/core.md` already specifies `outbox_lsp`/`inbox_lsp`; the 
-- src/cursed/lsp_lane.lua (12 reads) — Let me look at the exact sections I need to edit in the lane.
+- src/cursed/lsp_lane.lua (11 reads) — Now the lane handler. Let me find the dispatch switch.
+- src/cursed/editor_listeners.lua (4 reads) — No `sync_open` log at all! So `lsp.sync_open` is never called. The mode_enter li
+- src/cursed/lsp_client.lua (3 reads) — The server log shows a **JSON parse error**: `invalid escape char ')' in string

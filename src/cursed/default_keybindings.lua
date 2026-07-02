@@ -91,6 +91,9 @@ return {
     -- Eval
     ["alt-:"] = "eval_expression",
 
+    -- LSP formatting (textDocument/formatting). "i" for indent.
+    ["alt-i"] = "format",
+
     -- Execute command
     ["alt-x"] = "execute_command",
 

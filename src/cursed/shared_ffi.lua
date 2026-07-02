@@ -169,6 +169,15 @@ struct LspDocSync {
     uint8_t *text_ptr;
     uint32_t text_len;
 };
+
+struct LspResponse {
+    uint32_t client_id;
+    uint32_t id;
+    uint32_t result_len;
+    uint8_t  error_present;
+    uint8_t  _pad[3];
+    /* followed by result_len bytes of JSON */
+};
 ]])
 
 ----------------------------------------------------------------------------------------------------
@@ -191,6 +200,7 @@ local MSG_LSP_SEND = 12
 local MSG_LSP_KILL = 13
 local MSG_LSP_HANDSHAKE = 14
 local MSG_LSP_DOC_SYNC = 15
+local MSG_LSP_RESPONSE = 16
 
 local LSP_STATUS_SPAWNING = 0
 local LSP_STATUS_READY = 1
@@ -224,6 +234,7 @@ return {
     MSG_LSP_KILL = MSG_LSP_KILL,
     MSG_LSP_HANDSHAKE = MSG_LSP_HANDSHAKE,
     MSG_LSP_DOC_SYNC = MSG_LSP_DOC_SYNC,
+    MSG_LSP_RESPONSE = MSG_LSP_RESPONSE,
     LSP_STATUS_SPAWNING = LSP_STATUS_SPAWNING,
     LSP_STATUS_READY = LSP_STATUS_READY,
     LSP_STATUS_DEAD = LSP_STATUS_DEAD,

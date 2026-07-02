@@ -75,6 +75,17 @@ M._pending_opens = {}
 --- Next client_id to assign. 0 is reserved ("unassigned"/notification).
 local _next_client_id = 1
 
+--- Next request id to mint. id 1 is reserved for the lane's own
+--- `initialize` request; main-owned requests start at 2.
+local _next_request_id = 2
+
+--- Pending main-owned requests: id → callback(decoded_result, is_error).
+--- The lane relays every non-initialize response back as MSG_LSP_RESPONSE;
+--- apply_response decodes the result JSON (via yyjson, on main since
+--- results are small/infrequent) + invokes the matching callback here.
+--- @type table<integer, fun(result:any, is_error:boolean)>
+M._pending_requests = {}
+
 --- LSP_STATUS_* code (uint8 from the lane) → status string.
 --- Kept in sync with shared_state.h LSP_STATUS_*.
 local _STATUS_NAMES = {
@@ -329,6 +340,42 @@ function M.notify(client_id, method, params)
     enqueue_send(method, params, 0, client_id)
 end
 
+--- Mint the next request id (main-owned; skips id 1 = lane's initialize).
+--- Stored so apply_response can route the reply.
+--- @param callback fun(result:any, is_error:boolean) invoked on main when
+---   the response arrives; result is the decoded JSON value.
+--- @return integer id the minted request id
+function M.mint_request_id(callback)
+    local id = _next_request_id
+    _next_request_id = _next_request_id + 1
+    M._pending_requests[id] = callback
+    return id
+end
+
+--- Request textDocument/formatting for a document on the server bound
+--- to `client_id`. `opts` is { tab_size = N, insert_spaces = bool }.
+--- `callback` receives the decoded result (a TextEdit[] array, or nil
+--- if the server returns null). No-op + returns nil if not ready.
+--- @param client_id integer
+--- @param uri string file:// URI
+--- @param opts {tab_size:integer, insert_spaces:boolean}
+--- @param callback fun(result:any, is_error:boolean)
+--- @return integer|nil id the request id, or nil if not ready
+function M.request_format(client_id, uri, opts, callback)
+    if not M.is_ready(client_id) then
+        return nil
+    end
+    local id = M.mint_request_id(callback)
+    enqueue_send("textDocument/formatting", {
+        textDocument = { uri = uri },
+        options = {
+            tabSize = opts.tab_size or 4,
+            insertSpaces = opts.insert_spaces ~= false,
+        },
+    }, id, client_id)
+    return id
+end
+
 ----------------------------------------------------------------------------------------------------
 -- Document synchronization (didOpen / didChange / didClose)
 --
@@ -494,6 +541,9 @@ end
 function M.drop_client_docs(client_id)
     M._open_docs[client_id] = nil
     M._pending_opens[client_id] = nil
+    -- A dead server won't reply to its pending requests, so their
+    -- callbacks simply never fire (the closures GC once the table entry
+    -- is overwritten by id reuse — ids are main-minted + monotonic).
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -614,6 +664,43 @@ end
 --- @param s any SharedState
 function M.set_shared_state(s)
     M._ss = s
+end
+
+--- Consume a MSG_LSP_RESPONSE (called from main.lua's drain_lsp_inbox).
+--- Decodes the trailing result JSON via yyjson + dispatches it to the
+--- matching pending-request callback (registered by mint_request_id).
+--- Frees the struct. Unknown ids (e.g. after a client died) are dropped.
+--- @param ptr any struct LspResponse*
+--- @return integer|nil client_id replied (nil if ptr was nil)
+function M.apply_response(ptr)
+    if ptr == nil then
+        return nil
+    end
+    local resp = ffi.cast("struct LspResponse *", ptr)
+    local cid = tonumber(resp.client_id)
+    ---@cast cid integer
+    local id = tonumber(resp.id)
+    ---@cast id integer
+    local is_err = tonumber(resp.error_present) ~= 0
+    local rlen = tonumber(resp.result_len)
+    local result = nil
+    if rlen > 0 then
+        local base = ffi.cast("char *", ptr) + ffi.sizeof("struct LspResponse")
+        local raw = ffi.string(base, rlen)
+        local decoded, derr = json.decode(raw)
+        if decoded ~= nil then
+            result = decoded
+        else
+            log.warn("lsp", "response decode failed", { id = id, error = derr, bytes = rlen })
+        end
+    end
+    ffi.C.free(ptr)
+    local cb = M._pending_requests[id]
+    if cb ~= nil then
+        M._pending_requests[id] = nil
+        cb(result, is_err)
+    end
+    return cid
 end
 
 return M

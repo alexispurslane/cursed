@@ -742,6 +742,75 @@ commands.find_file = function(view, editor)
     })
 end
 
+----------------------------------------------------------------------------------------------------
+-- LSP formatting
+--
+-- Issue textDocument/formatting to the buffer's bound server (if any +
+-- ready) and apply the returned TextEdits as one undo group, then run
+-- the same post-bulk-mutation resync the View uses for undo. Async:
+-- the request round-trips through the lane; the callback fires from main's
+-- drain_lsp_inbox when the response lands.
+----------------------------------------------------------------------------------------------------
+
+local lsp = require("cursed.lsp_client")
+
+commands.format = function(view, editor)
+    local buf = view.buffer
+    local cid = buf and buf.lsp_client_id
+    local uri = buf and buf.lsp_uri
+    if cid == nil or uri == nil then
+        editor.status_message = "no language server for this buffer"
+        return
+    end
+    if not lsp.is_ready(cid) then
+        editor.status_message = "language server not ready"
+        return
+    end
+    local opts = {
+        tab_size = view.indent_width or view.tab_width or 4,
+        insert_spaces = view.expand_tab ~= false,
+    }
+    editor.status_message = "formatting…"
+    local id = lsp.request_format(cid, uri, opts, function(result, is_error)
+        if is_error then
+            editor.status_message = "format failed: server error"
+            return
+        end
+        if result == nil then
+            editor.status_message = "nothing to format"
+            return
+        end
+        local applied = buf:apply_lsp_edits(result)
+        if applied == 0 then
+            editor.status_message = "already formatted"
+            return
+        end
+        -- Post-bulk-mutation resync: same sequence as View:undo so the
+        -- cursors, wrap cache, and viewport stay consistent after the
+        -- piece table was mutated out from under them.
+        editor:request_full_damage()
+        view:clamp_cursor()
+        view:invalidate_wrap_cache()
+        local c = view:p()
+        local starts = view:_hl_line_starts()
+        local byte = (starts[c.line + 1] or 0) + c.col
+        view:_hl_cold_requery(byte)
+        -- Sync the (now-reformatted) text back to the server so its view
+        -- matches; the post_command_hook debounce doesn't fire for an
+        -- async callback, so push the didChange explicitly.
+        if buf.lsp_client_id ~= nil and buf.lsp_uri ~= nil then
+            local v = buf.lsp_version or 0
+            lsp.sync_change(buf.lsp_client_id, buf.lsp_uri, v, function()
+                return buf:write_text_direct()
+            end)
+        end
+        editor.status_message = ("formatted (%d edits)"):format(applied)
+    end)
+    if id == nil then
+        editor.status_message = "language server not ready"
+    end
+end
+
 commands.insert_file = function(view, editor)
     local filepath = editor.universal_args and editor.universal_args[2]
     editor:read_from_minibuffer({
