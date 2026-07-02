@@ -19,6 +19,7 @@ local kill_ring = require("cursed.kill_ring")
 local completers = require("cursed.completers")
 local keybind = require("cursed.keybind")
 local OverlayManager = require("cursed.overlay")
+local CompletionMenu = require("cursed.completion_menu")
 local log = require("cursed.log")
 local profile = require("cursed.profile")
 
@@ -334,6 +335,7 @@ end
 ---@field term Term
 ---@field status_message string|nil
 ---@field minibuffer Minibuffer
+---@field completion_menu CompletionMenu in-buffer completion popup (parallel to the minibuffer)
 ---@field _isearch_origin_line integer|nil saved cursor line before isearch
 ---@field _isearch_origin_col integer|nil saved cursor col before isearch
 ---@field _isearch_direction integer 1=forward, -1=backward
@@ -407,6 +409,7 @@ function Editor.new(term)
         term = term,
         status_message = nil,
         minibuffer = Minibuffer.new(),
+        completion_menu = nil, -- CompletionMenu singleton (set below)
         _isearch_origin_line = nil,
         _isearch_origin_col = nil,
         _isearch_direction = 1,
@@ -467,6 +470,12 @@ function Editor.new(term)
     for _, seg in ipairs(DEFAULT_MODELINE_SEGMENTS) do
         editor.modeline_segments[#editor.modeline_segments + 1] = seg
     end
+    -- In-buffer completion popup (parallel to the minibuffer). Default
+    -- source: buffer-word dabbrev, which dogfoods the whole loop
+    -- end-to-end without requiring LSP; swap via set_completer.
+    editor.completion_menu = CompletionMenu.new(editor)
+    editor.completion_menu:set_completer(completers.buffer_words(editor))
+    editor.completion_menu:setup()
     return editor
 end
 
@@ -2125,6 +2134,22 @@ function Editor:render()
                     )
                 end
             end
+        end
+    end
+    -- When the in-buffer completion popup is active it floats above the
+    -- cursor (flipping above when it won't fit below) and can cover rows
+    -- ABOVE the cursor that the cursor-derived damage region would leave
+    -- untouched. As the popup shrinks/moves/grows each keystroke those
+    -- rows must be repainted or the previous box (border + stale items)
+    -- persists as a ghost. Extend the damage region upward by the
+    -- popup's maximum possible height (max_visible items + 2 border
+    -- rows) so the whole region the popup can occupy is repainted
+    -- every frame while it's open.
+    if self.completion_menu and self.completion_menu.active then
+        local popup_h = self.completion_menu.max_visible + 2
+        local popup_top = cur_min_cursor_row - popup_h
+        if damage_start_row == nil or popup_top < damage_start_row then
+            damage_start_row = popup_top
         end
     end
     local line_count_changed = false

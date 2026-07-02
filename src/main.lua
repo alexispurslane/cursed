@@ -341,6 +341,22 @@ local function process_key(editor, view, trie, key_state, key_node, token, ev, p
         return key_state, key_node, nil
     end
 
+    -- In-buffer completion menu: when the popup is open, it gets first
+    -- crack at nav / accept / cancel keys (up/down/C-n/C-p/pgup/pgdn,
+    -- Tab/Enter to accept, Escape/C-g to close). Any other key falls
+    -- through to normal dispatch (and, being a non-edit command,
+    -- dismisses the menu via the post_command hook). A parallel
+    -- controller to the minibuffer's — does NOT touch the minibuffer.
+    log.info("main_process_key", "completion_menu_intercept", {
+        token = token,
+        active = editor.completion_menu and editor.completion_menu.active,
+    })
+    if editor.completion_menu and editor.completion_menu.active then
+        if editor.completion_menu:handle_key(editor, token) then
+            return key_state, key_node, nil
+        end
+    end
+
     -- M-digit / M-- prefix argument interception.
     -- alt-0..alt-9 accumulate digits; alt-- sets negative.
     -- These are intercepted before the trie so they don't conflict

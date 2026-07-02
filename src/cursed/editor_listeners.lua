@@ -197,15 +197,16 @@ function EditorListeners.setup(editor)
         buf._lsp_debounce_task = ed:schedule_after(DOCHANGE_DEBOUNCE_US, function()
             buf._lsp_debounce_task = nil
             if buf.lsp_client_id == nil then
-                return -- buffer closed while debounce was pending
+                return true -- one-shot
             end
             local v = buf.lsp_version
             if v <= lsp.doc_sent_version(cid, uri) then
-                return -- already synced (e.g. didOpen carried latest)
+                return true -- one-shot
             end
             lsp.sync_change(cid, uri, v, function()
                 return buf:write_text_direct()
             end)
+            return true -- one-shot
         end)
     end)
 

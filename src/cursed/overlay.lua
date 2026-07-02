@@ -43,6 +43,8 @@
 local OverlayManager = {}
 OverlayManager.__index = OverlayManager
 
+local log = require("cursed.log")
+
 --- Create the overlay manager. Stored on the editor as `editor.overlays`.
 ---@param editor Editor owning editor (for term + footer_rows + current_view)
 ---@return OverlayManager
@@ -187,6 +189,12 @@ end
 function OverlayManager:emit_render()
     local es = self._editor.event_system
     if es then
+        local n = 0
+        local listeners = es._handlers and es._handlers["render_overlay"]
+        if listeners then
+            n = #listeners
+        end
+        log.info("overlay", "emit_render", { listeners = n })
         es:emit("render_overlay", self._editor)
     end
 end

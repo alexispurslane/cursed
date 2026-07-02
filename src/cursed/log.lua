@@ -171,7 +171,19 @@ function Log.configure(opts)
             Log._output = nil
         end
         Log._output = io.open(opts.output, "a")
-        Log._output_path = opts.output
+        if Log._output == nil then
+            local fallback = "/tmp/cursed-" .. tostring(os.time()) .. ".log"
+            local out = io.open(fallback, "a")
+            io.stderr:write(("log: could not open %s; trying %s\n"):format(opts.output, fallback))
+            if out then
+                Log._output = out
+                Log._output_path = fallback
+                out:write('{"fallback":true}\n')
+                out:flush()
+            end
+        else
+            Log._output_path = opts.output
+        end
     end
 end
 

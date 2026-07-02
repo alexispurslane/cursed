@@ -196,6 +196,83 @@ function completers.kill_buffer(editor)
 end
 
 ----------------------------------------------------------------------------------------------------
+-- Buffer-word completion (in-buffer completion dogfood source)
+----------------------------------------------------------------------------------------------------
+
+--- Build a buffer-word (dabbrev-style) completer: scans ALL loaded
+--- views' buffers for `[%w_]+` tokens, keeps those that start with the
+--- cursor's current prefix (case-sensitive), excludes the exact prefix
+--- itself, dedups, preserves first-seen order, and caps the result so a
+--- huge file doesn't blow up the popup. Used by CompletionMenu as the
+--- default source — a cheap, dependency-free way to exercise the whole
+--- in-buffer completion loop end-to-end. An LSP completion provider can
+--- later plug in via `CompletionMenu:set_completer` without changes here.
+---
+--- The closure is editor-bound at creation; the per-query cost is an
+--- O(buffer) scan, which is fine for a debounced (120ms) completion.
+---@param editor Editor
+---@param opts table? { cap?: integer, min_token?: integer }
+---@return fun(ctx: table): table  items (strings)
+function completers.buffer_words(editor, opts)
+    opts = opts or {}
+    local cap = opts.cap or 200
+    local min_token = opts.min_token or 3
+    return function(ctx)
+        local prefix = ctx.prefix
+        if prefix == nil or #prefix < 1 then
+            return {}
+        end
+        local seen = {}
+        local results = {}
+        local function consider(token)
+            if #token < min_token then
+                return
+            end
+            if token:sub(1, #prefix) ~= prefix then
+                return
+            end
+            if token == prefix then
+                return
+            end
+            if seen[token] then
+                return
+            end
+            seen[token] = true
+            results[#results + 1] = token
+            if #results >= cap then
+                return true -- stop iteration
+            end
+            return false
+        end
+        -- Scan the active buffer first (most relevant), then the others.
+        local active = ctx.buf
+        local function scan_buf(buf)
+            local n = buf:line_count()
+            for li = 0, n - 1 do
+                local text = buf:line_text(li)
+                for tok in text:gmatch("[%w_]+") do
+                    if consider(tok) then
+                        return
+                    end
+                end
+            end
+        end
+        if active then
+            scan_buf(active)
+        end
+        for _, v in ipairs(editor.views) do
+            if v.buffer ~= active and v.buffer ~= nil then
+                scan_buf(v.buffer)
+                if #results >= cap then
+                    break
+                end
+            end
+        end
+        return results
+    end
+end
+
+----------------------------------------------------------------------------------------------------
 -- Yes/No/All completion (for query-replace)
 ----------------------------------------------------------------------------------------------------
 

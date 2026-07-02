@@ -23,20 +23,15 @@ so the agent can pick up context across sessions.
 
 ## Gotchas & Errors
 
-- (no output)
-- Clean build, boots without crashing, all three lanes start.
-- Let me trigger a kill via the lua file's `lsp_client` interaction is harder from CLI; instead let me test the **crash/EOF → dead** path by killing the spawned server process mid-run.
-- But INIT→READY→didOpen with the server staying alive definitively proves the yyjson swap fixed the crash.
-- 5s; previously it died at ~14ms from the malformed-JSON crash)
-
-Let me clean up the leftover test file and kill the stray server.
 - ## The bug you saw
-The modeline ✝ (dead) was the `lua-language-server` **crashing immediately after `didOpen`**.
 - Root cause: the hand-rolled `json_encode` had a broken string escaper — `v:gsub("\\", "\\")` was a no-op (replaced `\` with `\`) and `:gsub('"', "\\")` replaced `"` with a bare `\`.
 - c`** — a thin C shim that `#include`s the header and re-exports yyjson's `inline` getters/builders (which have no exported symbol, so LuaJIT FFI can't reach them directly) as real `shim_*` symbols.
+- Could not find edits[0] in src/cursed/commands.lua. The oldText must match exactly including all whitespace and newlines.
+- cursed: failed to initialize terminal: cursed.tb: tb_init failed (code -4) — Fix: So when the user ran in their terminal, it should be too, unless...
+- log` cannot be opened, so we'll get logs one way or another.
+- === render item counts (chronological) === — Fix: Let me actually look at the damage-tracking / repaint logic, because for a ghost to *persist* (not just flicker for 4ms), the old box's cells must not be getting repainted frame-to-frame.
+- Could not find the exact text in /Users/alexispurslane/Development/scratch/cursed/src/cursed/editor.lua. The old text must match exactly including all whitespace and newlines. — Fix: Let me re-apply the `_tick` fix there.
 
 ## Heavily Read
 
-- src/cursed/lsp_lane.lua (11 reads) — Now the lane handler. Let me find the dispatch switch.
-- src/cursed/editor_listeners.lua (4 reads) — No `sync_open` log at all! So `lsp.sync_open` is never called. The mode_enter li
-- src/cursed/lsp_client.lua (3 reads) — The server log shows a **JSON parse error**: `invalid escape char ')' in string
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/editor.lua (9 reads) — Found the root cause. In `tick_background_tasks`, when a deadline task fires, `d

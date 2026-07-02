@@ -26,6 +26,7 @@ local bit = require("bit")
 local ColorScheme = require("cursed.colorscheme")
 local tb = require("cursed.tb")
 local keybind = require("cursed.keybind")
+local log = require("cursed.log")
 
 ----------------------------------------------------------------------------------------------------
 -- Tunables
@@ -424,6 +425,7 @@ function WhichKey.setup(editor)
         if lay == nil then
             return
         end
+        log.info("whichkey", "render", { box_y = lay.box_y_top, w = lay.w })
         paint_popup(ov, lay)
     end)
 end
