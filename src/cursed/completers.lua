@@ -461,7 +461,13 @@ function completers.lsp(editor)
             local need_req
             if c.items == nil then
                 need_req = true -- first query for this client
-            elseif force or trig or changed_pos then
+            elseif force or changed_pos then
+                -- Note: `trig` alone does NOT force a request — it stays
+                -- true while the cursor sits after a trigger char, so
+                -- re-evaluating it on the response retick would re-send
+                -- forever. The request is driven by force (trigger
+                -- fast-path / M-/) or a real position change; `trig_char`
+                -- is consulted separately below only to set triggerKind.
                 need_req = true
             else
                 local prefix_changed = c.prefix == nil or prefix:sub(1, #c.prefix) ~= c.prefix
@@ -497,15 +503,14 @@ function completers.lsp(editor)
                 -- request_completion push to the lane's outbox_lsp FIFO,
                 -- so the lane ships didChange THEN completion.
                 local b = ctx.buf
+                local sent_v = (b ~= nil) and lsp().doc_sent_version(cid, uri) or -999
+                local cur_v = (b ~= nil and b.lsp_version) or -999
+                local will_flush = b ~= nil and cur_v ~= nil and sent_v < cur_v
                 if b ~= nil and b._lsp_debounce_task ~= nil then
                     editor:cancel_task(b._lsp_debounce_task)
                     b._lsp_debounce_task = nil
                 end
-                if
-                    b ~= nil
-                    and b.lsp_version ~= nil
-                    and lsp().doc_sent_version(cid, uri) < b.lsp_version
-                then
+                if will_flush then
                     local v = b.lsp_version
                     lsp().sync_change(cid, uri, v, function()
                         return b:write_text_direct()

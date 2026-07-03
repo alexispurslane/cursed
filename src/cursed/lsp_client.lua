@@ -620,6 +620,11 @@ function M.sync_change(client_id, uri, version, get_text)
     end
     local open = M._open_docs[client_id]
     if open == nil or open[uri] == nil then
+        log.info(
+            "lsp_sync",
+            "sync_change_skip_not_open",
+            { client_id = client_id, uri = uri, version = version }
+        )
         return -- not open yet; didOpen will carry latest text
     end
     local ptr, len = get_text()

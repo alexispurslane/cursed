@@ -379,7 +379,8 @@ function CompletionMenu:_tick(force)
     local on_trigger = false
     if not forced then
         local cm = self._completer
-        local set = (cm ~= nil and type(cm.trigger_chars) == "function") and cm.trigger_chars() or nil
+        local set = (cm ~= nil and type(cm.trigger_chars) == "function") and cm.trigger_chars()
+            or nil
         if set ~= nil then
             local ch = char_before_cursor(view)
             if ch ~= nil and set[ch] then
@@ -760,9 +761,12 @@ function CompletionMenu:_render(editor)
     if ctx == nil then
         return
     end
-    if #ctx.prefix < 1 then
-        return
-    end
+    -- NOTE: do NOT early-return on an empty prefix. After a trigger char
+    -- (e.g. `.`) the word prefix left of the cursor is "" by definition,
+    -- yet the server just returned context-sensitive MEMBERS and the box
+    -- must paint below the cursor. _tick owns open/close gating; _render
+    -- only paints whatever _tick decided to open. With an empty prefix
+    -- `word_start_col == col`, so the box anchors at the cursor.
     log.info("completion_menu", "render", {
         active = self.active,
         items = #self._items,
