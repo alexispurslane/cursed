@@ -798,7 +798,6 @@ commands.format = function(view, editor)
         -- Post-bulk-mutation resync: same sequence as View:undo so the
         -- cursors, wrap cache, and viewport stay consistent after the
         -- piece table was mutated out from under them.
-        editor:request_full_damage()
         view:clamp_cursor()
         view:invalidate_wrap_cache()
         local c = view:p()
@@ -1030,7 +1029,6 @@ commands.load_theme = function(view, editor)
             end
             if name then
                 ColorScheme.apply(name, truecolor)
-                editor:request_full_damage()
             end
         end,
         on_cancel = function()
@@ -1038,7 +1036,6 @@ commands.load_theme = function(view, editor)
             if saved_scheme ~= nil then
                 ColorScheme.active = saved_scheme
                 ColorScheme.generation = ColorScheme.generation + 1
-                editor:request_full_damage()
             end
         end,
         on_submit = function(input)
@@ -1050,7 +1047,6 @@ commands.load_theme = function(view, editor)
             end
             local scheme, status = ColorScheme.apply(input, truecolor)
             editor.status_message = status
-            editor:request_full_damage()
             log.info("commands", "theme switched", {
                 name = scheme.name,
                 setting = input,

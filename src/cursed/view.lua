@@ -215,9 +215,6 @@ function View:set_buffer(buf, opts)
         es:emit("view_attach_buffer", self, buf, old)
     end
     self.buffer = buf
-    if self.editor then
-        self.editor:request_full_damage()
-    end
     if es and not opts.silent then
         if opts.loaded then
             es:emit("buffer_open", buf, self)
@@ -2117,25 +2114,6 @@ function View:_hl_install_spans(
         end
     end
     self._hl_in_flight = nil
-
-    -- Newly-installed spans change the colors of any visible rows in the
-    -- installed bucket range. Damage tracking would otherwise skip
-    -- repainting them (cursor/viewport didn't move), leaving stale
-    -- plain-text on screen until the next keystroke. Force a full repaint
-    -- when the installed range intersects the current viewport.
-    if self.editor ~= nil then
-        local vvstart = self._hl_last_vstart
-        local vvend = self._hl_last_vend
-        if vvstart ~= nil and vvend ~= nil then
-            local a = bucket_of(vvstart)
-            local b = bucket_of(math.max(vvend - 1, vvstart))
-            if not (bucket_end <= a or bucket_start > b) then
-                self.editor:request_full_damage()
-            end
-        else
-            self.editor:request_full_damage()
-        end
-    end
 
     -- Lane responded successfully within its own async time → it's
     -- healthy. Reset the sync-wait circuit breaker so the zero-flash
@@ -5319,9 +5297,6 @@ function View:scroll_to_cursor(height, force)
     end
     self._scroll_guard_line = c.line
     self._scroll_guard_col = c.col
-    if self.editor then
-        self.editor:request_full_damage()
-    end
 
     local text_rows = height - 1
     local margin = text_rows - 1
@@ -5378,9 +5353,6 @@ end
 ---@param text_rows integer visible text-row count (for clamping)
 function View:scroll_viewport(delta, text_rows)
     self:scroll_anchor(delta)
-    if self.editor then
-        self.editor:request_full_damage()
-    end
 end
 
 --- Page the viewport (no cursor movement). `page_size` is the number of
@@ -5438,9 +5410,6 @@ function View:recenter(height)
     end
 
     self._recenter_state = (state + 1) % 3
-    if self.editor then
-        self.editor:request_full_damage()
-    end
 
     -- Clamp to EOF.
     self:clamp_anchor_to_eof(text_rows)
@@ -5453,9 +5422,6 @@ end
 function View:undo()
     if not self.buffer:undo() then
         return false
-    end
-    if self.editor then
-        self.editor:request_full_damage()
     end
     self:clamp_cursor()
     -- Undo swaps buffer content wholesale; the cached spans (and the
@@ -5477,9 +5443,6 @@ end
 function View:redo()
     if not self.buffer:redo() then
         return false
-    end
-    if self.editor then
-        self.editor:request_full_damage()
     end
     self:clamp_cursor()
     -- See View:undo: the wrap cache staleness guard is invariant under

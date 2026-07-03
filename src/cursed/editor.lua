@@ -378,17 +378,6 @@ end
 ---@field _command_before_this string|nil the command before the most recent one (Emacs `command-before-this`)
 ---@field _last_complex_command { name: string, universal_args: table }|nil most recent command invoked with universal args (for repeat-complex-command)
 ---@field _exit_code integer exit code surfaced by async tasks
----@field _damage_start_row integer|nil 0 = full screen, nil = derive from cursor, >0 = repaint from this row down
----@field _last_min_cursor_row integer|nil smallest cursor/anchor screen row of the previous render
----@field _last_active_line integer|nil logical line that held the primary cursor at the previous render (drives active-line damage extent)
----@field _last_w integer|nil terminal width observed at last render
----@field _last_h integer|nil terminal height observed at last render
----@field _last_footer_rows integer|nil footer rows observed at last render
----@field _last_palette boolean|nil palette (M-x) active at last render
----@field _last_scroll_li integer|nil anchor line of current view at last render
----@field _last_scroll_sub_row integer|nil anchor sub-row of current view at last render
----@field _last_line_count integer|nil line count of current view at last render
----@field _last_file_loaded boolean|nil file_loaded state of current view at last render
 ---@field _whichkey_node keybind.Trie|nil current trie node while a chord prefix is active (drives the which-key hint)
 ---@field _whichkey_prefix string|nil formatted chord-so-far (e.g. "C-x") while a chord prefix is active
 ---@field _whichkey_page integer which-key hint popup page index (0-based; reset when the prefix node changes)
@@ -449,17 +438,6 @@ function Editor.new(term)
         _extend = false, -- true while a `*_select` command runs (suppressed transient-anchor drop)
         _command_before_this = nil, -- command before the most recent
         _last_complex_command = nil, -- most recent command-with-args, for repeat-complex-command
-        _damage_start_row = 0, -- full damage on first render
-        _last_min_cursor_row = nil,
-        _last_active_line = nil,
-        _last_w = nil,
-        _last_h = nil,
-        _last_footer_rows = nil,
-        _last_palette = nil,
-        _last_scroll_li = nil,
-        _last_scroll_sub_row = nil,
-        _last_line_count = nil,
-        _last_file_loaded = nil,
         _whichkey_node = nil,
         _whichkey_prefix = nil,
         _whichkey_page = 0,
@@ -484,70 +462,6 @@ end
 function Editor:request_quit()
     self._quit_requested = true
     self._wake_main()
-end
-
-----------------------------------------------------------------------------------------------------
--- Damage tracking / partial rerender (#4)
-----------------------------------------------------------------------------------------------------
-
---- Request a full-screen repaint on the next render. Used by viewport
--- changes (scroll, resize, view switch, theme change) where partial
--- damage from the cursor down would leave stale content above.
-function Editor:request_full_damage()
-    self._damage_start_row = 0
-end
-
---- Compute the screen row of a buffer position relative to the current
--- viewport. Helper for `_min_cursor_screen_row`; kept at module level
--- so it JIT-compiles instead of allocating a closure per render.
----@param view View
----@param line integer
----@param col integer
----@return integer row
-local function cursor_screen_row(view, line, col)
-    local sub_row, _ = view:wrap_sub_position(line, col)
-    return view:viewport_row_for_line(line, sub_row)
-end
-
---- Compute the topmost viewport row that may contain visual state
--- (cursor, selection anchor, or pending drop). Rendering from this row
--- downward covers cursor moves, selection changes, blink toggles, and
--- drop markers; the caller combines it with the previous frame's value
--- so the old cursor/selection cells are also erased.
----@return integer viewport row (0-based); 0 if derrived value is negative
-function Editor:_min_cursor_screen_row()
-    local mcsr_t0 = profile.now_us()
-    local view = self:current_view()
-    if view == nil or view.buffer:line_count() == 0 then
-        return 0
-    end
-    local min_row ---@type integer|nil
-    for _, c in ipairs(view.cursors) do
-        local row = cursor_screen_row(view, c.line, c.col)
-        if min_row == nil or row < min_row then
-            min_row = row
-        end
-        if c.anchor_line then
-            row = cursor_screen_row(view, c.anchor_line, c.anchor_col)
-            if row < min_row then
-                min_row = row
-            end
-        end
-    end
-    for _, c in ipairs(view.pending_cursors) do
-        local row = cursor_screen_row(view, c.line, c.col)
-        if min_row == nil or row < min_row then
-            min_row = row
-        end
-    end
-    if min_row == nil then
-        return 0
-    end
-    if min_row < 0 then
-        return 0
-    end
-    profile.span("editor", "_min_cursor_screen_row", mcsr_t0)
-    return min_row
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -893,9 +807,6 @@ function Editor:set_active_view(idx)
     self.active_view = idx
     self:rebuild_active_trie()
     self:_emit_focus_change(old_view, self:current_view())
-    if old_view ~= self:current_view() then
-        self:request_full_damage()
-    end
 end
 
 --- Get the active view.
@@ -2095,106 +2006,18 @@ function Editor:render()
         ov:put_float(x, y, text, fg, bg)
     end
 
-    -- Damage tracking (#4): decide the first viewport row that needs
-    -- repainting. 0 = full screen; nil = derive from cursor/anchors;
-    -- >0 = only from this row down. Full damage is forced when terminal
-    -- size, footer geometry, palette state, scroll offset, or document
-    -- line count changed since the last render.
     local footer_rows = self:footer_rows()
-    local palette_active = mb and mb.palette or false
-    local cur_min_cursor_row = self:_min_cursor_screen_row()
-    local damage_start_row = self._damage_start_row
-    if damage_start_row == nil then
-        if self._last_min_cursor_row ~= nil then
-            damage_start_row = math.min(cur_min_cursor_row, self._last_min_cursor_row)
-        else
-            damage_start_row = cur_min_cursor_row
-        end
-        -- The active-line tint is painted across EVERY sub-row of the
-        -- active logical line (a wrapped line can span many screen
-        -- rows). `min(cur, last)` only guarantees the old cursor *cell*
-        -- is repainted; it does NOT cover the rest of the previously-
-        -- active line's sub-rows (which sit ABOVE the cursor when the
-        -- cursor was on a wrapped continuation row) nor the top of the
-        -- newly-active line when the cursor landed on a continuation
-        -- row. Without extending the damage to the tops of both the
-        -- previous and current active lines, those rows keep a stale
-        -- tint / stale cursor glyph — the "stuck cursor on the first
-        -- character after moving down" bug right after opening a file
-        -- whose first line wraps.
-        if view and view.file_loaded then
-            local cur_active = view:p().line
-            if cur_active ~= nil then
-                damage_start_row =
-                    math.min(damage_start_row, cursor_screen_row(view, cur_active, 0))
-                if self._last_active_line ~= nil and self._last_active_line ~= cur_active then
-                    damage_start_row = math.min(
-                        damage_start_row,
-                        cursor_screen_row(view, self._last_active_line, 0)
-                    )
-                end
-            end
-        end
-    end
-    -- When the in-buffer completion popup is active it floats above the
-    -- cursor (flipping above when it won't fit below) and can cover rows
-    -- ABOVE the cursor that the cursor-derived damage region would leave
-    -- untouched. As the popup shrinks/moves/grows each keystroke those
-    -- rows must be repainted or the previous box (border + stale items)
-    -- persists as a ghost. Extend the damage region upward by the
-    -- popup's maximum possible height (max_visible items + 2 border
-    -- rows) so the whole region the popup can occupy is repainted
-    -- every frame while it's open.
-    if self.completion_menu and self.completion_menu.active then
-        local popup_h = self.completion_menu.max_visible + 2
-        local popup_top = cur_min_cursor_row - popup_h
-        if damage_start_row == nil or popup_top < damage_start_row then
-            damage_start_row = popup_top
-        end
-    end
-    local line_count_changed = false
-    if view then
-        local cur_lc = view.buffer:line_count()
-        line_count_changed = self._last_line_count ~= nil and cur_lc ~= self._last_line_count
-    end
-    local file_loaded_changed = view ~= nil and self._last_file_loaded ~= view.file_loaded
-    if
-        self._last_w ~= nil
-        and (
-            w ~= self._last_w
-            or h ~= self._last_h
-            or footer_rows ~= self._last_footer_rows
-            or palette_active ~= self._last_palette
-            or line_count_changed
-            or file_loaded_changed
-            or (
-                view
-                and (
-                    view.scroll_li ~= self._last_scroll_li
-                    or view.scroll_sub_row ~= self._last_scroll_sub_row
-                )
-            )
-        )
-    then
-        damage_start_row = 0
-    end
-    if damage_start_row < 0 then
-        damage_start_row = 0
-    end
 
-    -- When the palette is open, the focus backdrop tints the whole
-    -- buffer region — including empty rows below the last line — so
-    -- clear with the black-blended bg instead of bright default_bg.
+    -- Clear the backbuffer every frame (full repaint). The palette focus
+    -- backdrop tints the whole buffer region — including empty rows below
+    -- the last line — so use the black-blended bg instead of the bright
+    -- default_bg when it's open.
     do
         local clear_bg = ui("default_bg")
         if mb and mb.palette then
             clear_bg = blend(clear_bg, 0x000000, 195)
         end
-        -- Full damage: clear the backbuffer. Partial damage: leave rows
-        -- above damage_start_row untouched from the previous frame.
-        if damage_start_row == 0 then
-            term:clear(ui("default_fg"), clear_bg)
-        end
+        term:clear(ui("default_fg"), clear_bg)
     end
     -- The hardware terminal caret is always hidden; the caret is drawn
     -- as a reverse-video cell (toggled on/off by the blink timer)
@@ -2285,29 +2108,6 @@ function Editor:render()
         end
     end
 
-    --- Persist the render damage state for next frame.
-    ---@param cur_min_cursor_row integer
-    function Editor:_finish_damage_state(
-        cur_min_cursor_row,
-        w,
-        h,
-        footer_rows,
-        palette_active,
-        view
-    )
-        self._last_min_cursor_row = cur_min_cursor_row
-        self._last_w = w
-        self._last_h = h
-        self._last_footer_rows = footer_rows
-        self._last_palette = palette_active
-        self._last_scroll_li = view and view.scroll_li or nil
-        self._last_scroll_sub_row = view and view.scroll_sub_row or nil
-        self._last_line_count = view and view.buffer:line_count() or nil
-        self._last_file_loaded = view and view.file_loaded or nil
-        self._last_active_line = (view and view.file_loaded) and view:p().line or nil
-        self._damage_start_row = nil
-    end
-
     if not view or not view.file_loaded then
         local msg = "Loading..."
         local x = math.floor(w / 2) - math.floor(#msg / 2)
@@ -2315,7 +2115,6 @@ function Editor:render()
         fp(x, y, msg, ui("default_fg"), ui("default_bg"))
         ov:emit_render()
         ov:flush()
-        self:_finish_damage_state(cur_min_cursor_row, w, h, footer_rows, palette_active, view)
         profile.span("editor", "render_total", render_t0)
         term:present()
         return
@@ -2330,7 +2129,6 @@ function Editor:render()
     local gutter_width, text_x, text_width, block_x, block_w = view:text_geometry(w)
     local avail_text = w - gutter_width
     if avail_text <= 0 then
-        self:_finish_damage_state(cur_min_cursor_row, w, h, footer_rows, palette_active, view)
         profile.span("editor", "render_total", render_t0)
         term:present()
         return
@@ -2398,29 +2196,11 @@ function Editor:render()
     local rows_t0 = profile.now_us()
     local t_strip, t_wraprows, t_subruns, t_paint, t_body = 0, 0, 0, 0, 0
     local sub_count = 0
-    -- Seed at the anchor and walk forward `damage_start_row` rows so the
-    -- partial-rerender path starts at the right (li, sub). These walked
-    -- rows are screen rows 0..(damage_start_row-1) which are UNCHANGED by
-    -- this partial redraw and must be preserved — so drawing resumes at
-    -- screen row `walked`, NOT row 0. (Drawing at row 0 here would paint
-    -- the cursor's line at the top of the screen, making it look like the
-    -- viewport snapped the cursor to the top — the bug this fixes.)
+    -- Always redraw the whole viewport: start at the scroll anchor and
+    -- paint every sub-row down to the bottom.
     local li = view.scroll_li or 0
     local sub_row = view.scroll_sub_row or 0
-    local remaining = damage_start_row
-    while remaining > 0 and li < line_count do
-        local rows = view:wrap_rows(li) or 1
-        local avail = rows - 1 - sub_row
-        if remaining <= avail then
-            sub_row = sub_row + remaining
-            remaining = 0
-        else
-            remaining = remaining - avail - 1
-            li = li + 1
-            sub_row = 0
-        end
-    end
-    local row = damage_start_row - remaining
+    local row = 0
     _ = vstart_li -- (kept for future diagnostics)
     while row <= max_y and li < line_count do
         local a = profile.now_us()
@@ -2766,7 +2546,6 @@ function Editor:render()
 
     ov:emit_render()
     ov:flush()
-    self:_finish_damage_state(cur_min_cursor_row, w, h, footer_rows, palette_active, view)
     profile.span("editor", "render_total", render_t0)
     term:present()
 end
