@@ -116,6 +116,13 @@ local CONCEPT_SLOTS = {
     drop_bg = 0x0A, -- base0A: yellow bg for staged drop markers
     status_message = 0x0B, -- base0B: green informational messages
     status_error = 0x08, -- base08: red error messages
+    -- Diagnostics (squiggly underlines): red errors, orange warnings,
+    -- blue info, dim hints. These are the underline COLORS — independent
+    -- of the text color underneath — used by OverlayManager:put_underline.
+    diagnostic_error = 0x08, -- base08: red
+    diagnostic_warn = 0x09, -- base09: orange
+    diagnostic_info = 0x0D, -- base0D: blue
+    diagnostic_hint = 0x03, -- base03: dim
     -- Modern chrome accents (palette-driven; each maps to a base slot).
     -- active_line_bg tints the row under the primary cursor so the
     -- user's eye lands on it — the single biggest "modern editor"

@@ -40,6 +40,7 @@
 ---@field _view table|nil frame snapshot, set by begin_frame
 ---@field _file table[] file-anchored queue: {line, col, text, fg, bg}
 ---@field _float table[] floating queue: {sx, sy, text, fg, bg}
+---@field _underline table[] file-anchored squiggle queue: {line, s_col, e_col, rgb}
 local OverlayManager = {}
 OverlayManager.__index = OverlayManager
 
@@ -55,6 +56,7 @@ local function new(editor)
         _view = nil, -- frame snapshot, set by begin_frame
         _file = {}, -- file-anchored queue: {line, col, text, fg, bg}
         _float = {}, -- floating queue: {sx, sy, text, fg, bg}
+        _underline = {}, -- file-anchored squiggles: {line, s_col, e_col, rgb}
     }, OverlayManager)
 end
 
@@ -161,6 +163,7 @@ function OverlayManager:begin_frame(view)
     self._view = view
     self._file = {}
     self._float = {}
+    self._underline = {}
 end
 
 --- Register a file-anchored overlay. Resolved to screen at flush; if the
@@ -184,6 +187,27 @@ function OverlayManager:put_float(sx, sy, text, fg, bg)
     self._float[#self._float + 1] = { sx = sx, sy = sy, text = text, fg = fg, bg = bg }
 end
 
+--- Register a file-anchored squiggly underline spanning the byte range
+--- [s_col, e_col) on `line`. `s_col`/`e_col` are 0-based byte offsets
+--- within the line (the buffer's native addressing, matching what LSP
+--- diagnostics report). Painted in `flush` by OR-ing a curly-underline
+--- attribute into each screen cell the range resolves to, leaving the
+--- underlying glyphs + colors intact. Ranges that span wrap sub-rows are
+--- segmented per sub-row; off-screen anchors are skipped.
+---
+--- `rgb` is a 0xRRGGBB truecolor int for the squiggle (use a resolved
+--- `diagnostic_error`/`_warn`/`_info`/`_hint` color).
+---@param line integer 0-based logical line index
+---@param s_col integer 0-based byte offset of the range start (inclusive)
+---@param e_col integer 0-based byte offset of the range end (exclusive)
+---@param rgb integer 0xRRGGBB squiggle color
+function OverlayManager:put_underline(line, s_col, e_col, rgb)
+    if e_col <= s_col then
+        return
+    end
+    self._underline[#self._underline + 1] = { line = line, s_col = s_col, e_col = e_col, rgb = rgb }
+end
+
 --- Fire the `render_overlay` event so extensions register overlays for
 --- this frame. The editor hub delivers the editor to each listener.
 function OverlayManager:emit_render()
@@ -199,12 +223,15 @@ function OverlayManager:emit_render()
     end
 end
 
---- Paint all registered overlays: file-anchored first (resolved via
---- file_to_screen, off-screen anchors skipped) so they sit on the buffer
---- text, then floats in registration order so later registrations overdraw
+--- Paint all registered overlays: file-anchored squiggles first (OR'd
+--- into the just-painted text cells), then file-anchored text overlays,
+--- then floats in registration order so later registrations overdraw
 --- earlier ones. Clears the queues.
 function OverlayManager:flush()
     local term = self._term
+    for _, u in ipairs(self._underline) do
+        self:_paint_underline(u)
+    end
     for _, o in ipairs(self._file) do
         local sx, sy = self:file_to_screen(o.line, o.col)
         if sx ~= nil and sy ~= nil then
@@ -216,6 +243,49 @@ function OverlayManager:flush()
     end
     self._file = {}
     self._float = {}
+    self._underline = {}
+end
+
+--- Resolve a single `put_underline` entry to screen cells and OR the
+--- squiggle attribute into each, segmenting across wrap sub-rows. Skips
+--- anchors scrolled out of view, lines past the document, and cells
+--- outside the buffer area. Reads view geometry exactly as the renderer,
+--- so the squiggle tracks the glyph it sits under as you scroll.
+---@param u table {line, s_col, e_col, rgb}
+function OverlayManager:_paint_underline(u)
+    local view = self:_v()
+    if not view then
+        return
+    end
+    local g = self:_geom()
+    if not g then
+        return
+    end
+    local line = u.line
+    if line < 0 or line >= view:line_count() then
+        return
+    end
+    local s_sub, s_scol = view:wrap_sub_position(line, u.s_col)
+    local e_sub, e_scol = view:wrap_sub_position(line, u.e_col)
+    -- Wrap width per sub-row; in no-wrap mode the whole line is one sub-row
+    -- so any value works as the upper column bound.
+    local row_w = view.wrap_width or g.w
+    local term = self._term
+    for sub = s_sub, e_sub do
+        local col_lo = (sub == s_sub) and s_scol or 0
+        local col_hi = (sub == e_sub) and e_scol or row_w
+        if col_hi > col_lo then
+            local sy = view:viewport_row_for_line(line, sub)
+            if sy >= 0 and sy <= g.max_y then
+                for col = col_lo, col_hi - 1 do
+                    local sx = g.text_x + col
+                    if sx >= 0 and sx < g.w then
+                        term:squiggle_cell(sx, sy, u.rgb)
+                    end
+                end
+            end
+        end
+    end
 end
 
 OverlayManager.new = new

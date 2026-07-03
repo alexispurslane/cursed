@@ -55,6 +55,7 @@ int tb_hide_cursor(void);
 
 int tb_set_cell(int x, int y, uint32_t ch, uintattr_t fg, uintattr_t bg);
 int tb_extend_cell(int x, int y, uint32_t ch);
+int tb_squiggle_cell(int x, int y, uint32_t rgb);
 
 /* ── Input / Output modes ───────────────────────────────────────────── */
 

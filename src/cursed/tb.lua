@@ -137,6 +137,19 @@ local underline_2 = 0x0000000200000000
 local overline = 0x0000000400000000
 local invisible = 0x0000000800000000
 
+-- Curly (wavy) underline + independent underline color (64-bit only).
+-- These live above the standard style block (which tops out at bit 35)
+-- in the otherwise-unused region of the 64-bit fg attribute.
+-- The underline color itself is packed into fg bits 40-63
+-- (0xRRGGBB << 40) and is only ever assembled in C (tb_squiggle_cell),
+-- because LuaJIT's `bit` library is 32-bit and can't shift/OR into
+-- this range from Lua. The constants are exported for reference /
+-- LLS only; overlay callers pass a plain 0xRRGGBB int to
+-- `Term:squiggle_cell`.
+local underline_curly = 0x0000001000000000
+local underline_color_flag = 0x0000002000000000
+local underline_color_shift = 40
+
 ----------------------------------------------------------------------------------------------------
 -- Constants — input modes
 ----------------------------------------------------------------------------------------------------
@@ -283,6 +296,21 @@ end
 ---@param bg integer
 function Term:set_cell(x, y, ch, fg, bg)
     c_api.tb_set_cell(x, y, ch, fg, bg)
+end
+
+--- Draw a curly (wavy) underline in `rgb` under the glyph already painted
+--- at (x, y), keeping the glyph + its foreground/background colors intact.
+--- Used by the overlay layer for diagnostics. Leaves a true squiggle on
+--- modern terminals (kitty/wezterm/ghostty/iTerm2/recent alacritty);
+--- terminals without curly support render nothing for the style.
+---
+--- Must be called AFTER the text layer paints this cell and BEFORE
+--- `:present()`, since it reads + writes the back buffer.
+---@param x integer screen column
+---@param y integer screen row
+---@param rgb integer 0xRRGGBB truecolor int (the squiggle color)
+function Term:squiggle_cell(x, y, rgb)
+    c_api.tb_squiggle_cell(x, y, rgb)
 end
 
 --- Print a string at the given position.
@@ -490,6 +518,10 @@ return {
     underline_2 = underline_2,
     overline = overline,
     invisible = invisible,
+    -- Curly underline + underline color (64-bit only; see tb_squiggle_cell)
+    underline_curly = underline_curly,
+    underline_color_flag = underline_color_flag,
+    underline_color_shift = underline_color_shift,
     -- Input modes
     input_esc = input_esc,
     input_alt = input_alt,

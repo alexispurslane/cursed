@@ -13,6 +13,7 @@
 
 local log = require("cursed.log")
 local lsp = require("cursed.lsp_client")
+local ColorScheme = require("cursed.colorscheme")
 
 local EditorListeners = {}
 
@@ -223,6 +224,70 @@ function EditorListeners.setup(editor)
         buf.lsp_uri = nil
         buf.lsp_language_id = nil
         buf._lsp_debounce_task = nil
+    end)
+
+    -- Squiggle DEMO (no LSP data source yet): when
+    -- `editor._squiggle_demo` is on (toggle via M-x toggle_squiggle_demo),
+    -- squiggle the primary cursor's current word in diagnostic_error
+    -- red. Validates the full pipeline — patched termbox2 curly underline
+    -- + underline color, the overlay `put_underline` range op resolving
+    -- byte offsets to screen cells, and file-anchored tracking through
+    -- scroll/wrap/edit — before wiring real diagnostics.
+    es:on("render_overlay", function(ed)
+        if not ed._squiggle_demo then
+            return
+        end
+        local ov = ed.overlays
+        if ov == nil then
+            return
+        end
+        local view = ed:current_view()
+        if not view or not view.file_loaded then
+            return
+        end
+        local c = view.cursors and view.cursors[1]
+        if c == nil then
+            return
+        end
+        local buf = view.buffer
+        if buf == nil then
+            return
+        end
+        local line = c.line
+        local len = view:content_len(line)
+        if len <= 0 then
+            return
+        end
+        local text = buf:line_text(line)
+        -- byte-based identifier expansion around the cursor (1-based).
+        local function ident(b)
+            return b ~= nil
+                and (
+                    (b >= 65 and b <= 90)
+                    or (b >= 97 and b <= 122)
+                    or (b >= 48 and b <= 57)
+                    or b == 95
+                )
+        end
+        local pos = c.col + 1
+        if pos > len then
+            pos = len
+        end
+        if not ident(text:byte(pos)) then
+            return -- cursor not on a word char: nothing to squiggle
+        end
+        local lo = pos
+        while lo > 1 and ident(text:byte(lo - 1)) do
+            lo = lo - 1
+        end
+        local hi = pos
+        while hi < len and ident(text:byte(hi + 1)) do
+            hi = hi + 1
+        end
+        local scheme = ColorScheme.active
+        local rgb = scheme and scheme:color("diagnostic_error") or 0xFF5353
+        -- put_underline takes 0-based byte offsets, range [s, e).
+        ov:put_underline(line, lo - 1, hi, rgb)
     end)
 end
 

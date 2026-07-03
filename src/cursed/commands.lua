@@ -3373,4 +3373,21 @@ function commands.names()
     end
 end
 
+----------------------------------------------------------------------------------------------------
+-- Demo: toggle a squiggly-underline overlay under the primary
+-- cursor's current word. Validates that file-anchored overlays track
+-- the glyph through scroll/wrap/edit (no LSP data source yet). Invoke
+-- via M-x toggle_squiggle_demo; the actual painting is a render_overlay
+-- listener registered in editor_listeners (asks the overlay layer to
+-- squiggle the current word in diagnostic_error red).
+----------------------------------------------------------------------------------------------------
+commands.toggle_squiggle_demo = function(_view, editor)
+    editor._squiggle_demo = not editor._squiggle_demo
+    if editor._squiggle_demo then
+        editor.status_message = "squiggle demo ON — move the cursor"
+    else
+        editor.status_message = "squiggle demo off"
+    end
+end
+
 return commands

@@ -23,16 +23,16 @@ so the agent can pick up context across sessions.
 
 ## Gotchas & Errors
 
-- Found 2 occurrences of the text in /Users/alexispurslane/Development/scratch/cursed/src/cursed/completers.lua. The text must be unique. Please provide more context to make it uniqu
-- ` fails before `super()` but works after
 - TypeScript has a hard rule: in a derived-class constructor body, **before the `super()` call**, `this` is uninitialized — you cannot reference `this`, return, or access instance state there.
 - Could not find edits[4] in src/cursed/view.lua. The oldText must match exactly including all whitespace and newlines.
 - Could not find edits[3] in src/cursed/view.lua. The oldText must match exactly including all whitespace and newlines.
 - === request_full_damage refs ===
 - (no output)
 - The earlier multi-edit failed atomically, so edits 1,2,3,5,6,7 didn't apply.
+- Command exited with code 1 — Fix: The key result: **before** the fix, line 45 serialized as `super(message);        ` (no newline split); **after**, it correctly splits.
+- === DIFF after Enter at end of line 45 === — Fix: Let me verify the `993a995` EOF blank is pre-existing (not from my fix) and check cursor behavior:
 
 ## Heavily Read
 
-- src/cursed/editor.lua (12 reads) — Let me read the damage tracking code and render method:
-- src/cursed/view.lua (4 reads) — Now let me read the context around each call site in view.lua and commands.lua:
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/buffer.lua (4 reads) — The log is revealing! `after_len: 23` and `after_text: "        super(message);"
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/view.lua (8 reads) — The bare buffer call is correct, so the editor's surrounding machinery (hooks, h

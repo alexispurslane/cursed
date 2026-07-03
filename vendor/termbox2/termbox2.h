@@ -298,6 +298,19 @@ extern "C" {
 #define TB_UNDERLINE_2 0x0000000200000000
 #define TB_OVERLINE    0x0000000400000000
 #define TB_INVISIBLE   0x0000000800000000
+/* Curly (wavy) underline + independent underline color.
+ *
+ * Modern terminals (kitty, wezterm, ghostty, iTerm2, recent alacritty)
+ * render a true wavy line under the cell's glyph in the given color,
+ * leaving the glyph + its foreground color intact — ideal for
+ * diagnostics. The underline color is stored in fg bits 40-63
+ * (0xRRGGBB << TB_UNDERLINE_COLOR_SHIFT); TB_UNDERLINE_COLOR is the
+ * "has underline color" flag. Both are reset by SGR 0 (sgr0), which
+ * send_attr already emits before re-applying attrs. */
+#define TB_UNDERLINE_CURLY       0x0000001000000000
+#define TB_UNDERLINE_COLOR       0x0000002000000000
+#define TB_UNDERLINE_COLOR_SHIFT 40
+#define TB_UNDERLINE_COLOR_MASK  0xffffff0000000000
 #endif
 
 /* Event types (`tb_event.type`) */
@@ -515,6 +528,20 @@ int tb_set_cell(int x, int y, uint32_t ch, uintattr_t fg, uintattr_t bg);
 int tb_set_cell_ex(int x, int y, uint32_t *ch, size_t nch, uintattr_t fg,
     uintattr_t bg);
 int tb_extend_cell(int x, int y, uint32_t ch);
+
+/* OR a curly underline + underline-color attribute into an existing
+ * back-buffer cell's foreground, leaving glyph + background intact.
+ *
+ * Used by overlays (diagnostics / flymake) to add a squiggly underline
+ * to already-painted text without overwriting the glyph. Reads from the
+ * back buffer (updated immediately by tb_set_cell / tb_print) and writes
+ * back via tb_set_cell, so callers must invoke this AFTER the text layer
+ * paints and BEFORE tb_present().
+ *
+ * `rgb` is a 0xRRGGBB truecolor int (24-bit). The function packs it into
+ * the fg high bits (see TB_UNDERLINE_COLOR_SHIFT) — doing the 64-bit OR
+ * in C avoids LuaJIT's 32-bit `bit` library limit. */
+int tb_squiggle_cell(int x, int y, uint32_t rgb);
 
 /* Return a pointer to the cell at the specified position.
  *
@@ -2535,6 +2562,17 @@ int tb_get_cell(int x, int y, int back, struct tb_cell **cell) {
     return cellbuf_get(back ? &global.back : &global.front, x, y, cell);
 }
 
+int tb_squiggle_cell(int x, int y, uint32_t rgb) {
+    if_not_init_return();
+    int rv;
+    struct tb_cell *cell;
+    if_err_return(rv, cellbuf_get(&global.back, x, y, &cell));
+    uintattr_t attr =
+        TB_UNDERLINE_CURLY | TB_UNDERLINE_COLOR |
+        ((uintattr_t)(rgb & 0xffffff) << TB_UNDERLINE_COLOR_SHIFT);
+    return tb_set_cell(x, y, cell->ch, cell->fg | attr, cell->bg);
+}
+
 int tb_extend_cell(int x, int y, uint32_t ch) {
     if_not_init_return();
 #ifdef TB_OPT_EGC
@@ -4054,6 +4092,29 @@ static int send_attr(uintattr_t fg, uintattr_t bg) {
     if (fg & TB_INVISIBLE)
         if_err_return(rv,
             bytebuf_puts(&global.out, global.caps[TB_CAP_INVISIBLE]));
+
+    /* Curly (wavy) underline. Emitted AFTER a plain TB_UNDERLINE (if any):
+     * SGR 4:3 overrides SGR 4, so the last one wins — callers may set
+     * either bit and get the intended style. On terminals without curly
+     * support, SGR 4:3 is ignored and a plain underline (if TB_UNDERLINE
+     * was also set) remains; otherwise none is drawn. */
+    if (fg & TB_UNDERLINE_CURLY)
+        if_err_return(rv, bytebuf_puts(&global.out, "\x1b[4:3m"));
+
+    /* Independent underline color (separate from the glyph's fg). SGR
+     * 58:2:: sets a truecolor underline; sgr0 resets it. */
+    if (fg & TB_UNDERLINE_COLOR) {
+        uint32_t uc =
+            (uint32_t)((fg >> TB_UNDERLINE_COLOR_SHIFT) & 0xffffff);
+        char nbuf[32];
+        send_literal(rv, "\x1b[58:2::");
+        send_num(rv, nbuf, (uc >> 16) & 0xff);
+        send_literal(rv, ":");
+        send_num(rv, nbuf, (uc >> 8) & 0xff);
+        send_literal(rv, ":");
+        send_num(rv, nbuf, uc & 0xff);
+        send_literal(rv, "m");
+    }
 #endif
 
     if ((fg & TB_REVERSE) || (bg & TB_REVERSE))
