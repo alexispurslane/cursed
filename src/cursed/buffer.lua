@@ -745,6 +745,17 @@ function Buffer:split_line(line_idx, pos)
     self:shift_lines_right(line_idx + 1, count, 1)
     b.count = count + 1
 
+    -- Re-fetch `line` AFTER grow_lines: grow_lines may realloc the
+    -- `b.lines` array (moving every struct Line to a new address), so
+    -- the reference captured at the top of this function would dangle.
+    -- Writes through `line.pieces[i]` happened to survive because the
+    -- pieces array is a separate allocation whose pointer is copied
+    -- into the new Line struct, but writes to `line.count` / `line.cap`
+    -- / `line.pieces` (the struct fields themselves) were silently lost —
+    -- leaving a line whose pieces were split but whose `count` never
+    -- advanced, so line_len/line_text excluded the trailing newline.
+    line = b.lines[line_idx]
+
     b.lines[line_idx + 1].pieces = nil
     b.lines[line_idx + 1].cap = 0
     b.lines[line_idx + 1].count = 0
