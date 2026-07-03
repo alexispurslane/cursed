@@ -1640,6 +1640,91 @@ commands.prev_diagnostic = function(view, editor)
     jump_diagnostic(view, editor, -1)
 end
 
+----------------------------------------------------------------------------------------------------
+-- LSP symbol navigation (workspace + intra-document)
+--
+-- Two Helm/ido-style pickers driven by the minibuffer's inline (non-
+-- popup) completion list. Both fire an LSP request whose results land
+-- asynchronously; the completer closures (in `completers.lua`) bridge
+-- that with a closure-local cache + `Minibuffer:refresh_completions()`.
+-- `on_change(text, comp_index)` is used to track the currently-
+-- highlighted item's hidden `.data` (the LSP Location) so `on_submit`
+-- — which only receives the typed text — can jump to the selection.
+----------------------------------------------------------------------------------------------------
+
+--- Build a shared on_change tracker: stores the currently-highlighted
+--- completion item's `.data` into `state.selected` so the command's
+--- on_submit can resolve it. Returns a closure suitable for `on_change`.
+--- @param editor Editor
+--- @param state table {selected = any} mutated in place
+--- @return fun(text: string, comp_index: integer)
+local function make_symbol_tracker(editor, state)
+    return function(_text, comp_index)
+        local mb = editor.minibuffer
+        local item = mb and mb._completions and mb._completions[comp_index] or nil
+        state.selected = item and item.data or nil
+    end
+end
+
+--- Prompt for a symbol in the current buffer (imenu-style) and jump to
+--- it. Issues `textDocument/documentSymbol` once; the completer filters
+--- client-side as the user narrows the query.
+commands.goto_symbol = function(view, editor)
+    local buf = view and view.buffer
+    local cid = buf and buf.lsp_client_id
+    local uri = buf and buf.lsp_uri
+    if cid == nil or uri == nil or not lsp.is_ready(cid) then
+        editor.status_message = "no language server for this buffer"
+        return
+    end
+    if lsp.doc_sent_version(cid, uri) < 0 then
+        editor.status_message = "buffer not yet synced to the server"
+        return
+    end
+    local state = { selected = nil }
+    editor:read_from_minibuffer({
+        prompt = "Goto symbol: ",
+        completion = true,
+        completer = completers.document_symbols(editor),
+        on_change = make_symbol_tracker(editor, state),
+        on_submit = function(_input_text)
+            local loc = state.selected
+            if loc == nil then
+                editor.status_message = "no symbol selected"
+                return
+            end
+            editor:jump_to_location(loc.uri, loc.line, loc.char)
+        end,
+    })
+end
+
+--- Prompt for a symbol across the workspace and jump to it. Issues a
+--- debounced `workspace/symbol` per keystroke; the completer re-filters
+--- the (possibly stale) cache while a response is in flight.
+commands.workspace_symbol = function(view, editor)
+    local buf = view and view.buffer
+    local cid = buf and buf.lsp_client_id
+    if cid == nil or not lsp.is_ready(cid) then
+        editor.status_message = "no language server running"
+        return
+    end
+    local state = { selected = nil }
+    editor:read_from_minibuffer({
+        prompt = "Workspace symbol: ",
+        completion = true,
+        completer = completers.workspace_symbols(editor),
+        on_change = make_symbol_tracker(editor, state),
+        on_submit = function(_input_text)
+            local loc = state.selected
+            if loc == nil then
+                editor.status_message = "no symbol selected"
+                return
+            end
+            editor:jump_to_location(loc.uri, loc.line, loc.char)
+        end,
+    })
+end
+
 --- Select every occurrence of the current selection's text.
 --- Replaces cursors with one per match (selections active).
 commands.select_all_matches = function(view, _editor)

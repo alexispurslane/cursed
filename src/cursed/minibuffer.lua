@@ -366,6 +366,29 @@ function Minibuffer:_fire_on_change(text)
     end
 end
 
+--- Re-run the completer against the current text WITHOUT requiring a
+--- text change, keeping the selection index when it is still valid.
+--- Used by asynchronous completion sources (e.g. LSP workspace/document
+--- symbol search) to swap fresh results into the list after a response
+--- lands — the re-render next frame picks up `self._completions`. A
+--- no-op when completion mode is off.
+function Minibuffer:refresh_completions()
+    if not self.active or not self.completion or not self.completer then
+        return
+    end
+    self._completions = self.completer(self:view_text())
+    -- Keep the existing selection if it still falls within bounds; this
+    -- lets an async refresh (results narrowed/expanded/gone) preserve the
+    -- user's highlighted row instead of snapping back to the top.
+    if self._comp_index < 1 or self._comp_index > #self._completions then
+        self._comp_index = #self._completions > 0 and 1 or 0
+        self._comp_scroll = 0
+    else
+        self:_comp_ensure_visible()
+    end
+    self:_fire_on_change(self:view_text())
+end
+
 --- If the minibuffer is active, fire on_change and completer when text has changed.
 --- Called from the main loop after each key event.
 --- When auto_accept is enabled and the input exactly matches a completion,

@@ -936,6 +936,139 @@ function Editor:open_file(filepath)
     ss:push(ss._ptr.outbox_io, { type = shared.MSG_FILE_LOAD, ptr = expanded })
 end
 
+----------------------------------------------------------------------------------------------------
+-- LSP Location navigation
+--
+-- Jump to an LSP Location (`uri` + 0-based `line`/UTF-16 `char`): reuse
+-- the view whose buffer already backs that URI when one is open, else
+-- open the file (async load) and defer cursor placement to the
+-- `file_loaded` listener via `view._pending_goto`. The UTF-16 → byte
+-- conversion reuses cursed.utf8; clamps to line/col bounds so a stale
+-- symbol (e.g. after an edit) lands on a valid cell.
+----------------------------------------------------------------------------------------------------
+
+local utf8_mod = require("cursed.utf8")
+
+--- Resolve a buffer filepath to an absolute path the same way
+--- `uri_for_buffer` does (editor_listeners): absolute stays absolute,
+--- relative is joined onto the workspace root (PWD fallback). Returns
+--- nil for an nil/empty path.
+--- @param filepath string?
+--- @param workspace_dir string? editor workspace root
+--- @return string?
+local function abs_path(filepath, workspace_dir)
+    if filepath == nil or filepath == "" then
+        return nil
+    end
+    if filepath:sub(1, 1) == "/" then
+        return filepath
+    end
+    local base = workspace_dir or os.getenv("PWD") or "/"
+    return base .. "/" .. filepath
+end
+
+--- Strip a `file://` URI to an absolute path (mirrors completers).
+--- @param uri string?
+--- @return string?
+local function uri_to_path(uri)
+    if uri == nil then
+        return nil
+    end
+    local p = uri:gsub("^file://localhost", ""):gsub("^file://", "")
+    if p == "" then
+        return nil
+    end
+    return p
+end
+
+--- Place the primary cursor at an LSP position in an already-loaded
+--- view (the text is available for UTF-16 → byte conversion), forcing
+--- a scroll-into-view on the next render. Clears any selection.
+--- @param view View
+--- @param line integer 0-based LSP line
+--- @param char integer 0-based UTF-16 code-unit offset
+local function place_cursor_lsp(view, line, char)
+    local buf = view.buffer
+    local lc = view:line_count()
+    local li = line or 0
+    if li < 0 then
+        li = 0
+    elseif li >= lc then
+        li = math.max(0, lc - 1)
+    end
+    local text = buf:line_text(li) or ""
+    local byte_col = utf8_mod.utf16_to_byte_col(text, char or 0)
+    local clen = view:content_len(li)
+    if byte_col > clen then
+        byte_col = clen
+    end
+    view:set_single_cursor(li, byte_col)
+    -- Force the next render's auto-scroll: nil guards mean "always scroll".
+    view._scroll_guard_line = nil
+    view._scroll_guard_col = nil
+    -- Zero-flash highlight resync (mirrors undo/redo/format): a far jump
+    -- lands the viewport in cold highlighter territory, and the lazy
+    -- per-frame viewport fill would otherwise leave the new region
+    -- plain until async bucket responses land. Cold-requerying
+    -- synchronously at the cursor's byte makes the jumped-to location
+    -- render correctly on the first frame. Safe no-op when no highlighter
+    -- mode is active (`_hl_enabled == false`).
+    view:clamp_cursor()
+    view:invalidate_wrap_cache()
+    local c = view:p()
+    local starts = view:_hl_line_starts()
+    local byte = (starts[c.line + 1] or 0) + c.col
+    view:_hl_cold_requery(byte)
+end
+
+--- Jump to an LSP Location: URI + 0-based line + UTF-16 character.
+--- Reuses the view whose buffer backs `uri` when one is open; otherwise
+--- opens the file (async via the IO lane) and defers cursor placement
+--- to the `file_loaded` listener via `view._pending_goto`. A no-op +
+--- status message when the URI is unusable.
+--- @param uri string?
+--- @param line integer?
+--- @param char integer?
+function Editor:jump_to_location(uri, line, char)
+    local path = uri_to_path(uri)
+    if path == nil then
+        self.status_message = "symbol has no location"
+        return
+    end
+    line = line or 0
+    char = char or 0
+    -- Find an already-open view whose buffer's resolved path matches.
+    local found_idx = nil
+    for i, v in ipairs(self.views) do
+        local fp = v.buffer and v.buffer:filepath()
+        local ap = abs_path(fp, self.workspace_dir)
+        if ap ~= nil and ap == path then
+            found_idx = i
+            break
+        end
+    end
+    if found_idx ~= nil then
+        local view = self.views[found_idx]
+        if found_idx ~= self.active_view then
+            self:set_active_view(found_idx)
+        end
+        -- Only place the cursor when the file is actually loaded; if
+        -- the same path was just queued (file_loaded == false), defer.
+        if view.file_loaded then
+            place_cursor_lsp(view, line, char)
+        else
+            view._pending_goto = { line = line, char = char }
+        end
+        return
+    end
+    -- Not open: open it and defer cursor placement until it loads.
+    self:open_file(path)
+    local new_view = self.views[#self.views]
+    if new_view ~= nil then
+        new_view._pending_goto = { line = line, char = char }
+    end
+end
+
 --- Insert a file's contents at the cursor (async via IO lane).
 ---@param filepath string raw path from the user (may contain ~, $ENV)
 function Editor:insert_file(filepath)

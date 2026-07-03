@@ -421,6 +421,48 @@ function EditorListeners.setup(editor)
         end
     end)
 
+    -- Apply a deferred LSP goto placed on `view._pending_goto` by
+    -- `Editor:jump_to_location` when the target file wasn't open yet
+    -- (so the cursor couldn't be placed until the IO lane delivered the
+    -- text). Fires once on the `file_loaded` event the load path emits,
+    -- converts the LSP UTF-16 char to a byte col against the now-loaded
+    -- line, clamps to bounds, and forces a scroll-into-view.
+    es:on("file_loaded", function(_ed, view, _buf)
+        local g = view and view._pending_goto
+        if g == nil then
+            return
+        end
+        view._pending_goto = nil
+        local lc = view:line_count()
+        local li = g.line or 0
+        if li < 0 then
+            li = 0
+        elseif li >= lc then
+            li = math.max(0, lc - 1)
+        end
+        local text = view.buffer:line_text(li) or ""
+        local byte_col = utf16_to_byte_col(text, g.char or 0)
+        local clen = view:content_len(li)
+        if byte_col > clen then
+            byte_col = clen
+        end
+        view:set_single_cursor(li, byte_col)
+        view._scroll_guard_line = nil
+        view._scroll_guard_col = nil
+        -- Zero-flash highlight resync (mirrors undo/redo/format): the
+        -- fresh file's highlighter is cold at load, and the jumped-to
+        -- location is far from line 0, so cold-requery synchronously at
+        -- the cursor's byte so the FIRST render after load shows correct
+        -- syntax instead of a flash of plain text as viewport buckets
+        -- fill asynchronously. No-op when no highlighter mode is active.
+        view:clamp_cursor()
+        view:invalidate_wrap_cache()
+        local starts = view:_hl_line_starts()
+        local cur = view:p()
+        local byte = (starts[cur.line + 1] or 0) + cur.col
+        view:_hl_cold_requery(byte)
+    end)
+
     -- Squiggle DEMO (no LSP data source yet): when
     -- `editor._squiggle_demo` is on (toggle via M-x toggle_squiggle_demo),
     -- squiggle the primary cursor's current word in diagnostic_error

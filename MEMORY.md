@@ -23,7 +23,6 @@ so the agent can pick up context across sessions.
 
 ## Gotchas & Errors
 
-- `tb_init -4` (init_open) is the expected no-TTY failure in a pipe — the binary itself loads fine and the symbol is exported.
 - Both needed a vendored-termbox2 patch because the new style bits live above 32 bits — where LuaJIT's 32-bit `bit` library can't reach — so the 64-bit packing stays in C.
 - Validation failed for tool "ask_user_question":
 - Let me do the final smoke launch under a pty to confirm no runtime crash, then mark done:
@@ -31,8 +30,12 @@ so the agent can pick up context across sessions.
 - Found 2 occurrences of edits[2] in /Users/alexispurslane/Development/scratch/cursed/src/cursed/commands.lua. Each oldText must be unique. Please provide more context to make it uni
 - Now let me unit-test the pick/wrap logic (LLS can't catch runtime bugs there) with a standalone harness mirroring `jump_diagnostic` exactly:
 - Now a smoke launch to confirm no runtime crash on module load:
+- getting a crash now when I try to jump to a workspace symbol: double free
 
 ## Heavily Read
 
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/commands.lua (4 reads) — Diagnostic items are `{sl, sc, el, ec, severity, message, source, code}` with 0-
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/editor_listeners.lua (5 reads) — Setting cursor is just `view:p().line/col = ...` + `view:_set_goal_col()` (scrol
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/completers.lua (9 reads) — Now the LSP symbol completers. Let me add a new section to completers.lua.
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/commands.lua (4 reads) — Let me look at the LSP command section in commands.lua and the read_from_minibuf
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/editor.lua (10 reads) — Let me confirm `schedule_after` semantics (return value) and the `file_loaded` e
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/lsp_lane.lua (3 reads) — Let me verify the LSP lane relays arbitrary request methods generically (not jus
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/view.lua (9 reads) — The highlighter is viewport-lazy and cold-query based. Let me look at how it ref

@@ -262,8 +262,15 @@ return {
     -- Repeat: rerun the last command (C-x z, then `z` to keep repeating)
     ["ctrl-x z"] = "repeat",
 
-    -- Goto line
-    ["alt-g"] = "goto_line",
+    -- Goto family (Emacs M-g prefix). `alt-g` alone is NOT a leaf so it
+    -- can host the multi-chord goto commands; `alt-g g` / `alt-g alt-g`
+    -- jump to a line (the bare `alt-g` = goto_line of old), `alt-g i`
+    -- is the intra-document (imenu-style) symbol picker, and `alt-g w`
+    -- searches symbols across the whole workspace via `workspace/symbol`.
+    ["alt-g g"] = "goto_line",
+    ["alt-g alt-g"] = "goto_line",
+    ["alt-g i"] = "goto_symbol",
+    ["alt-g w"] = "workspace_symbol",
 
     -- Escape
     ["escape"] = "escape_key",

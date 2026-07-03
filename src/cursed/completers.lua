@@ -631,6 +631,484 @@ function completers.lsp(editor)
 end
 
 ----------------------------------------------------------------------------------------------------
+-- LSP symbol navigation (workspace + intra-document)
+--
+-- Two minibuffer completion sources that drive a Helm/ido-style
+-- symbol picker: `document_symbols` (intra-document: fetch the current
+-- buffer's symbol tree once, client-side-filter by typed query) and
+-- `workspace_symbols` (workspace-wide: debounced `workspace/symbol`
+-- per query, server-side filtering). Both bridge the async LSP
+-- request/response model to the minibuffer's synchronous
+-- `completer(text) -> items` interface via a closure-local cache plus
+-- `Minibuffer:refresh_completions()` retick on response — the same
+-- shape the in-buffer `completers.lsp` source uses.
+--
+-- Completion items are `{ text = name, metadata = "path:line  kind",
+-- data = { uri, line, char } }`. The hidden `data` carries the LSP
+-- Location the command's on_submit needs to jump; `on_change` is used
+-- to track the currently-highlighted row so submit can resolve it
+-- (the minibuffer passes the typed text to on_submit, not the item).
+----------------------------------------------------------------------------------------------------
+
+--- LSP SymbolKind enum → short display label (1..26). Sources whose
+--- servers omit `kind` get the generic "sym".
+--- @type table<integer,string>
+local SYMBOL_KINDS = {
+    [1] = "file",
+    [2] = "module",
+    [3] = "ns",
+    [4] = "pkg",
+    [5] = "class",
+    [6] = "method",
+    [7] = "prop",
+    [8] = "field",
+    [9] = "ctor",
+    [10] = "enum",
+    [11] = "iface",
+    [12] = "fn",
+    [13] = "var",
+    [14] = "const",
+    [15] = "str",
+    [16] = "num",
+    [17] = "bool",
+    [18] = "arr",
+    [19] = "obj",
+    [20] = "key",
+    [21] = "null",
+    [22] = "enumm",
+    [23] = "struct",
+    [24] = "event",
+    [25] = "op",
+    [26] = "typeparam",
+}
+
+--- A normalized symbol record: the flat shape both completers build
+--- their completion items from, regardless of which LSP response variant
+--- (DocumentSymbol / SymbolInformation / WorkspaceSymbol) it came from.
+--- `container` carries `containerName` or the parent DocumentSymbol name.
+---@class LspSym
+---@field name string
+---@field kind integer?
+---@field uri string?
+---@field line integer 0-based LSP line
+---@field char integer 0-based UTF-16 code-unit offset
+---@field container string?
+
+--- Strip a `file://` (or `file:///`) URI prefix to an absolute path.
+--- Leaves a bare path untouched. Per the LSP spec URIs are absolute.
+--- @param uri string?
+--- @return string path empty when uri is nil/empty
+local function path_from_uri(uri)
+    if uri == nil then
+        return ""
+    end
+    local p = uri
+    -- `file://localhost/...` is the rare host-qualified form; strip it
+    -- so it compares equal to the plain `file:///...` shape.
+    p = p:gsub("^file://localhost", "")
+    p = p:gsub("^file://", "")
+    return p
+end
+
+--- Best-effort relative form of `path` against `workspace_dir`.
+--- Falls back to the absolute path (or basename when neither is set).
+--- @param path string
+--- @param workspace_dir string?
+--- @return string
+local function relativize(path, workspace_dir)
+    if path == nil or path == "" then
+        return ""
+    end
+    local base = workspace_dir
+    if base == nil or base == "" then
+        base = os.getenv("PWD")
+    end
+    if base == nil or base == "" then
+        -- No workspace anchor: show the basename so the metadata column
+        -- stays narrow.
+        local b = path:match("([^/]+)$")
+        return b or path
+    end
+    if path:sub(1, #base) == base then
+        local rest = path:sub(#base + 1)
+        rest = rest:gsub("^/+", "")
+        if rest == "" then
+            return "."
+        end
+        return rest
+    end
+    return path
+end
+
+--- Normalize the three LSP symbol shapes a server may return into a
+--- flat `{name, kind, uri, line, char, container}` record:
+---   • DocumentSymbol (hierarchical): {name, kind, range, selectionRange, children?}
+---   • SymbolInformation (flat): {name, kind, location:{uri,range}, containerName?}
+---   • WorkspaceSymbol (3.17): location may be {uri,range} OR
+---     {targetUri, targetRange, targetSelectionRange}.
+--- `default_uri` supplies the URI for DocumentSymbols (which omit it).
+--- Returns nil for malformed entries (no name / no usable range).
+--- @param s table a symbol object
+--- @param default_uri string? the URI to assume when the symbol lacks one
+--- @return LspSym|nil
+local function normalize_symbol(s, default_uri)
+    if type(s) ~= "table" then
+        return nil
+    end
+    local name = s.name
+    if name == nil or name == "" then
+        return nil
+    end
+    local uri, line, char
+    if s.location ~= nil and type(s.location) == "table" then
+        local loc = s.location
+        -- 3.17 WorkspaceSymbol with a (targetUri, targetSelectionRange) pair.
+        if loc.targetUri ~= nil then
+            uri = loc.targetUri
+            local r = loc.targetSelectionRange or loc.targetRange
+            if r and r.start then
+                line = r.start.line
+                char = r.start.character
+            end
+        elseif loc.range and loc.range.start then
+            uri = loc.uri or default_uri
+            line = loc.range.start.line
+            char = loc.range.start.character
+        end
+    else
+        -- DocumentSymbol: prefer selectionRange (the name span) and
+        -- fall back to the full range so a degenerate symbol still jumps.
+        local r = s.selectionRange or s.range
+        if r and r.start then
+            uri = default_uri
+            line = r.start.line
+            char = r.start.character
+        end
+    end
+    if line == nil then
+        return nil
+    end
+    return {
+        name = name,
+        kind = s.kind,
+        uri = uri,
+        line = line or 0,
+        char = char or 0,
+        container = s.containerName,
+    }
+end
+
+--- The shared, static metadata prefix for a symbol item used as the
+--- completion item's `text` (the `metadata` side is computed per-call
+--- from the live workspace). Separated here so the highlighter's
+--- match-byte logic operates on the name only.
+--- @param sym LspSym
+--- @return string
+local function symbol_text(sym)
+    -- Flatten the qualified name onto a `container::name` display when
+    -- the symbol carries a container so identical names in different
+    -- scopes are distinguishable in the list.
+    if sym.container and sym.container ~= "" then
+        return sym.container .. "::" .. sym.name
+    end
+    return sym.name
+end
+
+--- Build a minibuffer completion item from a normalized symbol: the
+--- display text is the (qualified) name, metadata carries
+--- `relpath:line  kind` so the second column doubles as a position
+--- preview, and the hidden `data` field holds the LSP Location for
+--- the command's jump handler. `workspace_dir` only affects metadata
+--- rendering, not jumping.
+--- @param sym LspSym a normalize_symbol result
+--- @param workspace_dir string?
+--- @return {text:string,metadata:string,data:table}
+local function build_symbol_item(sym, workspace_dir)
+    local path = path_from_uri(sym.uri)
+    local rel = relativize(path, workspace_dir)
+    local kind = (sym.kind and SYMBOL_KINDS[sym.kind]) or "sym"
+    local meta
+    if rel ~= "" then
+        meta = rel .. ":" .. tostring((sym.line or 0) + 1) .. "  " .. kind
+    else
+        meta = "L" .. tostring((sym.line or 0) + 1) .. "  " .. kind
+    end
+    return {
+        text = symbol_text(sym),
+        metadata = meta,
+        data = { uri = sym.uri, line = sym.line or 0, char = sym.char or 0 },
+    }
+end
+
+--- Client-side fuzzy filter: a symbol item matches when EVERY
+--- whitespace-separated query term appears as a case-insensitive
+--- substring in the display text (`text`) OR metadata (`metadata`).
+--- Empty query → all items pass (so the picker is populated on open).
+--- @param items table[] completion items with `.text` and `.metadata`
+--- @param query string the user's minibuffer text
+--- @return table[] filtered items, first-seen order
+local function filter_symbols(items, query)
+    if items == nil then
+        return {}
+    end
+    local terms = space_terms(query)
+    if #terms == 0 then
+        return items
+    end
+    local out = {}
+    for _, it in ipairs(items) do
+        local hay = ((it.text or "") .. " " .. (it.metadata or "")):lower()
+        local ok = true
+        for _, t in ipairs(terms) do
+            if not hay:find(t, 1, true) then
+                ok = false
+                break
+            end
+        end
+        if ok then
+            out[#out + 1] = it
+        end
+    end
+    return out
+end
+
+--- Current buffer's LSP client + URI as a `(cid, uri)` pair, or nil.
+--- Shared by both symbol completers to resolve the active server.
+--- @param editor Editor
+--- @return integer|nil cid
+--- @return string|nil uri
+local function current_doc(editor)
+    local view = editor:current_view()
+    local buf = view and view.buffer
+    local cid = buf and buf.lsp_client_id
+    local uri = buf and buf.lsp_uri
+    if cid == nil or uri == nil then
+        return nil, nil
+    end
+    if not lsp().is_ready(cid) then
+        return nil, nil
+    end
+    ---@cast cid integer
+    return cid, uri
+end
+
+--- Recursively flatten a (possibly hierarchical) DocumentSymbol tree
+--- into flat symbol records. `textDocument/documentSymbol` may return
+--- either `DocumentSymbol[]` (with `children`) or `SymbolInformation[]`
+--- (flat); the latter has no `children` so the walk stops at depth 1.
+--- `workspace_dir` is unused here but threaded for symmetry.
+--- @param syms table[]
+--- @param uri string the buffer's URI (DocumentSymbols omit their own)
+--- @param container string? parent name for qualification
+--- @param out table[] accumulator
+local function flatten_document_symbols(syms, uri, container, out)
+    for _, s in ipairs(syms) do
+        if type(s) == "table" then
+            -- Only DocumentSymbols (no .location) carry children.
+            local children = s.children
+            local sym = normalize_symbol(s, uri)
+            if sym then
+                if container and not sym.container then
+                    sym.container = container
+                end
+                out[#out + 1] = sym
+            end
+            if type(children) == "table" and #children > 0 then
+                local child_container = sym and (sym.name or container) or container
+                flatten_document_symbols(children, uri, child_container, out)
+            end
+        end
+    end
+end
+
+--- Build the intra-document (imenu-style) symbol picker. Requests
+--- `textDocument/documentSymbol` ONCE (when first queried), flattens the
+--- (possibly hierarchical) result into completion items, then
+--- client-side-filters by the typed query. The retick on response
+--- swaps the list in even though the text hasn't changed.
+--- @param editor Editor
+--- @return fun(text: string): table
+function completers.document_symbols(editor)
+    --- closure-local state: items=nil until the response lands.
+    local state = { items = nil, pending = false }
+    --- Capture the (cid, uri, workspace_dir) of the buffer the picker
+    --- was opened against; if that buffer changes (shouldn't while the
+    --- minibuffer is active), we'd re-fetch, but the simple nil-guard
+    --- +"already fetched" keeps the one-shot fetch semantic.
+    local cid, uri = current_doc(editor)
+    local workspace_dir = editor.workspace_dir
+
+    --- Schedule a completion-list retick so a just-landed response
+    --- swaps its items into the list. Runs on the main thread (the
+    --- response callback fires during drain_lsp_inbox, off-render).
+    local function retick()
+        editor:schedule_after(0, function()
+            if editor.minibuffer and editor.minibuffer.active then
+                editor.minibuffer:refresh_completions()
+            end
+            return true
+        end)
+    end
+
+    if cid == nil or uri == nil then
+        -- No usable server: stay an empty-but-harmless completer so the
+        --- command can surface a status message instead of crashing.
+        return function(_text)
+            return {}
+        end
+    end
+
+    --- Fetch the symbol tree for the captured doc. Idempotent: the
+    --- closure only fires it once (state.items == nil + not pending).
+    local function fetch()
+        if state.pending then
+            return
+        end
+        state.pending = true
+        log.info("lsp_symbols", "document_symbol_request", { cid = cid })
+        local id = lsp().mint_request_id(function(result, is_error)
+            state.pending = false
+            if is_error or result == nil or type(result) ~= "table" then
+                state.items = {}
+                log.info("lsp_symbols", "document_symbol_response", {
+                    cid = cid,
+                    is_error = is_error or false,
+                    count = 0,
+                })
+                retick()
+                return
+            end
+            local flat = {}
+            flatten_document_symbols(result, uri, nil, flat)
+            local mapped = {}
+            for _, sym in ipairs(flat) do
+                mapped[#mapped + 1] = build_symbol_item(sym, workspace_dir)
+            end
+            state.items = mapped
+            log.info("lsp_symbols", "document_symbol_response", {
+                cid = cid,
+                count = #mapped,
+            })
+            retick()
+        end)
+        lsp().request(cid, "textDocument/documentSymbol", { textDocument = { uri = uri } }, id)
+    end
+
+    return function(text)
+        if state.items == nil then
+            if lsp().doc_sent_version(cid, uri) >= 0 then
+                fetch()
+            end
+            return {}
+        end
+        return filter_symbols(state.items, text)
+    end
+end
+
+--- Build the workspace-wide symbol picker. Debounces a
+--- `workspace/symbol` request per query (server-side filtering), caches
+--- the response, and client-side-refilters the (possibly stale) list so
+--- the picker stays populated while a request is in flight. Most
+--- servers reject an empty query, so we wait for at least one char.
+--- @param editor Editor
+--- @return fun(text: string): table
+function completers.workspace_symbols(editor)
+    --- closure-local state.
+    local state = { items = {}, pending = false, last_query = "", debounce = nil }
+    local workspace_dir = editor.workspace_dir
+
+    --- Resolve the active server (re-evaluated each call so a server
+    --- coming up mid-search starts answering).
+    local cid, _uri = current_doc(editor)
+
+    local function retick()
+        editor:schedule_after(0, function()
+            if editor.minibuffer and editor.minibuffer.active then
+                editor.minibuffer:refresh_completions()
+            end
+            return true
+        end)
+    end
+
+    local DEBOUNCE_US = 120000
+
+    local function send(query)
+        if cid == nil or not lsp().is_ready(cid) then
+            return
+        end
+        if state.debounce ~= nil then
+            editor:cancel_task(state.debounce)
+            state.debounce = nil
+        end
+        state.pending = true
+        log.info("lsp_symbols", "workspace_symbol_request", {
+            cid = cid,
+            query = query,
+        })
+        local id = lsp().mint_request_id(function(result, is_error)
+            state.pending = false
+            if is_error or result == nil or type(result) ~= "table" then
+                state.items = {}
+                log.info("lsp_symbols", "workspace_symbol_response", {
+                    cid = cid,
+                    query = query,
+                    is_error = is_error or false,
+                    count = 0,
+                })
+                retick()
+                return
+            end
+            local mapped = {}
+            for _, s in ipairs(result) do
+                local sym = normalize_symbol(s, nil)
+                if sym then
+                    mapped[#mapped + 1] = build_symbol_item(sym, workspace_dir)
+                end
+            end
+            state.items = mapped
+            log.info("lsp_symbols", "workspace_symbol_response", {
+                cid = cid,
+                query = query,
+                count = #mapped,
+            })
+            retick()
+        end)
+        lsp().request(cid, "workspace/symbol", { query = query }, id)
+    end
+
+    local function schedule_send(query)
+        if state.debounce ~= nil then
+            editor:cancel_task(state.debounce)
+        end
+        state.debounce = editor:schedule_after(DEBOUNCE_US, function()
+            state.debounce = nil
+            send(query)
+            return true
+        end)
+    end
+
+    return function(text)
+        -- Re-resolve the server if we didn't capture one at build time.
+        if cid == nil then
+            cid = current_doc(editor)
+        end
+        if cid == nil then
+            return {}
+        end
+        local query = text or ""
+        -- Strip the leading trigger token some servers dislike (empty).
+        if query == state.last_query then
+            return filter_symbols(state.items, query)
+        end
+        state.last_query = query
+        if #query >= 1 then
+            schedule_send(query)
+        end
+        return filter_symbols(state.items, query)
+    end
+end
+
+----------------------------------------------------------------------------------------------------
 -- Per-mode completer dispatcher
 --
 -- The CompletionMenu holds ONE completer for the whole editor. Major

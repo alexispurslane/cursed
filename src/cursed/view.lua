@@ -63,6 +63,7 @@ local IH = require("cursed.input_hook")
 ---@field _scroll_guard_line integer|nil primary-cursor line last auto-scrolled for; nil = force next
 ---@field _scroll_guard_col integer|nil primary-cursor col last auto-scrolled for; nil = force next
 ---@field file_loaded boolean whether the initial file has been loaded
+---@field _pending_goto {line:integer,char:integer}|nil deferred LSP jump (Editor:jump_to_location) applied on file_loaded
 ---@field _major_modes MajorModeInstance[] active major mode instances (ordered, later overrides earlier)
 ---@field tab_width integer visual width of a tab stop
 ---@field expand_tab boolean if true, Tab inserts spaces instead of \t
@@ -1965,11 +1966,20 @@ function View:_hl_install_spans(
     end
     -- Stale: a response for a gen we've since superseded. Drop it.
     if self._hl_in_flight == nil or self._hl_in_flight.gen ~= gen then
-        -- claimed iff we have an in-flight to match the view; either way
-        -- we don't retain the buffer — free it ourselves so the caller's
-        -- contract stays "claimed == ownership transferred".
-        ffi.C.free(msg_ptr)
-        return self._hl_in_flight ~= nil
+        if self._hl_in_flight ~= nil then
+            -- This view DID have a query (a newer one): the response is a
+            -- superseded one for US. Claim it so the caller stops routing
+            -- (another view must NOT receive the freed buffer) and free
+            -- it ourselves, honoring "claimed == ownership transferred".
+            ffi.C.free(msg_ptr)
+            return true
+        end
+        -- This view has no in-flight query at all: the response isn't
+        -- ours. Do NOT free or retain it — let the caller keep routing
+        -- the still-owned buffer to other views, freeing only if no view
+        -- claims it. (Freeing here would hand the next view a dangling
+        -- pointer it may free again → double free.)
+        return false
     end
 
     -- A pending edit means the document has advanced past this response
