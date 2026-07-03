@@ -686,8 +686,14 @@ function CompletionMenu:handle_key(_editor, token)
         self:page_up()
     elseif token == "page_down" then
         self:page_down()
-    elseif token == "tab" or token == "enter" or token == "return" then
+    elseif token == "tab" then
         self:accept()
+    elseif token == "enter" or token == "return" then
+        -- Enter always inserts a newline: close the menu and let the
+        -- key fall through to normal dispatch (newline / electric-dedent
+        -- handling) instead of accepting the selected candidate.
+        self:close()
+        return false
     else -- escape / ctrl-g
         self:close()
     end

@@ -30,6 +30,4 @@ so the agent can pick up context across sessions.
 - Could not find the exact text in /Users/alexispurslane/Development/scratch/cursed/src/cursed/completers.lua. The old text must match exactly including all whitespace and newlines.
 - Found 2 occurrences of the text in /Users/alexispurslane/Development/scratch/cursed/src/cursed/completers.lua. The text must be unique. Please provide more context to make it uniqu
 - ` fails before `super()` but works after
-
-`ApiError extends Error` is a **derived class**.
 - TypeScript has a hard rule: in a derived-class constructor body, **before the `super()` call**, `this` is uninitialized — you cannot reference `this`, return, or access instance state there.
