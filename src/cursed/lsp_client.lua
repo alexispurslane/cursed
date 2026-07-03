@@ -118,30 +118,77 @@ local function ss()
 end
 
 ----------------------------------------------------------------------------------------------------
+-- Candidate normalization
+----------------------------------------------------------------------------------------------------
+
+--- Coerce a major mode's `lsp_servers` (a first-wins list whose
+--- entries are EITHER a bare executable-name string OR a table
+---   { bin = "name", args = {"--stdio"}, env = { VAR = "value" } })
+--- into a uniform list of candidate specs: {
+---   bin  = string  (short executable name to resolve on PATH),
+---   args = string[] (argv tail; may be empty),
+---   env  = table<string,string>  (extra env vars to set; may be empty),
+--- }. env values are stringified so `ENV_VAR = 1` works. Empty/missing
+--- args/env collapse to empty containers so the lane can iterate
+--- unconditionally. Returns an empty list (not nil) for nil input.
+--- @param servers string[]|table[]|nil  mixed first-wins list
+--- @return table[] candidates  each {bin:string, args:string[], env:table}
+function M.normalize(servers)
+    local out = {}
+    if servers == nil then
+        return out
+    end
+    for _, s in ipairs(servers) do
+        if type(s) == "string" then
+            out[#out + 1] = { bin = s, args = {}, env = {} }
+        elseif type(s) == "table" then
+            local bin = s.bin
+            if type(bin) == "string" and bin ~= "" then
+                local args = {}
+                if type(s.args) == "table" then
+                    for _, a in ipairs(s.args) do
+                        args[#args + 1] = tostring(a)
+                    end
+                end
+                local env = {}
+                if type(s.env) == "table" then
+                    for k, v in pairs(s.env) do
+                        env[tostring(k)] = tostring(v)
+                    end
+                end
+                out[#out + 1] = { bin = bin, args = args, env = env }
+            end
+        end
+    end
+    return out
+end
+
+----------------------------------------------------------------------------------------------------
 -- Outbound payload builders (lane frees each struct after consuming)
 ----------------------------------------------------------------------------------------------------
 
---- @param exe_names string[]
+--- @param cands table[] normalized candidates (each {bin,args,env})
 --- @param workspace_dir string
 --- @param client_id integer
-local function enqueue_spawn(exe_names, workspace_dir, client_id)
+local function enqueue_spawn(cands, workspace_dir, client_id)
     local s = ss()
     if s == nil then
         return
     end
-    local blob = table.concat(exe_names, "\0")
-    if #blob > 0 then
-        blob = blob .. "\0"
+    local spec, err = json.encode(cands)
+    if spec == nil then
+        log.warn("lsp", "spawn spec encode failed", { error = err })
+        return
     end
-    local total = ffi.sizeof("struct LspSpawnReq") + #blob + #workspace_dir
+    local total = ffi.sizeof("struct LspSpawnReq") + #spec + #workspace_dir
     local buf = ffi.C.calloc(1, total)
     local req = ffi.cast("struct LspSpawnReq *", buf)
-    req.exe_names_len = #blob
+    req.spec_len = #spec
     req.workspace_len = #workspace_dir
     req.client_id = client_id
     local base = ffi.cast("char *", buf) + ffi.sizeof("struct LspSpawnReq")
-    ffi.copy(base, blob, #blob)
-    ffi.copy(base + #blob, workspace_dir, #workspace_dir)
+    ffi.copy(base, spec, #spec)
+    ffi.copy(base + #spec, workspace_dir, #workspace_dir)
     s:push(s._ptr.outbox_lsp, { type = constants.MSG_LSP_SPAWN, ptr = buf })
 end
 
@@ -183,15 +230,15 @@ end
 -- Dedup + spawn entry point
 ----------------------------------------------------------------------------------------------------
 
---- Find a live client whose exe_name matches any of `exe_names`
+--- Find a live client whose exe_name matches any of `candidates`
 --- (first-wins against the declared list). Returns its client_id, or
 --- nil if none. Used so two modes declaring the same server binary
 --- share one process.
---- @param exe_names string[]
+--- @param cands table[] normalized candidates
 --- @return integer|nil
-local function find_live_client(exe_names)
-    for _, name in ipairs(exe_names) do
-        local cid = M.exe_to_client[name]
+local function find_live_client(cands)
+    for _, c in ipairs(cands) do
+        local cid = M.exe_to_client[c.bin]
         if cid and M.clients[cid] and is_live(M.clients[cid].status) then
             return cid
         end
@@ -204,14 +251,15 @@ end
 --- process). The matching legacy entry point `spawn_or_get` delegates
 --- here. No fork happens on the main thread; this enqueues to the lane.
 --- @param mode_name string the major-mode instance name (binding key)
---- @param exe_names string[] first-wins list of executable names
+--- @param servers string[]|table[] first-wins list of executions (mixed)
 --- @param workspace_dir string workspace root directory
 --- @return integer client_id the id assigned/bound (0 if nothing to spawn)
-function M.spawn_for_mode(mode_name, exe_names, workspace_dir)
+function M.spawn_for_mode(mode_name, servers, workspace_dir)
     if M._ss == nil then
         return 0
     end
-    if exe_names == nil or #exe_names == 0 then
+    local cands = M.normalize(servers)
+    if #cands == 0 then
         return 0
     end
 
@@ -224,23 +272,23 @@ function M.spawn_for_mode(mode_name, exe_names, workspace_dir)
 
     -- Dedup: a live client for any of these exe names already exists →
     -- bind this mode to it (don't spawn a second process).
-    local existing = find_live_client(exe_names)
+    local existing = find_live_client(cands)
     local client_id
     if existing then
         client_id = existing
     else
         client_id = _next_client_id
         _next_client_id = _next_client_id + 1
-        enqueue_spawn(exe_names, workspace_dir, client_id)
+        enqueue_spawn(cands, workspace_dir, client_id)
         -- Provisional registry entry so server_status_for reflects
         -- "spawning" (the lane will correct to missing if the binary
         -- isn't on PATH, or ready on the initialize response).
         M.clients[client_id] = {
-            exe_name = exe_names[1],
+            exe_name = cands[1].bin,
             status = "spawning",
             modes = {},
         }
-        M.exe_to_client[exe_names[1]] = client_id
+        M.exe_to_client[cands[1].bin] = client_id
     end
 
     -- Bind mode → client_id (overwrite any stale binding for this mode).
@@ -256,22 +304,23 @@ end
 --- Legacy entry point preserved for editor_listeners / editor.lua: takes
 --- a (now-unused) kqueue + callbacks and returns a placeholder so the old
 --- "client == nil ⇒ not found" branch keeps its semantics. Delegates to
---- spawn_for_mode with a mode key derived from exe_names[1].
+--- spawn_for_mode with a mode key derived from the first candidate's bin.
 --- @param _main_kqueue any unused — lane owns its kq
---- @param exe_names string[]
+--- @param servers (string|table)[] first-wins list of executables (strings or `{bin,args,env}` tables)
 --- @param workspace_dir string
 --- @param _on_message any unused — inbound is via inbox_lsp
 --- @param _on_exit any unused — lane relays handshakes
 --- @return LSPClient|nil placeholder; nil if no ss wired
-function M.spawn_or_get(_main_kqueue, exe_names, workspace_dir, _on_message, _on_exit)
+function M.spawn_or_get(_main_kqueue, servers, workspace_dir, _on_message, _on_exit)
     if M._ss == nil then
         return nil
     end
-    if exe_names == nil or #exe_names == 0 then
+    local first_bin = M.normalize(servers)[1]
+    if first_bin == nil then
         return nil
     end
-    local mode_key = exe_names[1]
-    local id = M.spawn_for_mode(mode_key, exe_names, workspace_dir)
+    local mode_key = first_bin.bin
+    local id = M.spawn_for_mode(mode_key, servers, workspace_dir)
     if id == 0 then
         return nil
     end
@@ -634,21 +683,22 @@ end
 --- "killed"/"missing") so the modeline can render a distinct glyph.
 --- Looks up a registered client by declared exe name; if a spawn was
 --- requested but no client exists yet, falls back to "missing".
---- @param exe_names string[] first-wins list of executable names
+--- @param servers (string|table)[] first-wins list of executables (strings or `{bin,args,env}` tables)
 --- @return string|nil name short name of the matching server
 --- @return string status status string ("missing" if none found)
-function M.server_status_for(exe_names)
-    for _, name in ipairs(exe_names) do
-        local cid = M.exe_to_client[name]
+function M.server_status_for(servers)
+    local cands = M.normalize(servers)
+    for _, c in ipairs(cands) do
+        local cid = M.exe_to_client[c.bin]
         if cid then
             local entry = M.clients[cid]
             if entry and entry.status ~= nil then
-                return name, entry.status
+                return c.bin, entry.status
             end
         end
     end
-    if exe_names[1] then
-        return exe_names[1], "missing"
+    if cands[1] then
+        return cands[1].bin, "missing"
     end
     return nil, "missing"
 end

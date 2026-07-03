@@ -404,30 +404,31 @@ end
 -- Spawn (fork/exec) on the lane. Resolves the first matching exe on PATH.
 ----------------------------------------------------------------------------------------------------
 
-local function find_executable(names)
+local function find_executable(cands)
     local path = os.getenv("PATH")
     if not path then
         return nil
     end
-    for _, name in ipairs(names) do
+    for _, c in ipairs(cands) do
         for segment in path:gmatch("[^:]+") do
-            local candidate = segment .. "/" .. name
+            local candidate = segment .. "/" .. c.bin
             local f = io.open(candidate, "r")
             if f then
                 f:close()
-                return candidate, name
+                return candidate, c
             end
         end
     end
     return nil
 end
 
---- @param exe_names string[] first-wins list
+--- @param cands table[] normalized candidates (each {bin,args,env})
 --- @param workspace_dir string
+--- @param client_id integer
 --- @return LSPClient|nil
-local function spawn(exe_names, workspace_dir, client_id)
-    local found, short = find_executable(exe_names)
-    if not found or short == nil then
+local function spawn(cands, workspace_dir, client_id)
+    local found, cand = find_executable(cands)
+    if not found or cand == nil then
         return nil
     end
 
@@ -447,18 +448,40 @@ local function spawn(exe_names, workspace_dir, client_id)
         ffi.C.close(tonumber(stdin_pipe[0]))
         ffi.C.close(tonumber(stdout_pipe[1]))
 
-        local envstr = ("LSP_WORKSPACE=%s"):format(workspace_dir)
-        local envbuf = ffi.cast("char *", ffi.C.malloc(#envstr + 1))
-        ffi.copy(envbuf, envstr)
-        envbuf[#envstr] = 0
-        ffi.C.putenv(envbuf)
+        -- Env: the workspace hint + the candidate's declared env vars.
+        -- putenv takes a `KEY=VAL` C string it keeps in environ; we
+        -- malloc each (never freed — the child either execs or _exits).
+        local ws = ("LSP_WORKSPACE=%s"):format(workspace_dir)
+        local wbuf = ffi.cast("char *", ffi.C.malloc(#ws + 1))
+        ffi.copy(wbuf, ws)
+        wbuf[#ws] = 0
+        ffi.C.putenv(wbuf)
+        for k, v in pairs(cand.env) do
+            local pair = k .. "=" .. v
+            local pbuf = ffi.cast("char *", ffi.C.malloc(#pair + 1))
+            ffi.copy(pbuf, pair)
+            pbuf[#pair] = 0
+            ffi.C.putenv(pbuf)
+        end
 
-        local cstr = ffi.new("char[?]", #found + 1)
-        ffi.copy(cstr, found)
-        local argv = ffi.new("char *[2]")
-        argv[0] = cstr
-        argv[1] = nil
-        ffi.C.execvp(cstr, argv)
+        -- argv: { bin_name, args..., NULL }. The buffers are kept
+        -- rooted in a Lua array so the GC can't reclaim them before
+        -- execvp runs (raw C pointer arrays aren't traced).
+        local nargs = #cand.args
+        local argv = ffi.new("char *[?]", nargs + 2)
+        local roots = {}
+        local arg0 = ffi.new("char[?]", #cand.bin + 1)
+        ffi.copy(arg0, cand.bin)
+        argv[0] = arg0
+        roots[1] = arg0
+        for i, a in ipairs(cand.args) do
+            local ab = ffi.new("char[?]", #a + 1)
+            ffi.copy(ab, a)
+            argv[i] = ab
+            roots[i + 1] = ab
+        end
+        argv[nargs + 1] = nil
+        ffi.C.execvp(found, argv)
         ffi.C._exit(127)
     end
 
@@ -475,7 +498,7 @@ local function spawn(exe_names, workspace_dir, client_id)
     local flags = ffi.C.fcntl(child_stdout_fd, 3)
     ffi.C.fcntl(child_stdout_fd, 4, bit.bor(flags, 4))
 
-    local client = new_client(child_stdout_fd, child_stdin_fd, pid, client_id, short)
+    local client = new_client(child_stdout_fd, child_stdin_fd, pid, client_id, cand.bin)
     _clients_by_fd[client.stdout_fd] = client
     _clients_by_id[client_id] = client
 
@@ -534,23 +557,29 @@ local function handle_spawn(msg)
         return
     end
     local req = ffi.cast("struct LspSpawnReq *", msg.ptr)
-    local exe_names_len = tonumber(req.exe_names_len)
+    local spec_len = tonumber(req.spec_len)
     local workspace_len = tonumber(req.workspace_len)
     local client_id = tonumber(req.client_id)
-    ---@cast exe_names_len integer
+    ---@cast spec_len integer
     ---@cast workspace_len integer
     ---@cast client_id integer
     local base = ffi.cast("const char *", req) + ffi.sizeof("struct LspSpawnReq")
-    local exe_blob = ffi.string(base, exe_names_len)
-    local workspace = ffi.string(base + exe_names_len, workspace_len)
+    local spec_json = ffi.string(base, spec_len)
+    local workspace = ffi.string(base + spec_len, workspace_len)
     ffi.C.free(req)
 
-    -- exe_blob is NUL-separated short names.
-    local names = {}
-    for name in exe_blob:gmatch("[^%z]+") do
-        names[#names + 1] = name
+    -- spec_json is a JSON array of candidates {bin, args?, env?}.
+    local cands, derr = json.decode(spec_json)
+    if type(cands) ~= "table" then
+        log.warn("lsp_lane", "spawn spec decode failed", { error = derr })
+        return
     end
-    if #names == 0 then
+    -- Normalize: args/env are optional in the wire form.
+    for _, c in ipairs(cands) do
+        c.args = (type(c.args) == "table") and c.args or {}
+        c.env = (type(c.env) == "table") and c.env or {}
+    end
+    if #cands == 0 then
         return
     end
 
@@ -564,12 +593,12 @@ local function handle_spawn(msg)
         return
     end
 
-    local client = spawn(names, workspace, client_id)
+    local client = spawn(cands, workspace, client_id)
     if client == nil then
-        log.info("lsp_lane", "executable not found on PATH", { names = #names })
+        log.info("lsp_lane", "executable not found on PATH", { candidates = #cands })
         -- Relay MISSING so main moves its provisional entry → missing
         -- (and the modeline shows srv— instead of hanging in spawning).
-        send_missing(client_id, names[1])
+        send_missing(client_id, cands[1].bin)
         return
     end
 end

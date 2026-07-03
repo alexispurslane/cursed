@@ -41,7 +41,7 @@
  * through inbox_lsp.
  *
  * Outbound (main → lane):
- *   MSG_LSP_SPAWN      ptr = struct LspSpawnReq* (exe_names + workspace
+ *   MSG_LSP_SPAWN      ptr = struct LspSpawnReq* (spec JSON + workspace
  *                        + client_id). The lane mints the id? NO — main
  *                        assigns the client_id it wants the spawn to
  *                        use, so main can pre-bind mode→id. Lane
@@ -346,16 +346,18 @@ void shared_tree_release(struct SharedState *ss, uint32_t view_id)
 
 /* ── LSP lane payloads ────────────────────────────────────────────── */
 
-/* MSG_LSP_SPAWN: exe_names is a NUL-separated (first-wins) list of short
- * executable names to resolve on PATH. The lane resolves, forks the
- * first found, sends `initialize`, and registers the child stdout on its
- * own kq for EVFILT_READ. On the initialize response the lane pushes a
- * MSG_LSP_HANDSHAKE back. The lane frees this struct (and its strings). */
+/* MSG_LSP_SPAWN: spec is a JSON array of candidate objects, each
+ *   { "bin": short_name, "args?": [..], "env?": {K:V} }. The lane
+ * resolves the first `bin` found on PATH, applies that candidate's
+ * args (argv[1..]) + env (putenv each), forks it, sends `initialize`,
+ * and registers the child stdout on its own kq for EVFILT_READ. On the
+ * initialize response the lane pushes a MSG_LSP_HANDSHAKE back. The
+ * lane frees this struct (and its strings). */
 struct LspSpawnReq {
-    uint32_t exe_names_len;   /* bytes of NUL-separated exe_names payload */
-    uint32_t workspace_len;   /* bytes of workspace dir payload (no NUL) */
-    uint32_t client_id;       /* main-assigned id; lane echoes in handshake */
-    /* followed by exe_names_len bytes, then workspace_len bytes */
+    uint32_t spec_len;       /* bytes of JSON candidate-spec payload (no NUL) */
+    uint32_t workspace_len;  /* bytes of workspace dir payload (no NUL) */
+    uint32_t client_id;      /* main-assigned id; lane echoes in handshake */
+    /* followed by spec_len bytes (JSON), then workspace_len bytes */
 };
 
 /* MSG_LSP_SEND: main pre-encodes params to a JSON string (the encode is

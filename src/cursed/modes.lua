@@ -34,6 +34,8 @@ local SPECS = {
     "cursed.modes.c",
     "cursed.modes.python",
     "cursed.modes.rust",
+    "cursed.modes.typescript",
+    "cursed.modes.tsx",
     "cursed.modes.go",
     "cursed.modes.bash",
     "cursed.modes.json",

@@ -108,8 +108,9 @@ function EditorListeners.setup(editor)
     -- Centralized LSP activation (#mode_enter). Every mode transition
     -- flows through one generic `mode_enter` event carrying the instance
     -- + view; we check whether the entering mode declares `lsp_servers`
-    -- (a first-wins list of executable names inherited from its template
-    -- via __index) and, if so, spawn-or-get a language server subprocess
+    -- (a first-wins list of executables — bare strings OR candidate
+    -- tables `{bin, args, env}` — inherited from its template via
+    -- __index) and, if so, spawn-or-get a language server subprocess
     -- against the editor's workspace root, registering its stdout on the
     -- editor's main kqueue so the main loop drains it via
     -- `lsp.on_kqueue_read(fd)`. This is the SINGLE automatic,

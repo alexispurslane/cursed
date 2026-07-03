@@ -483,6 +483,34 @@ function completers.lsp(editor)
                     reason = c.items == nil and "first"
                         or (trig and "trigger" or (changed_pos and "pos_changed" or "prefix_grew")),
                 })
+                -- Flush any pending didChange so the server has the text
+                -- up to the cursor (incl. the trigger char just typed)
+                -- BEFORE it computes completions. The post_command_hook
+                -- doc-sync listener DEBOUNCES didChange (~150ms); without
+                -- this flush the completion request races ahead of the
+                -- sync and the server answers against STALE text —
+                -- returning global completions instead of object members
+                -- after `.`. Cancelling the debounce task first prevents
+                -- a redundant later send (sync_change bumps the sent
+                -- version, so the deferred task would no-op anyway, but
+                -- cancelling keeps the queue tidy). Both sync_change and
+                -- request_completion push to the lane's outbox_lsp FIFO,
+                -- so the lane ships didChange THEN completion.
+                local b = ctx.buf
+                if b ~= nil and b._lsp_debounce_task ~= nil then
+                    editor:cancel_task(b._lsp_debounce_task)
+                    b._lsp_debounce_task = nil
+                end
+                if
+                    b ~= nil
+                    and b.lsp_version ~= nil
+                    and lsp().doc_sent_version(cid, uri) < b.lsp_version
+                then
+                    local v = b.lsp_version
+                    lsp().sync_change(cid, uri, v, function()
+                        return b:write_text_direct()
+                    end)
+                end
                 lsp().request_completion(
                     cid,
                     uri,

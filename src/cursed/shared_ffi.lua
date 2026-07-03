@@ -133,10 +133,10 @@ struct HlName {
 /* ── LSP lane payloads (mirror shared_state.h) ────────────────── */
 
 struct LspSpawnReq {
-    uint32_t exe_names_len;
+    uint32_t spec_len;
     uint32_t workspace_len;
     uint32_t client_id;
-    /* followed by exe_names_len bytes, then workspace_len bytes */
+    /* followed by spec_len bytes (JSON), then workspace_len bytes */
 };
 
 struct LspSendReq {

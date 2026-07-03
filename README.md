@@ -38,6 +38,10 @@ Most of the editor concepts --- and keybindings --- are derived from Emacs, but 
 
 ![Which key](./which-key.png)
 
+### LSP-Driven In-Buffer Completions
+
+![lsp completions](./lsp-completions.png)
+
 ### Live Editing
 
 ![Multiple Cursors](screenshots-multicursor.png)
@@ -125,6 +129,7 @@ just clean-vendor # also rebuild vendored LuaJIT / tree-sitter-lib from scratch
 ```
 
 Build artifacts land entirely in `build/`; nothing outside the repo is touched except `~/.config/cursed/` at runtime.
+
 
 
 

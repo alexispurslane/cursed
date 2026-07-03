@@ -95,6 +95,8 @@ local lang = {
     python = c_api.tree_sitter_python,
     rust = c_api.tree_sitter_rust,
     toml = c_api.tree_sitter_toml,
+    tsx = c_api.tree_sitter_tsx,
+    typescript = c_api.tree_sitter_typescript,
     yaml = c_api.tree_sitter_yaml,
 }
 

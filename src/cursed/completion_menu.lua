@@ -369,7 +369,25 @@ function CompletionMenu:_tick(force)
         self:close()
         return
     end
-    if not forced and #ctx.prefix < self._min_prefix then
+    -- After a trigger character (e.g. `.` / `:`) the word prefix left of
+    -- the cursor is empty BY DEFINITION (the prior byte is the trigger,
+    -- not a word char), yet this is exactly when the server returns
+    -- context-sensitive MEMBERS — so the min-prefix gate must not close
+    -- the popup there. The response retick calls _tick UNFORCED; without
+    -- this bypass it would re-close a trigger-opened popup (whose prefix
+    -- is "") before the just-arrived member items ever render.
+    local on_trigger = false
+    if not forced then
+        local cm = self._completer
+        local set = (cm ~= nil and type(cm.trigger_chars) == "function") and cm.trigger_chars() or nil
+        if set ~= nil then
+            local ch = char_before_cursor(view)
+            if ch ~= nil and set[ch] then
+                on_trigger = true
+            end
+        end
+    end
+    if not forced and not on_trigger and #ctx.prefix < self._min_prefix then
         log.info("completion_menu", "tick_close_short_prefix", {
             prefix = ctx.prefix,
             min = self._min_prefix,
