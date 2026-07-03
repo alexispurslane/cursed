@@ -72,6 +72,12 @@ bool         shim_obj_iter_init(void *obj, yyjson_obj_iter *iter);
 void        *shim_obj_iter_next(yyjson_obj_iter *iter);
 void        *shim_obj_iter_get_val(void *key);
 
+/* Direct by-key / by-index accessors — faster + cleaner from Lua than
+ * spinning an iterator for a known-field lookup. */
+size_t      shim_arr_size(const void *arr);
+yyjson_val *shim_arr_get(const void *arr, size_t idx);
+yyjson_val *shim_obj_get(const void *obj, const char *key);
+
 /* Mutable builders. */
 void         shim_mut_doc_set_root(void *doc, void *root);
 
@@ -227,6 +233,44 @@ function M.decode(s)
         return nil, tostring(v)
     end
     return v
+end
+
+--- Parse JSON into a yyjson_doc and return the doc + root WITHOUT
+--- materializing a Lua table. The caller OWNS the doc and must free it
+--- via `M.free_doc`. Use this (instead of `M.decode`) when you want to:
+---   • hand the parsed tree to another thread (the doc is immutable +
+---     thread-safe to read once written), or
+---   • walk only a slice of the tree without paying to build the full
+---     Lua value. yyjson_read (the heavy parse) runs HERE, on the
+---     caller's thread — never on a thread that only receives the doc.
+--- @param s string JSON text
+--- @return any doc yyjson_doc* cdata | nil
+--- @return any root yyjson_val* cdata | nil  (== shim_doc_get_root(doc))
+--- @return string|nil err
+function M.decode_to_doc(s)
+    if s == nil or #s == 0 then
+        return nil, nil, "empty input"
+    end
+    local n = #s
+    local buf = C.malloc(n)
+    if buf == nil then
+        return nil, nil, "oom"
+    end
+    ffi.copy(buf, s, n)
+    local doc = C.yyjson_read_opts(ffi.cast("char *", buf), n, 0, nil, nil)
+    C.free(buf) -- parsed without INSITU; input no longer referenced
+    if doc == nil then
+        return nil, nil, "parse error"
+    end
+    return doc, C.shim_doc_get_root(doc), nil
+end
+
+--- Free a yyjson_doc returned by `decode_to_doc`. No-op on nil.
+--- @param doc any yyjson_doc* cdata | nil
+function M.free_doc(doc)
+    if doc ~= nil then
+        C.shim_doc_free(doc)
+    end
 end
 
 ----------------------------------------------------------------------------------------------------

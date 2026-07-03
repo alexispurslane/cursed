@@ -282,6 +282,8 @@ local function drain_lsp_inbox(editor, ss)
             end
         elseif msg.type == shared.MSG_LSP_RESPONSE then
             require("cursed.lsp_client").apply_response(msg.ptr)
+        elseif msg.type == shared.MSG_LSP_DIAGNOSTICS then
+            require("cursed.lsp_client").apply_diagnostics(msg.ptr)
         end
         msg = ss:pop(ss._ptr.inbox_lsp)
     end

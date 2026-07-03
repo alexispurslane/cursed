@@ -179,6 +179,21 @@ struct LspResponse {
     uint8_t  _pad[3];
     /* followed by result_len bytes of JSON */
 };
+
+/* server→main textDocument/publishDiagnostics. The lane parses the
+ * body ONCE into a yyjson_doc (yyjson_read runs off-main) and hands
+ * the parsed tree + a pointer to the diagnostics array to main; main
+ * does NO json decode (no yyjson_read) — it only walks the already-
+ * parsed tree once on arrival to extract flat per-diagnostic fields,
+ * then frees the doc. */
+struct LspDiagnostics {
+    uint32_t client_id;
+    uint32_t uri_len;
+    uint32_t version;  /* params.version (0 if absent) */
+    void    *doc;     /* yyjson_doc* — ownership transfers to main (free_doc) */
+    void    *root;    /* yyjson_val* — the diagnostics array, points into *doc */
+    /* followed by uri_len bytes (uri string, no NUL) */
+};
 ]])
 
 ----------------------------------------------------------------------------------------------------
@@ -202,6 +217,7 @@ local MSG_LSP_KILL = 13
 local MSG_LSP_HANDSHAKE = 14
 local MSG_LSP_DOC_SYNC = 15
 local MSG_LSP_RESPONSE = 16
+local MSG_LSP_DIAGNOSTICS = 17
 
 local LSP_STATUS_SPAWNING = 0
 local LSP_STATUS_READY = 1
@@ -236,6 +252,7 @@ return {
     MSG_LSP_HANDSHAKE = MSG_LSP_HANDSHAKE,
     MSG_LSP_DOC_SYNC = MSG_LSP_DOC_SYNC,
     MSG_LSP_RESPONSE = MSG_LSP_RESPONSE,
+    MSG_LSP_DIAGNOSTICS = MSG_LSP_DIAGNOSTICS,
     LSP_STATUS_SPAWNING = LSP_STATUS_SPAWNING,
     LSP_STATUS_READY = LSP_STATUS_READY,
     LSP_STATUS_DEAD = LSP_STATUS_DEAD,

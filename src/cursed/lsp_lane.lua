@@ -156,6 +156,63 @@ local function relay_response(client, msg)
     ss:push(ss._ptr.inbox_lsp, { type = constants.MSG_LSP_RESPONSE, ptr = buf })
 end
 
+--- Relay a `textDocument/publishDiagnostics` notification to main.
+--- The lane parses the body ONCE into a yyjson_doc (yyjson_read runs
+--- here, off-main), navigates root→params→diagnostics, and ships the doc
+--- + the diagnostics-array value to main. Main does NO json decode — it
+--- only walks the already-parsed tree to extract flat per-diagnostic
+--- fields, then frees the doc. Ownership of the doc transfers to main.
+--- `params.version` (optional) carries the doc version the diagnostics
+--- apply to, so main can drop stale squiggles.
+local function relay_diagnostics(client, msg, body_text)
+    local params = msg.params or {}
+    local uri = params.uri or ""
+    local version = 0
+    if type(params.version) == "number" then
+        version = params.version
+    end
+    local doc, root, derr = json.decode_to_doc(body_text)
+    if doc == nil then
+        log.warn("lsp", "diagnostics doc parse failed", { error = derr })
+        return
+    end
+    -- Navigate to params.diagnostics so main iterates the array directly
+    -- (two O(1) hash lookups; cheaper than main navigating per arrival).
+    -- If the shape is unexpected, fall back to the message root (main
+    -- treats a non-array as an empty set).
+    local diags_root = root
+    local p = ffi.C.shim_obj_get(root, "params")
+    if p ~= nil then
+        local d = ffi.C.shim_obj_get(p, "diagnostics")
+        if d ~= nil then
+            diags_root = d
+        end
+    end
+    local ulen = #uri
+    local total = ffi.sizeof("struct LspDiagnostics") + ulen
+    local buf = ffi.C.calloc(1, total)
+    if buf == nil then
+        ffi.C.free(doc)
+        return
+    end
+    local diag = ffi.cast("struct LspDiagnostics *", buf)
+    diag.client_id = client.client_id
+    diag.uri_len = ulen
+    diag.version = version
+    diag.doc = doc
+    diag.root = diags_root
+    if ulen > 0 then
+        ffi.copy(ffi.cast("char *", buf) + ffi.sizeof("struct LspDiagnostics"), uri, ulen)
+    end
+    log.info("lsp", "lane_relaying_diagnostics_to_main", {
+        client_id = client.client_id,
+        uri = uri,
+        version = version,
+        doc_handed = true,
+    })
+    ss:push(ss._ptr.inbox_lsp, { type = constants.MSG_LSP_DIAGNOSTICS, ptr = buf })
+end
+
 ----------------------------------------------------------------------------------------------------
 -- Framing + send
 ----------------------------------------------------------------------------------------------------
@@ -265,7 +322,7 @@ function LSPClient:drain()
             local parsed, derr = json.decode(body_text)
             if parsed then
                 ---@cast parsed table
-                self:_dispatch(parsed)
+                self:_dispatch(parsed, body_text)
             end
         else
             local crlf_pos = -1
@@ -309,7 +366,7 @@ function LSPClient:drain()
             local parsed, derr = json.decode(body_text)
             if parsed then
                 ---@cast parsed table
-                self:_dispatch(parsed)
+                self:_dispatch(parsed, body_text)
             end
         end
 
@@ -335,7 +392,7 @@ end
 --- messages are decoded + logged + dropped — each gets its own packed
 --- C struct + main-side consumer as its feature lands (extension point).
 --- @param msg table parsed JSON-RPC message
-function LSPClient:_dispatch(msg)
+function LSPClient:_dispatch(msg, body_text)
     -- A response (id set, method nil). id == 1 is the lane-owned
     -- initialize handshake; anything else is a main-owned request whose
     -- result we relay back generically so the lane stays shape-agnostic
@@ -390,8 +447,14 @@ function LSPClient:_dispatch(msg)
         return
     end
 
-    -- Notifications / server-initiated requests: v1 just logs.
+    -- Notifications / server-initiated requests: route the ones we have a
+    -- main-side consumer for; log + drop the rest. Each routed method
+    -- gets its own packed struct + main consumer as the feature lands.
     if msg.method then
+        if msg.method == "textDocument/publishDiagnostics" then
+            relay_diagnostics(self, msg, body_text)
+            return
+        end
         log.debug("lsp_lane", "inbound message dropped (no struct yet)", {
             exe = self.exe_name,
             method = msg.method,

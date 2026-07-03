@@ -13,6 +13,7 @@ local clipboard = require("cursed.clipboard")
 local completers = require("cursed.completers")
 local ColorScheme = require("cursed.colorscheme")
 local log = require("cursed.log")
+local utf8 = require("cursed.utf8")
 local universal_arg = require("cursed.universal_arg")
 local advice = require("cursed.advice")
 
@@ -634,6 +635,12 @@ commands.swap_mark_and_cursor = function(view, _editor)
 end
 
 commands.keyboard_quit = function(view, editor)
+    -- Dismiss the diagnostic hover for the CURRENT span if one is visible.
+    -- Falls through to normal quit behavior afterwards, so C-g still
+    -- cancels digit args / minibuffer / multi-cursor / mark.
+    if editor._diag_hover_visible then
+        editor._diag_hover_dismissed_sig = editor._diag_hover_active_sig
+    end
     if editor._digit_active then
         editor:cancel_digit_arg()
     end
@@ -1211,6 +1218,11 @@ commands.history_down = function(view, editor)
 end
 
 commands.escape_key = function(view, editor)
+    -- Dismiss the diagnostic hover for the CURRENT span if one is visible.
+    -- Falls through to normal Escape behavior afterwards.
+    if editor._diag_hover_visible then
+        editor._diag_hover_dismissed_sig = editor._diag_hover_active_sig
+    end
     if editor._digit_active then
         editor:cancel_digit_arg()
         return
@@ -1464,10 +1476,11 @@ end
 --- Select the next occurrence of the current selection's text.
 --- Adds a new cursor with an anchor at the match start and head at the
 --- match end. Repeats add successive cursors forward.
-commands.select_next_match = function(view, _editor)
+commands.select_next_match = function(view, editor)
     local query = primary_selection_text(view)
     if not query or #query == 0 then
-        return
+        -- No selection ("search inactive"): jump diagnostics instead.
+        return commands.next_diagnostic(view, editor)
     end
     local p = view:p()
     -- Search forward from the cursor (end of current selection).
@@ -1492,10 +1505,10 @@ commands.select_next_match = function(view, _editor)
 end
 
 --- Select the previous occurrence of the current selection's text.
-commands.select_prev_match = function(view, _editor)
+commands.select_prev_match = function(view, editor)
     local query = primary_selection_text(view)
     if not query or #query == 0 then
-        return
+        return commands.prev_diagnostic(view, editor)
     end
     local p = view:p()
     -- Search backward from the anchor (start of current selection).
@@ -1518,6 +1531,113 @@ commands.select_prev_match = function(view, _editor)
     nc.shadow_undo = tonumber(view.buffer._ptr.undo.count)
     nc.shadow_redo = tonumber(view.buffer._ptr.redo.count)
     table.insert(view.cursors, 1, nc)
+end
+
+----------------------------------------------------------------------------------------------------
+-- Diagnostic navigation
+--
+-- ctrl-x ctrl-n / ctrl-x ctrl-p move the primary cursor to the
+-- next/previous LSP diagnostic in the current buffer (wrapping),
+-- UNLESS a selection is active, in which case they keep their
+-- select-next/prev-occurrence (multi-cursor) meaning. The dispatch
+-- lives in select_next_match / select_prev_match above; these are the
+-- diagnostic implementations.
+----------------------------------------------------------------------------------------------------
+
+--- Collect the current buffer's diagnostics, sorted by start position
+--- (start line, then UTF-16 start char). Each item is augmented with a
+--- precomputed 0-based byte start column `bsc` (converted from the
+--- LSP UTF-16 offset against the live line text) so cursor comparison
+--- and placement stay correct on non-ASCII lines. Returns nil when the
+--- buffer has no LSP diagnostics.
+---@param view View
+---@return table[]|nil diags each {sl,sc,el,ec,bsc,severity,message,source}
+local function sorted_diagnostics(view)
+    local buf = view.buffer
+    local uri = buf and buf.lsp_uri
+    local entry = uri and lsp.diagnostics_for_uri(uri) or nil
+    if entry == nil or #entry.items == 0 then
+        return nil
+    end
+    local diags = {}
+    for _, d in ipairs(entry.items) do
+        if d.sl ~= nil and d.el ~= nil then
+            local text = buf:line_text(d.sl)
+            local clen = view:content_len(d.sl)
+            local bsc = utf8.utf16_to_byte_col(text, d.sc or 0)
+            if bsc > clen then
+                bsc = clen
+            end
+            diags[#diags + 1] = {
+                sl = d.sl,
+                sc = d.sc or 0,
+                el = d.el,
+                ec = d.ec,
+                bsc = bsc,
+                severity = d.severity,
+                message = d.message,
+                source = d.source,
+            }
+        end
+    end
+    if #diags == 0 then
+        return nil
+    end
+    table.sort(diags, function(a, b)
+        if a.sl ~= b.sl then
+            return a.sl < b.sl
+        end
+        return a.sc < b.sc
+    end)
+    return diags
+end
+
+--- Move the primary cursor to the start of the next (dir = 1) or
+--- previous (dir = -1) diagnostic, wrapping end→start / start→end.
+--- "Next" means strictly after the cursor's position, so repeated
+--- presses cycle through every diagnostic even when the cursor sits
+--- inside one. Sets a status message when the buffer has none.
+local function jump_diagnostic(view, editor, dir)
+    local diags = sorted_diagnostics(view)
+    if diags == nil then
+        editor.status_message = "no diagnostics in buffer"
+        return
+    end
+    local p = view:p()
+    local cline = p.line
+    local ccol = p.col
+    local pick
+    if dir > 0 then
+        for _, d in ipairs(diags) do
+            if d.sl > cline or (d.sl == cline and d.bsc > ccol) then
+                pick = d
+                break
+            end
+        end
+        pick = pick or diags[1] -- wrap around
+    else
+        for i = #diags, 1, -1 do
+            local d = diags[i]
+            if d.sl < cline or (d.sl == cline and d.bsc < ccol) then
+                pick = d
+                break
+            end
+        end
+        pick = pick or diags[#diags] -- wrap around
+    end
+    p.line = pick.sl
+    p.col = pick.bsc
+    view:_set_goal_col(pick.bsc)
+end
+
+--- Jump to the next diagnostic (ctrl-x ctrl-n with no selection).
+commands.next_diagnostic = function(view, editor)
+    jump_diagnostic(view, editor, 1)
+end
+
+--- Jump to the previous diagnostic (ctrl-x ctrl-p with no selection).
+commands.prev_diagnostic = function(view, editor)
+    jump_diagnostic(view, editor, -1)
 end
 
 --- Select every occurrence of the current selection's text.
@@ -3387,6 +3507,21 @@ commands.toggle_squiggle_demo = function(_view, editor)
         editor.status_message = "squiggle demo ON — move the cursor"
     else
         editor.status_message = "squiggle demo off"
+    end
+end
+
+--- Re-enable the diagnostic hover popup for the current span after Esc/
+--- Ctrl-g dismissed it. Per-span dismiss means only the span you
+--- dismissed stays hidden; clearing the dismissed signature here lets
+--- it show again immediately if the cursor is still inside one.
+commands.show_diagnostic_hover = function(_view, editor)
+    if editor._diag_hover_dismissed_sig ~= nil then
+        editor._diag_hover_dismissed_sig = nil
+        editor.status_message = "diagnostic hover restored"
+    elseif editor._diag_hover_active_sig ~= nil then
+        editor.status_message = "diagnostic hover already showing"
+    else
+        editor.status_message = "no diagnostic under cursor"
     end
 end
 

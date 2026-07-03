@@ -31,6 +31,7 @@ Most of the editor concepts --- and keybindings --- are derived from Emacs, but 
 - Combined the above with a built in pattern-based electric-pair system that can complete *keywords* after complex expressions, not just standered brackets, so that no tree sitter syntax node ever needs to be incomplete
 - Communication with the LSP (finding the binaries, spawning the processes, managing their lifecycle, encoding and decoding JSON messages) is handled on a separate thread which communicates asynchronously with the main thread in packed C structs, and JSON is handled by the extremely fast yyjson C library, allowing for LSP support to be extremely fast and totally nonblocking.
 - Generalized, unified in-buffer completion system that can accept the exact same "completer" higher-order-function interface as Minibuffers, uses the same interior rendering of options, is extremely fast and seamless, and supports dabbrev by default.
+- Generalized oveerlay system that allows overlays both anchored to places in the file, and floating at specific places on the screen, and allows layered *modification* of the characters below it. This is used, for instance, to add LSP diagnostic underline (or squiggle, on modern terminals) to file text, without baking it in to the core renderer. We also, of course, support cancellable popups showing the text content of a diagnostic when the cursor is inside it, and the ability to jump to previous/next diagnostics.
 
 ## Screenshots
 
@@ -53,6 +54,10 @@ Most of the editor concepts --- and keybindings --- are derived from Emacs, but 
 ### Multiple Cursors
 
 ![Live Editing](screenshots-live-editing.png)
+
+### LSP Diagnostics
+
+![diagnostics](./diagnostics.png)
 
 ## Installing
 
@@ -129,6 +134,8 @@ just clean-vendor # also rebuild vendored LuaJIT / tree-sitter-lib from scratch
 ```
 
 Build artifacts land entirely in `build/`; nothing outside the repo is touched except `~/.config/cursed/` at runtime.
+
+
 
 
 

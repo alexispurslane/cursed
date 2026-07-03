@@ -79,6 +79,17 @@ M._open_docs = {}
 --- @type table<integer, table<string, {language_id:string, get_text:function}>>
 M._pending_opens = {}
 
+--- Diagnostics by uri: uri → { client_id=integer, version=integer|nil,
+--- items=flat[] } where each item is { sl, sc, el, ec, severity,
+--- message, source, code } (0-based LSP line + UTF-16 character
+--- offsets; severity 1..4 or 0; message/source/code are strings or
+--- nil). Materialized ONCE on arrival by
+--- `apply_diagnostics` walking the yyjson doc the lane parsed — main
+--- never runs yyjson_read. Cleared per-uri by an empty array, by
+--- drop_client_docs, or by buffer_close.
+--- @type table<string, {client_id:integer, version:integer|nil, items:table[]}>
+M._diagnostics_by_uri = {}
+
 --- Next client_id to assign. 0 is reserved ("unassigned"/notification).
 local _next_client_id = 1
 
@@ -674,6 +685,13 @@ end
 function M.drop_client_docs(client_id)
     M._open_docs[client_id] = nil
     M._pending_opens[client_id] = nil
+    -- Drop this client's diagnostics so a dead/respawned server's stale
+    -- squiggles don't outlive its doc state. (A re-spawn will re-publish.)
+    for uri, entry in pairs(M._diagnostics_by_uri) do
+        if entry.client_id == client_id then
+            M._diagnostics_by_uri[uri] = nil
+        end
+    end
     -- A dead server won't reply to its pending requests, so their
     -- callbacks simply never fire (the closures GC once the table entry
     -- is overwritten by id reuse — ids are main-minted + monotonic).
@@ -861,6 +879,115 @@ function M.apply_response(ptr)
         cb(result, is_err)
     end
     return cid
+end
+
+--- Consume a MSG_LSP_DIAGNOSTICS (called from main's drain_lsp_inbox).
+--- The lane already parsed the body into a yyjson_doc (yyjson_read ran
+--- off-main); here we only WALK the already-parsed tree ONCE — no
+--- yyjson_read, no json.decode — to extract flat per-diagnostic fields,
+--- then free the doc. Stores the flat items keyed by uri; an empty
+--- array removes the uri's entry so stale squiggles don't linger.
+--- Frees the struct (the doc is freed separately after the walk).
+--- @param ptr any struct LspDiagnostics*
+--- @return integer|nil client_id
+function M.apply_diagnostics(ptr)
+    if ptr == nil then
+        return nil
+    end
+    local d = ffi.cast("struct LspDiagnostics *", ptr)
+    local cid = tonumber(d.client_id)
+    ---@cast cid integer
+    local ulen = tonumber(d.uri_len)
+    local ver = tonumber(d.version)
+    ---@cast ver integer
+    local doc = d.doc -- ownership transfers here; freed below
+    local root = d.root -- yyjson_val* (the diagnostics array) into *doc
+    local base = ffi.cast("char *", ptr) + ffi.sizeof("struct LspDiagnostics")
+    local uri = (ulen > 0) and ffi.string(base, ulen) or ""
+    ffi.C.free(ptr) -- struct no longer needed; doc lives on until walked
+
+    -- Sanity guard: shim_* on NULL is unsafe; treat a missing/non-array
+    -- root as an empty set (the lane only hands us a valid array root,
+    -- but a malformed server payload shouldn't crash main).
+    local items = {}
+    if root ~= nil and ffi.C.shim_is_arr(root) then
+        local n = tonumber(ffi.C.shim_arr_size(root))
+        ---@cast n integer
+        -- Pull a uint field by key from an object, 0 if absent/non-uint.
+        local function uint_field(obj, key)
+            local v = ffi.C.shim_obj_get(obj, key)
+            if v == nil or not ffi.C.shim_is_num(v) then
+                return 0
+            end
+            return tonumber(ffi.C.shim_get_uint(v))
+        end
+        -- Pull a string field by key, nil if absent/non-string.
+        local lenbuf = ffi.new("size_t[1]")
+        local function str_field(obj, key)
+            local v = ffi.C.shim_obj_get(obj, key)
+            if v == nil or not ffi.C.shim_is_str(v) then
+                return nil
+            end
+            local p = ffi.C.shim_get_str(v, lenbuf)
+            if p == nil then
+                return nil
+            end
+            return ffi.string(p, tonumber(lenbuf[0]))
+        end
+        for i = 0, n - 1 do
+            local diag = ffi.C.shim_arr_get(root, i)
+            if diag ~= nil then
+                local range = ffi.C.shim_obj_get(diag, "range")
+                if range ~= nil then
+                    local s = ffi.C.shim_obj_get(range, "start")
+                    local e = ffi.C.shim_obj_get(range, "end")
+                    if s ~= nil and e ~= nil then
+                        local severity = uint_field(diag, "severity")
+                        items[#items + 1] = {
+                            sl = uint_field(s, "line"),
+                            sc = uint_field(s, "character"),
+                            el = uint_field(e, "line"),
+                            ec = uint_field(e, "character"),
+                            severity = severity,
+                            message = str_field(diag, "message"),
+                            source = str_field(diag, "source"),
+                            code = str_field(diag, "code"),
+                        }
+                    end
+                end
+            end
+        end
+    end
+    json.free_doc(doc) -- always free the tree, even on partial walk
+
+    if uri == "" then
+        return cid
+    end
+    if #items == 0 then
+        M._diagnostics_by_uri[uri] = nil
+    else
+        M._diagnostics_by_uri[uri] =
+            { client_id = cid, version = (ver ~= 0 and ver or nil), items = items }
+    end
+    log.info("lsp", "diagnostics_stored", { uri = uri, count = #items })
+    return cid
+end
+
+--- Clear stored diagnostics for a uri (e.g. on buffer close).
+---@param uri string
+function M.clear_diagnostics(uri)
+    M._diagnostics_by_uri[uri] = nil
+end
+
+--- Read stored diagnostics for a uri, or nil if none. Each item is
+--- { sl, sc, el, ec, severity, message, source, code }: 0-based LSP
+--- line + UTF-16 character offsets (callers convert to byte offsets
+--- against the current line text) + severity 1..4 (error/warn/info/
+--- hint) or 0 if absent + the human-readable message text/source/code.
+---@param uri string
+---@return {client_id:integer, version:integer|nil, items:table[]}|nil
+function M.diagnostics_for_uri(uri)
+    return M._diagnostics_by_uri[uri]
 end
 
 return M

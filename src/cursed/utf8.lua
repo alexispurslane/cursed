@@ -82,6 +82,33 @@ function utf8.decode(s, i)
     end
 end
 
+--- Convert a 0-based UTF-16 code-unit offset (LSP position.character) on
+--- a line to a 0-based byte offset. Inverse of completers'
+--- `byte_col_to_utf16`: walks codepoints, accumulating 2 units per
+--- supplementary-plane codepoint (U+10000+) and stopping when the
+--- running count reaches `char`. Clamps past-end offsets to the line
+--- byte length.
+---@param line_text string
+---@param char integer 0-based UTF-16 code-unit offset
+---@return integer byte_offset 0-based
+function utf8.utf16_to_byte_col(line_text, char)
+    if char <= 0 then
+        return 0
+    end
+    local units = 0
+    local i = 1
+    local n = #line_text
+    while i <= n and units < char do
+        local cp, ni = utf8.decode(line_text, i)
+        units = units + (cp >= 0x10000 and 2 or 1)
+        if ni <= i then
+            break
+        end
+        i = ni
+    end
+    return i - 1
+end
+
 ----------------------------------------------------------------------------------------------------
 -- Display width (Markus Kuhn wcwidth, compacted)
 ----------------------------------------------------------------------------------------------------

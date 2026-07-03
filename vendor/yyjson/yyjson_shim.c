@@ -75,6 +75,18 @@ yyjson_val *shim_obj_iter_get_val(yyjson_val *key) {
     return yyjson_obj_iter_get_val(key);
 }
 
+/* Direct by-key / by-index accessors (faster + cleaner from Lua than
+ * spinning an iterator for a known-field lookup). */
+size_t shim_arr_size(const yyjson_val *arr) {
+    return yyjson_arr_size(arr);
+}
+yyjson_val *shim_arr_get(const yyjson_val *arr, size_t idx) {
+    return yyjson_arr_get(arr, idx);
+}
+yyjson_val *shim_obj_get(const yyjson_val *obj, const char *key) {
+    return yyjson_obj_get(obj, key);
+}
+
 /* ── Write path: mutable doc lifecycle ─────────────────────────── */
 
 yyjson_mut_doc *shim_mut_doc_new(void) { return yyjson_mut_doc_new(NULL); }
