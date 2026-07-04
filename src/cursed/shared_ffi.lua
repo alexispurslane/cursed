@@ -171,28 +171,35 @@ struct LspDocSync {
     uint32_t text_len;
 };
 
+/* server→main generic JSON-RPC response. The lane parses the body ONCE
+ * into a yyjson_doc (yyjson_read runs off-main), navigates to the
+ * `result` or `error` value, and ships the doc + value pointer to main.
+ * Main walks the value into a Lua table (val_to_lua), then frees the
+ * doc. Ownership of the doc transfers to main. Mirrors struct
+ * LspNotification. No JSON crosses the boundary as bytes. */
 struct LspResponse {
     uint32_t client_id;
     uint32_t id;
-    uint32_t result_len;
-    uint8_t  error_present;
+    uint8_t  error_present;  /* val points at the `error` obj if 1, `result` if 0 */
     uint8_t  _pad[3];
-    /* followed by result_len bytes of JSON */
+    void    *doc;   /* yyjson_doc* — owned by main (free_doc) */
+    void    *val;   /* yyjson_val* — points into *doc at result/error */
 };
 
-/* server→main textDocument/publishDiagnostics. The lane parses the
- * body ONCE into a yyjson_doc (yyjson_read runs off-main) and hands
- * the parsed tree + a pointer to the diagnostics array to main; main
- * does NO json decode (no yyjson_read) — it only walks the already-
- * parsed tree once on arrival to extract flat per-diagnostic fields,
- * then frees the doc. */
-struct LspDiagnostics {
+/* server→main generic inbound notification. The lane parses the body
+ * ONCE into a yyjson_doc (yyjson_read runs off-main), navigates to the
+ * JSON-RPC `params` value, and ships the doc + value pointer + the
+ * method string to main. Main walks `params` into a Lua table via
+ * val_to_lua, frees the doc, then dispatches by method to a handler
+ * registered via on_notification. Ownership of the doc transfers to
+ * main. Mirrors struct LspResponse; replaces the former per-method
+ * structs (e.g. LspDiagnostics). */
+struct LspNotification {
     uint32_t client_id;
-    uint32_t uri_len;
-    uint32_t version;  /* params.version (0 if absent) */
-    void    *doc;     /* yyjson_doc* — ownership transfers to main (free_doc) */
-    void    *root;    /* yyjson_val* — the diagnostics array, points into *doc */
-    /* followed by uri_len bytes (uri string, no NUL) */
+    uint32_t method_len;
+    void    *doc;   /* yyjson_doc* — owned by main (free_doc) */
+    void    *params_val; /* yyjson_val* — params value, points into *doc */
+    /* followed by method_len bytes (method string, no NUL) */
 };
 ]])
 
@@ -217,7 +224,7 @@ local MSG_LSP_KILL = 13
 local MSG_LSP_HANDSHAKE = 14
 local MSG_LSP_DOC_SYNC = 15
 local MSG_LSP_RESPONSE = 16
-local MSG_LSP_DIAGNOSTICS = 17
+local MSG_LSP_NOTIFICATION = 17 -- server→main inbound JSON-RPC notification
 
 local LSP_STATUS_SPAWNING = 0
 local LSP_STATUS_READY = 1
@@ -252,7 +259,7 @@ return {
     MSG_LSP_HANDSHAKE = MSG_LSP_HANDSHAKE,
     MSG_LSP_DOC_SYNC = MSG_LSP_DOC_SYNC,
     MSG_LSP_RESPONSE = MSG_LSP_RESPONSE,
-    MSG_LSP_DIAGNOSTICS = MSG_LSP_DIAGNOSTICS,
+    MSG_LSP_NOTIFICATION = MSG_LSP_NOTIFICATION,
     LSP_STATUS_SPAWNING = LSP_STATUS_SPAWNING,
     LSP_STATUS_READY = LSP_STATUS_READY,
     LSP_STATUS_DEAD = LSP_STATUS_DEAD,

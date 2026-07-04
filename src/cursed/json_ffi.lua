@@ -265,6 +265,19 @@ function M.decode_to_doc(s)
     return doc, C.shim_doc_get_root(doc), nil
 end
 
+--- Walk a yyjson_val* (pointing into a doc owned by the caller) into a
+--- Lua value. The caller owns the doc and must free it via free_doc.
+--- Used by main to convert a lane-parsed response doc's result/error
+--- value without re-parsing. nil-safe (nil val → nil).
+--- @param val any yyjson_val* cdata | nil
+--- @return any
+function M.val_to_lua(val)
+    if val == nil then
+        return nil
+    end
+    return decode_val(val)
+end
+
 --- Free a yyjson_doc returned by `decode_to_doc`. No-op on nil.
 --- @param doc any yyjson_doc* cdata | nil
 function M.free_doc(doc)

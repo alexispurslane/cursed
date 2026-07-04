@@ -94,6 +94,9 @@ return {
     -- LSP formatting (textDocument/formatting). "i" for indent.
     ["alt-i"] = "format",
 
+    -- LSP go-to-definition (textDocument/definition) at the cursor.
+    ["alt-."] = "goto_definition",
+
     -- Manual completion at point (forces the in-buffer popup now).
     ["alt-/"] = "complete",
 

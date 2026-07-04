@@ -109,6 +109,31 @@ function utf8.utf16_to_byte_col(line_text, char)
     return i - 1
 end
 
+--- Convert a 0-based byte column to a 0-based UTF-16 code-unit offset.
+--- Inverse of utf16_to_byte_col; walks codepoints in [1, byte_col] summing
+--- 1 (BMP) or 2 (supplementary plane, U+10000+) UTF-16 units.
+---@param line_text string
+---@param byte_col integer 0-based byte offset (cursor column)
+---@return integer char 0-based UTF-16 code-unit offset
+function utf8.byte_to_utf16_col(line_text, byte_col)
+    if byte_col <= 0 then
+        return 0
+    end
+    local units = 0
+    local i = 1
+    local limit = byte_col
+    local n = #line_text
+    while i <= limit and i <= n do
+        local cp, ni = utf8.decode(line_text, i)
+        units = units + (cp >= 0x10000 and 2 or 1)
+        if ni <= i then
+            break
+        end
+        i = ni
+    end
+    return units
+end
+
 ----------------------------------------------------------------------------------------------------
 -- Display width (Markus Kuhn wcwidth, compacted)
 ----------------------------------------------------------------------------------------------------

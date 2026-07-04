@@ -21,9 +21,12 @@
 --- by client_id; a reverse exe_name→client_id map lets the modeline look
 --- up "is the server for these declared names up?" without knowing ids.
 ---
---- Inbound decoded messages arrive as bespoke C structs per message type
---- via inbox_lsp (MSG_LSP_HANDSHAKE today; diagnostics/completion/hover
---- structs land as their consumers are wired).
+--- Inbound decoded messages arrive as packed C structs per message
+--- type via inbox_lsp: MSG_LSP_HANDSHAKE (initialize result + status),
+--- MSG_LSP_RESPONSE (generic request response, id-routed), and
+--- MSG_LSP_NOTIFICATION (generic server notification, method-routed).
+--- Both the response + notification paths transfer a lane-parsed
+--- yyjson_doc; main walks it into a Lua table and frees the doc.
 
 local ffi = require("ffi")
 local constants = require("cursed.shared")
@@ -84,8 +87,9 @@ M._pending_opens = {}
 --- message, source, code } (0-based LSP line + UTF-16 character
 --- offsets; severity 1..4 or 0; message/source/code are strings or
 --- nil). Materialized ONCE on arrival by
---- `apply_diagnostics` walking the yyjson doc the lane parsed — main
---- never runs yyjson_read. Cleared per-uri by an empty array, by
+--- `handle_publish_diagnostics` walking the lane-parsed params table
+--- (val_to_lua on the doc the lane handed via MSG_LSP_NOTIFICATION) —
+--- main never runs yyjson_read. Cleared per-uri by an empty array, by
 --- drop_client_docs, or by buffer_close.
 --- @type table<string, {client_id:integer, version:integer|nil, items:table[]}>
 M._diagnostics_by_uri = {}
@@ -99,10 +103,20 @@ local _next_request_id = 2
 
 --- Pending main-owned requests: id → callback(decoded_result, is_error).
 --- The lane relays every non-initialize response back as MSG_LSP_RESPONSE;
---- apply_response decodes the result JSON (via yyjson, on main since
---- results are small/infrequent) + invokes the matching callback here.
+--- apply_response walks the lane-parsed yyjson value into a Lua table
+--- (the heavy yyjson_read ran off-main on the lane; main only walks)
+--- + invokes the matching callback here, then frees the doc.
 --- @type table<integer, fun(result:any, is_error:boolean)>
 M._pending_requests = {}
+
+--- Inbound-notification handlers: method → handler(params, client_id).
+--- The lane relays every server notification (method set, no id) back as
+--- MSG_LSP_NOTIFICATION; apply_notification walks the lane-parsed params
+--- value into a Lua table (val_to_lua), frees the doc, and dispatches
+--- here by method. Mirrors the request-callback registry. Handlers are
+--- registered via on_notification; unhandled methods are logged + dropped.
+--- @type table<string, fun(params:any, client_id:integer)>
+M._notification_handlers = {}
 
 --- LSP_STATUS_* code (uint8 from the lane) → status string.
 --- Kept in sync with shared_state.h LSP_STATUS_*.
@@ -419,6 +433,17 @@ function M.mint_request_id(callback)
     return id
 end
 
+--- Register a handler for an inbound server notification (method set,
+--- no id). The handler receives the parsed `params` Lua table + the
+--- client_id; the lane-parsed yyjson doc is already freed by the time
+--- it runs. Registering nil clears the handler._unregisterd methods
+--- are logged + dropped by apply_notification.
+--- @param method string e.g. "textDocument/publishDiagnostics"
+--- @param handler fun(params:any, client_id:integer)|nil
+function M.on_notification(method, handler)
+    M._notification_handlers[method] = handler
+end
+
 --- Request textDocument/formatting for a document on the server bound
 --- to `client_id`. `opts` is { tab_size = N, insert_spaces = bool }.
 --- `callback` receives the decoded result (a TextEdit[] array, or nil
@@ -502,6 +527,45 @@ function M.request_completion(client_id, uri, position, trigger, callback)
         textDocument = { uri = uri },
         position = position,
         context = ctx,
+    }, id, client_id)
+    return id
+end
+
+----------------------------------------------------------------------------------------------------
+-- Go-to-definition (textDocument/definition)
+--
+-- Like request_format/request_completion: mints a main-owned request id
+-- + enqueues the request. The result flows back via apply_response
+-- (the generic doc-transfer path) and is a Location, Location[],
+-- LocationLink[] (if the client declared hierarchical chrSupport — we
+-- don't, so servers return plain Location/Location[]), or null. Main
+-- dispatches by id against the pending-request registry; the callback
+-- normalizes the shape and reuses Editor:jump_to_location.
+----------------------------------------------------------------------------------------------------
+
+--- Request textDocument/definition at `position` on the server bound to
+--- `client_id`. `position` is `{ line = L, character = C }` with L a 0-based
+--- line and C a 0-based UTF-16 code-unit offset. `callback` receives the
+--- decoded result (a Location, Location[], LocationLink[], or nil for
+--- null) + `is_error`. No-op + returns nil if not ready.
+--- @param client_id integer
+--- @param uri string file:// URI
+--- @param position {line:integer, character:integer} LSP position
+--- @param callback fun(result:any, is_error:boolean)
+--- @return integer|nil id the request id, or nil if not ready
+function M.request_definition(client_id, uri, position, callback)
+    if not M.is_ready(client_id) then
+        log.info(
+            "lsp",
+            "definition request skipped (not ready)",
+            { client_id = client_id, uri = uri }
+        )
+        return nil
+    end
+    local id = M.mint_request_id(callback)
+    enqueue_send("textDocument/definition", {
+        textDocument = { uri = uri },
+        position = position,
     }, id, client_id)
     return id
 end
@@ -853,26 +917,32 @@ function M.apply_response(ptr)
     local id = tonumber(resp.id)
     ---@cast id integer
     local is_err = tonumber(resp.error_present) ~= 0
-    local rlen = tonumber(resp.result_len)
+    local doc = resp.doc
+    local val = resp.val
+
+    -- Walk the lane-parsed value into a Lua table (no re-parse; the
+    -- heavy yyjson_read ran off-main on the lane). The result table is
+    -- independent of the doc, so free the doc before dispatching.
     local result = nil
-    if rlen > 0 then
-        local base = ffi.cast("char *", ptr) + ffi.sizeof("struct LspResponse")
-        local raw = ffi.string(base, rlen)
-        local decoded, derr = json.decode(raw)
-        if decoded ~= nil then
-            result = decoded
+    if doc ~= nil and val ~= nil then
+        local ok, v = pcall(json.val_to_lua, val)
+        if ok then
+            result = v
         else
-            log.warn("lsp", "response decode failed", { id = id, error = derr, bytes = rlen })
+            log.warn("lsp", "response val_to_lua failed", { id = id, error = tostring(v) })
         end
     end
+    if doc ~= nil then
+        json.free_doc(doc)
+    end
+    ffi.C.free(ptr)
+
     log.info("lsp_complete", "response_decoded_lane_to_main", {
         client_id = cid,
         id = id,
         is_error = is_err,
-        result_bytes = rlen,
         has_callback = M._pending_requests[id] ~= nil,
     })
-    ffi.C.free(ptr)
     local cb = M._pending_requests[id]
     if cb ~= nil then
         M._pending_requests[id] = nil
@@ -881,88 +951,98 @@ function M.apply_response(ptr)
     return cid
 end
 
---- Consume a MSG_LSP_DIAGNOSTICS (called from main's drain_lsp_inbox).
+--- Consume a MSG_LSP_NOTIFICATION (called from main's drain_lsp_inbox).
 --- The lane already parsed the body into a yyjson_doc (yyjson_read ran
---- off-main); here we only WALK the already-parsed tree ONCE — no
---- yyjson_read, no json.decode — to extract flat per-diagnostic fields,
---- then free the doc. Stores the flat items keyed by uri; an empty
---- array removes the uri's entry so stale squiggles don't linger.
---- Frees the struct (the doc is freed separately after the walk).
---- @param ptr any struct LspDiagnostics*
+--- off-main); here we walk the `params` value into a Lua table via
+--- val_to_lua, free the doc, then dispatch by method to a handler
+--- registered via on_notification. Unhandled methods are logged +
+--- dropped. Mirrors apply_response but method-routed instead of id-routed.
+--- @param ptr any struct LspNotification*
 --- @return integer|nil client_id
-function M.apply_diagnostics(ptr)
+function M.apply_notification(ptr)
     if ptr == nil then
         return nil
     end
-    local d = ffi.cast("struct LspDiagnostics *", ptr)
-    local cid = tonumber(d.client_id)
+    local n = ffi.cast("struct LspNotification *", ptr)
+    local cid = tonumber(n.client_id)
     ---@cast cid integer
-    local ulen = tonumber(d.uri_len)
-    local ver = tonumber(d.version)
-    ---@cast ver integer
-    local doc = d.doc -- ownership transfers here; freed below
-    local root = d.root -- yyjson_val* (the diagnostics array) into *doc
-    local base = ffi.cast("char *", ptr) + ffi.sizeof("struct LspDiagnostics")
-    local uri = (ulen > 0) and ffi.string(base, ulen) or ""
+    local mlen = tonumber(n.method_len)
+    ---@cast mlen integer
+    local doc = n.doc -- ownership transfers here; freed below
+    local val = n.params_val -- yyjson_val* (params) into *doc
+    local base = ffi.cast("char *", ptr) + ffi.sizeof("struct LspNotification")
+    local method = (mlen > 0) and ffi.string(base, mlen) or ""
     ffi.C.free(ptr) -- struct no longer needed; doc lives on until walked
 
-    -- Sanity guard: shim_* on NULL is unsafe; treat a missing/non-array
-    -- root as an empty set (the lane only hands us a valid array root,
-    -- but a malformed server payload shouldn't crash main).
-    local items = {}
-    if root ~= nil and ffi.C.shim_is_arr(root) then
-        local n = tonumber(ffi.C.shim_arr_size(root))
-        ---@cast n integer
-        -- Pull a uint field by key from an object, 0 if absent/non-uint.
-        local function uint_field(obj, key)
-            local v = ffi.C.shim_obj_get(obj, key)
-            if v == nil or not ffi.C.shim_is_num(v) then
-                return 0
-            end
-            return tonumber(ffi.C.shim_get_uint(v))
-        end
-        -- Pull a string field by key, nil if absent/non-string.
-        local lenbuf = ffi.new("size_t[1]")
-        local function str_field(obj, key)
-            local v = ffi.C.shim_obj_get(obj, key)
-            if v == nil or not ffi.C.shim_is_str(v) then
-                return nil
-            end
-            local p = ffi.C.shim_get_str(v, lenbuf)
-            if p == nil then
-                return nil
-            end
-            return ffi.string(p, tonumber(lenbuf[0]))
-        end
-        for i = 0, n - 1 do
-            local diag = ffi.C.shim_arr_get(root, i)
-            if diag ~= nil then
-                local range = ffi.C.shim_obj_get(diag, "range")
-                if range ~= nil then
-                    local s = ffi.C.shim_obj_get(range, "start")
-                    local e = ffi.C.shim_obj_get(range, "end")
-                    if s ~= nil and e ~= nil then
-                        local severity = uint_field(diag, "severity")
-                        items[#items + 1] = {
-                            sl = uint_field(s, "line"),
-                            sc = uint_field(s, "character"),
-                            el = uint_field(e, "line"),
-                            ec = uint_field(e, "character"),
-                            severity = severity,
-                            message = str_field(diag, "message"),
-                            source = str_field(diag, "source"),
-                            code = str_field(diag, "code"),
-                        }
-                    end
-                end
-            end
+    local params = nil
+    if doc ~= nil and val ~= nil then
+        local ok, p = pcall(json.val_to_lua, val)
+        if ok then
+            params = p
+        else
+            log.warn("lsp", "notification val_to_lua failed", {
+                method = method,
+                error = tostring(p),
+            })
         end
     end
     json.free_doc(doc) -- always free the tree, even on partial walk
 
-    if uri == "" then
-        return cid
+    local h = M._notification_handlers[method]
+    if h ~= nil then
+        h(params, cid)
+    else
+        log.debug("lsp", "notification dropped (no handler)", { method = method })
     end
+    return cid
+end
+
+--- Handler for textDocument/publishDiagnostics (registered via
+--- on_notification at module load). Receives the parsed `params` table
+--- ({ uri, version?, diagnostics[] }) and stores flat per-diagnostic
+--- records keyed by uri; an empty array removes the uri's entry so
+--- stale squiggles don't linger. Each item keeps the same shape the
+--- yyjson slice-walk previously produced:
+---   { sl, sc, el, ec, severity, message, source, code }
+--- with 0-based LSP line + UTF-16 char offsets (callers convert).
+--- @param params any parsed publishDiagnostics params table
+--- @param cid integer owning client id
+local function handle_publish_diagnostics(params, cid)
+    if type(params) ~= "table" then
+        return
+    end
+    local uri = params.uri
+    if type(uri) ~= "string" or uri == "" then
+        return
+    end
+    local function num(x)
+        return type(x) == "number" and x or 0
+    end
+    local function str(x)
+        return type(x) == "string" and x or nil
+    end
+    local items = {}
+    local diags = params.diagnostics
+    if type(diags) == "table" then
+        for _, d in ipairs(diags) do
+            local r = d.range
+            local s = r and r.start
+            local e = r and r["end"]
+            if type(s) == "table" and type(e) == "table" then
+                items[#items + 1] = {
+                    sl = num(s.line),
+                    sc = num(s.character),
+                    el = num(e.line),
+                    ec = num(e.character),
+                    severity = num(d.severity),
+                    message = str(d.message),
+                    source = str(d.source),
+                    code = str(d.code),
+                }
+            end
+        end
+    end
+    local ver = type(params.version) == "number" and params.version or 0
     if #items == 0 then
         M._diagnostics_by_uri[uri] = nil
     else
@@ -970,8 +1050,8 @@ function M.apply_diagnostics(ptr)
             { client_id = cid, version = (ver ~= 0 and ver or nil), items = items }
     end
     log.info("lsp", "diagnostics_stored", { uri = uri, count = #items })
-    return cid
 end
+M.on_notification("textDocument/publishDiagnostics", handle_publish_diagnostics)
 
 --- Clear stored diagnostics for a uri (e.g. on buffer close).
 ---@param uri string

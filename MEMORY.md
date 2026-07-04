@@ -23,19 +23,20 @@ so the agent can pick up context across sessions.
 
 ## Gotchas & Errors
 
-- Both needed a vendored-termbox2 patch because the new style bits live above 32 bits — where LuaJIT's 32-bit `bit` library can't reach — so the 64-bit packing stays in C.
-- Validation failed for tool "ask_user_question":
 - Let me do the final smoke launch under a pty to confirm no runtime crash, then mark done:
 - So `alt-e`/`ctrl-e` can't become prefixes without losing `forward_sentence`/`move_line_end`.
 - Found 2 occurrences of edits[2] in /Users/alexispurslane/Development/scratch/cursed/src/cursed/commands.lua. Each oldText must be unique. Please provide more context to make it uni
 - Now let me unit-test the pick/wrap logic (LLS can't catch runtime bugs there) with a standalone harness mirroring `jump_diagnostic` exactly:
 - Now a smoke launch to confirm no runtime crash on module load:
 - getting a crash now when I try to jump to a workspace symbol: double free
+- Traceback (most recent call last):
+- The lua "fail" is just a wrong test expectation — `local function baz() end` IS captured (the label includes the trailing `end` since the node is a one-liner).
 
 ## Heavily Read
 
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/completers.lua (9 reads) — Now the LSP symbol completers. Let me add a new section to completers.lua.
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/commands.lua (4 reads) — Let me look at the LSP command section in commands.lua and the read_from_minibuf
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/editor.lua (10 reads) — Let me confirm `schedule_after` semantics (return value) and the `file_loaded` e
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/lsp_lane.lua (3 reads) — Let me verify the LSP lane relays arbitrary request methods generically (not jus
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/view.lua (9 reads) — The highlighter is viewport-lazy and cold-query based. Let me look at how it ref
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/view.lua (5 reads) — Let me check the buffer's line text API and `set_single_cursor`, plus the `curre
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/modes/lua.lua (3 reads) — Now run the outline test through the shim:
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/ts.lua (5 reads) — Let me look at the ts API methods for extracting node text and ranges, plus the 
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/completers.lua (7 reads) — Now let me look at the top of completers.lua for the helpers (`current_doc`, `bu
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/editor.lua (5 reads) — Now the editor.lua refactor. Let me read the full `place_cursor_lsp` context:
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/major_mode.lua (3 reads) — Now run `just fmt` to fix the formatting in commands.lua, then `just check`:

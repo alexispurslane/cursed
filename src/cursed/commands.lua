@@ -827,6 +827,79 @@ commands.format = function(view, editor)
     end
 end
 
+----------------------------------------------------------------------------------------------------
+-- Go-to-definition (textDocument/definition)
+--
+-- Issue a definition request at the cursor to the buffer's bound server
+-- (if any + ready) and jump to the returned Location. Async: the request
+-- round-trips through the lane; the callback fires from main's
+-- drain_lsp_inbox when the response lands (via the generic MSG_LSP_RESPONSE
+-- doc-transfer path). The result may be a single Location, a Location[],
+-- a LocationLink[], or null; the first Location's target is jumped to.
+----------------------------------------------------------------------------------------------------
+
+commands.goto_definition = function(view, editor)
+    local buf = view and view.buffer
+    local cid = buf and buf.lsp_client_id
+    local uri = buf and buf.lsp_uri
+    if cid == nil or uri == nil then
+        editor.status_message = "no language server for this buffer"
+        return
+    end
+    if not lsp.is_ready(cid) then
+        editor.status_message = "language server not ready"
+        return
+    end
+    -- Cursor → LSP position: 0-based line + 0-based UTF-16 code-unit
+    -- offset (spec). The buffer's cursor col is a byte col, so convert.
+    local p = view:p()
+    local text = buf:line_text(p.line) or ""
+    local char = utf8.byte_to_utf16_col(text, p.col)
+    editor.status_message = "finding definition…"
+    local id = lsp.request_definition(
+        cid,
+        uri,
+        { line = p.line, character = char },
+        function(result, is_error)
+            if is_error then
+                editor.status_message = "definition request failed: server error"
+                return
+            end
+            if result == nil then
+                editor.status_message = "no definition"
+                return
+            end
+            -- Normalize the spec's three result shapes to one Location.
+            -- LSP allows: Location | Location[] | LocationLink[] (the latter
+            -- only if the client declared linkSupport; we didn't, so servers
+            -- return plain Location/Location[] — but handle both safely).
+            local loc = result
+            if type(loc) == "table" then
+                if loc.uri == nil and loc[1] ~= nil then
+                    loc = loc[1] -- Location[] / LocationLink[] → first
+                end
+            end
+            if type(loc) ~= "table" or loc.uri == nil then
+                editor.status_message = "no definition"
+                return
+            end
+            -- LocationLink uses targetUri/targetRange; Location uses uri/range.
+            local turi = loc.targetUri or loc.uri
+            local trange = loc.targetSelectionRange or loc.targetRange or loc.range
+            local start = trange and trange.start
+            if turi == nil or start == nil then
+                editor.status_message = "no definition"
+                return
+            end
+            editor:jump_to_location(turi, start.line, start.character)
+            editor.status_message = nil
+        end
+    )
+    if id == nil then
+        editor.status_message = "language server not ready"
+    end
+end
+
 commands.insert_file = function(view, editor)
     local filepath = editor.universal_args and editor.universal_args[2]
     editor:read_from_minibuffer({

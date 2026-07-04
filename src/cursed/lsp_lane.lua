@@ -119,98 +119,95 @@ end
 --- ships it in a struct LspResponse; main decodes the (small) result via
 --- yyjson + dispatches by id. Keeps the lane generic about result shape.
 --- msg.result / msg.error are Lua tables (or nil) from json_ffi.decode.
-local function relay_response(client, msg)
-    local raw
-    local err_present = false
-    if msg.error ~= nil then
-        raw = json.encode(msg.error)
-        err_present = true
-    else
-        raw = json.encode(msg.result)
+--- Relay a main-owned request's response. Parses body_text ONCE into a
+--- yyjson_doc (yyjson_read runs off-main), navigates to the `result` or
+--- `error` value, and ships the doc + value pointer to main. Main walks
+--- the value into a Lua table (val_to_lua) and frees the doc. Ownership
+--- transfers to main; the lane frees nothing on success. Shape-agnostic
+--- — main dispatches by id against its pending-request registry. On a
+--- parse failure the lane NACKs the caller by shipping a doc-less
+--- response (main fires the callback with is_error=true, result=nil)
+--- rather than leaking the pending entry.
+local function relay_response(client, msg, body_text)
+    local err_present = msg.error ~= nil
+    local doc, root, derr = json.decode_to_doc(body_text)
+    if doc == nil then
+        log.warn("lsp", "response doc parse failed", { id = msg.id, error = derr })
+        -- Still must NACK so the caller's callback isn't leaked: ship a
+        -- response with no doc; main treats nil result + is_error=true.
+        doc = nil
+        root = nil
     end
-    if raw == nil then
-        raw = "null"
+    local val = nil
+    if root ~= nil then
+        local key = err_present and "error" or "result"
+        val = ffi.C.shim_obj_get(root, key)
+        -- `result` may be legitimately absent (server returned {} with
+        -- neither result nor error); val==nil is fine — main yields nil.
     end
-    local rlen = #raw
-    local total = ffi.sizeof("struct LspResponse") + rlen
-    local buf = ffi.C.calloc(1, total)
+    local buf = ffi.C.calloc(1, ffi.sizeof("struct LspResponse"))
     if buf == nil then
+        ffi.C.shim_doc_free(doc) -- can't ship; don't leak the parse
         return
     end
     local resp = ffi.cast("struct LspResponse *", buf)
     resp.client_id = client.client_id
     resp.id = msg.id
-    resp.result_len = rlen
-    resp.error_present = err_present and 1 or 0
-    if rlen > 0 then
-        ffi.copy(ffi.cast("char *", buf) + ffi.sizeof("struct LspResponse"), raw, rlen)
-    end
+    resp.error_present = (err_present or doc == nil) and 1 or 0
+    resp.doc = doc
+    resp.val = val
     if (tonumber(msg.id) or 0) > 1 then
         log.info("lsp_complete", "lane_relaying_response_to_main", {
             client_id = client.client_id,
             id = msg.id,
-            result_bytes = rlen,
             is_error = err_present,
+            doc_handed = doc ~= nil,
         })
     end
     ss:push(ss._ptr.inbox_lsp, { type = constants.MSG_LSP_RESPONSE, ptr = buf })
 end
 
---- Relay a `textDocument/publishDiagnostics` notification to main.
---- The lane parses the body ONCE into a yyjson_doc (yyjson_read runs
---- here, off-main), navigates root→params→diagnostics, and ships the doc
---- + the diagnostics-array value to main. Main does NO json decode — it
---- only walks the already-parsed tree to extract flat per-diagnostic
---- fields, then frees the doc. Ownership of the doc transfers to main.
---- `params.version` (optional) carries the doc version the diagnostics
---- apply to, so main can drop stale squiggles.
-local function relay_diagnostics(client, msg, body_text)
-    local params = msg.params or {}
-    local uri = params.uri or ""
-    local version = 0
-    if type(params.version) == "number" then
-        version = params.version
-    end
+--- Relay a server→main JSON-RPC notification (any `msg.method` set,
+--- `msg.id == nil`). Parses body_text ONCE into a yyjson_doc (yyjson_read
+--- runs off-main), navigates to the `params` value, and ships the doc +
+--- value pointer + the method string to main. Main walks `params` into
+--- a Lua table (val_to_lua), frees the doc, and dispatches by method to
+--- a handler registered via on_notification. Ownership transfers to
+--- main; the lane frees nothing on success. Mirrors relay_response.
+--- `params` may be absent (some notifications carry none) — params_val
+--- is then nil and the handler receives nil.
+local function relay_notification(client, msg, body_text)
+    local method = msg.method or ""
     local doc, root, derr = json.decode_to_doc(body_text)
     if doc == nil then
-        log.warn("lsp", "diagnostics doc parse failed", { error = derr })
+        log.warn("lsp", "notification doc parse failed", {
+            method = method,
+            error = derr,
+        })
         return
     end
-    -- Navigate to params.diagnostics so main iterates the array directly
-    -- (two O(1) hash lookups; cheaper than main navigating per arrival).
-    -- If the shape is unexpected, fall back to the message root (main
-    -- treats a non-array as an empty set).
-    local diags_root = root
-    local p = ffi.C.shim_obj_get(root, "params")
-    if p ~= nil then
-        local d = ffi.C.shim_obj_get(p, "diagnostics")
-        if d ~= nil then
-            diags_root = d
-        end
-    end
-    local ulen = #uri
-    local total = ffi.sizeof("struct LspDiagnostics") + ulen
+    local params_val = ffi.C.shim_obj_get(root, "params")
+    local mlen = #method
+    local total = ffi.sizeof("struct LspNotification") + mlen
     local buf = ffi.C.calloc(1, total)
     if buf == nil then
-        ffi.C.free(doc)
+        ffi.C.shim_doc_free(doc) -- can't ship; don't leak the parse
         return
     end
-    local diag = ffi.cast("struct LspDiagnostics *", buf)
-    diag.client_id = client.client_id
-    diag.uri_len = ulen
-    diag.version = version
-    diag.doc = doc
-    diag.root = diags_root
-    if ulen > 0 then
-        ffi.copy(ffi.cast("char *", buf) + ffi.sizeof("struct LspDiagnostics"), uri, ulen)
+    local notif = ffi.cast("struct LspNotification *", buf)
+    notif.client_id = client.client_id
+    notif.method_len = mlen
+    notif.doc = doc
+    notif.params_val = params_val
+    if mlen > 0 then
+        ffi.copy(ffi.cast("char *", buf) + ffi.sizeof("struct LspNotification"), method, mlen)
     end
-    log.info("lsp", "lane_relaying_diagnostics_to_main", {
+    log.info("lsp", "lane_relaying_notification_to_main", {
         client_id = client.client_id,
-        uri = uri,
-        version = version,
+        method = method,
         doc_handed = true,
     })
-    ss:push(ss._ptr.inbox_lsp, { type = constants.MSG_LSP_DIAGNOSTICS, ptr = buf })
+    ss:push(ss._ptr.inbox_lsp, { type = constants.MSG_LSP_NOTIFICATION, ptr = buf })
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -442,20 +439,24 @@ function LSPClient:_dispatch(msg, body_text)
                     has_error = msg.error ~= nil,
                 })
             end
-            relay_response(self, msg)
+            relay_response(self, msg, body_text)
         end
         return
     end
 
-    -- Notifications / server-initiated requests: route the ones we have a
-    -- main-side consumer for; log + drop the rest. Each routed method
-    -- gets its own packed struct + main consumer as the feature lands.
-    if msg.method then
-        if msg.method == "textDocument/publishDiagnostics" then
-            relay_diagnostics(self, msg, body_text)
-            return
-        end
-        log.debug("lsp_lane", "inbound message dropped (no struct yet)", {
+    -- Notifications (msg.method set, no id): route generically. Every
+    -- inbound notification flows through relay_notification →
+    -- MSG_LSP_NOTIFICATION → main's on_notification registry. New
+    -- notifications (window/showMessage, $/progress, ...) need no lane
+    -- changes — only a main-side handler registered by method.
+    -- Server-initiated requests (method + id) are distinct: they expect
+    -- a response and aren't notifications; log + drop for now.
+    if msg.method and msg.id == nil then
+        relay_notification(self, msg, body_text)
+        return
+    end
+    if msg.method and msg.id ~= nil then
+        log.debug("lsp_lane", "server-initiated request dropped (no handler yet)", {
             exe = self.exe_name,
             method = msg.method,
             id = msg.id,
