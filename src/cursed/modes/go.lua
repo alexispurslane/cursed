@@ -139,4 +139,18 @@ return {
     tab_width = 4,
     expand_tab = false,
     indent_width = 4,
+    -- Tree-sitter document outline (goto_symbol fallback when no LSP is
+    -- bound to the buffer).
+    symbol_queries = [[
+[
+  (function_declaration)
+  (method_declaration)
+  (type_declaration)
+  (type_spec)
+  (struct_type)
+  (interface_type)
+  (const_declaration)
+  (var_declaration)
+] @symbol
+]],
 }

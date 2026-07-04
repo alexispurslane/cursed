@@ -1667,18 +1667,46 @@ local function make_symbol_tracker(editor, state)
 end
 
 --- Prompt for a symbol in the current buffer (imenu-style) and jump to
---- it. Issues `textDocument/documentSymbol` once; the completer filters
---- client-side as the user narrows the query.
+--- it. Prefers the LSP `textDocument/documentSymbol` response; when no
+--- language server is bound to the buffer, falls back to a tree-sitter
+--- document outline built from the active major mode's `symbol_queries`
+--- (so the picker still works in LSP-less buffers as long as the mode
+--- declares a symbol query + the buffer has a parse tree). The LSP path
+--- jumps via Editor:jump_to_location (URI + UTF-16 char); the TS path
+--- jumps within the current view via Editor:goto_byte (byte column).
 commands.goto_symbol = function(view, editor)
     local buf = view and view.buffer
     local cid = buf and buf.lsp_client_id
     local uri = buf and buf.lsp_uri
-    if cid == nil or uri == nil or not lsp.is_ready(cid) then
-        editor.status_message = "no language server for this buffer"
-        return
-    end
-    if lsp.doc_sent_version(cid, uri) < 0 then
-        editor.status_message = "buffer not yet synced to the server"
+    local lsp_ready = cid ~= nil
+        and uri ~= nil
+        and lsp.is_ready(cid)
+        and lsp.doc_sent_version(cid, uri) >= 0
+    if not lsp_ready then
+        -- LSP unavailable: try the tree-sitter document outline. Bail
+        -- with a status message when the buffer has no symbol query or
+        -- parse tree either (e.g. plain-text scratch buffer).
+        local has_query = view ~= nil and view:_symbol_query() ~= nil
+        local has_tree = view ~= nil and view:hl_tree() ~= nil
+        if not (has_query and has_tree) then
+            editor.status_message = "no language server or tree-sitter outline for this buffer"
+            return
+        end
+        local state = { selected = nil }
+        editor:read_from_minibuffer({
+            prompt = "Goto symbol (ts): ",
+            completion = true,
+            completer = completers.ts_document_symbols(editor),
+            on_change = make_symbol_tracker(editor, state),
+            on_submit = function(_input_text)
+                local loc = state.selected
+                if loc == nil then
+                    editor.status_message = "no symbol selected"
+                    return
+                end
+                editor:goto_byte(view, loc.line, loc.char)
+            end,
+        })
         return
     end
     local state = { selected = nil }

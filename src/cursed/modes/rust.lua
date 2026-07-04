@@ -206,4 +206,23 @@ return {
             { "{", "}" },
         }),
     },
+    -- Tree-sitter document outline (goto_symbol fallback when no LSP is
+    -- bound to the buffer).
+    symbol_queries = [[
+[
+  (function_item)
+  (function_signature_item)
+  (struct_item)
+  (enum_item)
+  (enum_variant)
+  (union_item)
+  (impl_item)
+  (trait_item)
+  (mod_item)
+  (type_item)
+  (const_item)
+  (static_item)
+  (macro_definition)
+] @symbol
+]],
 }

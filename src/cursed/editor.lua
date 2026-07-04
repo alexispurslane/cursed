@@ -981,6 +981,47 @@ local function uri_to_path(uri)
     return p
 end
 
+--- Place the primary cursor at an already-loaded view's BYTE position
+--- (NOT an LSP UTF-16 char). Clamps line/col to bounds, forces a
+--- scroll-into-view on the next render, and does the zero-flash
+--- highlighter cold requery so far jumps render on the first frame.
+--- Shared by `place_cursor_lsp` (UTF-16 → byte first) and the
+--- tree-sitter outline's byte-column jump. Clears any selection.
+--- @param view View
+--- @param line integer 0-based line index
+--- @param byte_col integer 0-based BYTE column
+local function place_cursor_byte(view, line, byte_col)
+    local lc = view:line_count()
+    local li = line or 0
+    if li < 0 then
+        li = 0
+    elseif li >= lc then
+        li = math.max(0, lc - 1)
+    end
+    local clen = view:content_len(li)
+    local col = byte_col or 0
+    if col > clen then
+        col = clen
+    end
+    view:set_single_cursor(li, col)
+    -- Force the next render's auto-scroll: nil guards mean "always scroll".
+    view._scroll_guard_line = nil
+    view._scroll_guard_col = nil
+    -- Zero-flash highlight resync (mirrors undo/redo/format): a far jump
+    -- lands the viewport in cold highlighter territory, and the lazy
+    -- per-frame viewport fill would otherwise leave the new region
+    -- plain until async bucket responses land. Cold-requerying
+    -- synchronously at the cursor's byte makes the jumped-to location
+    -- render correctly on the first frame. Safe no-op when no highlighter
+    -- mode is active (`_hl_enabled == false`).
+    view:clamp_cursor()
+    view:invalidate_wrap_cache()
+    local c = view:p()
+    local starts = view:_hl_line_starts()
+    local byte = (starts[c.line + 1] or 0) + c.col
+    view:_hl_cold_requery(byte)
+end
+
 --- Place the primary cursor at an LSP position in an already-loaded
 --- view (the text is available for UTF-16 → byte conversion), forcing
 --- a scroll-into-view on the next render. Clears any selection.
@@ -998,27 +1039,23 @@ local function place_cursor_lsp(view, line, char)
     end
     local text = buf:line_text(li) or ""
     local byte_col = utf8_mod.utf16_to_byte_col(text, char or 0)
-    local clen = view:content_len(li)
-    if byte_col > clen then
-        byte_col = clen
+    place_cursor_byte(view, li, byte_col)
+end
+
+--- Jump within an already-loaded view to a tree-sitter BYTE position
+--- (0-based line + 0-based byte column). Used by the tree-sitter
+--- document outline (the goto_symbol no-LSP fallback) whose nodes
+--- carry byte columns, not LSP UTF-16 chars. A no-op + status message
+--- when the view is nil/not yet loaded.
+--- @param view View|nil the view to jump in
+--- @param line integer? 0-based line
+--- @param byte_col integer? 0-based byte column
+function Editor:goto_byte(view, line, byte_col)
+    if view == nil or not view.file_loaded then
+        self.status_message = "target view not loaded"
+        return
     end
-    view:set_single_cursor(li, byte_col)
-    -- Force the next render's auto-scroll: nil guards mean "always scroll".
-    view._scroll_guard_line = nil
-    view._scroll_guard_col = nil
-    -- Zero-flash highlight resync (mirrors undo/redo/format): a far jump
-    -- lands the viewport in cold highlighter territory, and the lazy
-    -- per-frame viewport fill would otherwise leave the new region
-    -- plain until async bucket responses land. Cold-requerying
-    -- synchronously at the cursor's byte makes the jumped-to location
-    -- render correctly on the first frame. Safe no-op when no highlighter
-    -- mode is active (`_hl_enabled == false`).
-    view:clamp_cursor()
-    view:invalidate_wrap_cache()
-    local c = view:p()
-    local starts = view:_hl_line_starts()
-    local byte = (starts[c.line + 1] or 0) + c.col
-    view:_hl_cold_requery(byte)
+    place_cursor_byte(view, line or 0, byte_col or 0)
 end
 
 --- Jump to an LSP Location: URI + 0-based line + UTF-16 character.

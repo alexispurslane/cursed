@@ -228,6 +228,15 @@ return {
   (do_statement)
 ] @indent
 ]],
+    -- Tree-sitter document outline (goto_symbol fallback when no LSP is
+    -- bound to the buffer). Captures declaration nodes; the completer
+    -- shows each node's first source line as the label.
+    symbol_queries = [[
+[
+  (function_declaration)
+  (function_definition)
+] @symbol
+]],
     -- Input hooks (electric pairs). `IH.opener` matches its Lua pattern
     -- as a SUFFIX of the text left of the cursor the moment the user
     -- finishes typing it; on match the closer is auto-inserted. Bracket

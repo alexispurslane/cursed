@@ -322,6 +322,24 @@ return {
   (labeled_statement)
 ] @indent
 ]],
+    -- Tree-sitter document outline (goto_symbol fallback when no LSP is
+    -- bound to the buffer).
+    symbol_queries = [[
+[
+  (function_declaration)
+  (function_signature)
+  (generator_function_declaration)
+  (class_declaration)
+  (abstract_class_declaration)
+  (interface_declaration)
+  (enum_declaration)
+  (type_alias_declaration)
+  (method_definition)
+  (method_signature)
+  (abstract_method_signature)
+  (namespace)
+] @symbol
+]],
     -- Input hooks (electric pairs). Brackets auto-insert an inline
     -- closer (`(|)`); `}` dedents one indent level on Return via the
     -- structural `@indent` query.

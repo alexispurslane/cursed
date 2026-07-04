@@ -104,6 +104,7 @@ local IH = require("cursed.input_hook")
 ---@field _hl_last_gen integer|nil last buffer gen we dispatched an edit for (avoids repeat dispatch on every render when the edit was already sent)
 ---@field _bench_open_t0 integer|nil wall-clock us at Editor:open_file() start; instrumentation for file-open latency (cleared on load)
 ---@field _indent_query_cache table|nil {lang,src,query} lazily-compiled indent query for syntax-aware Return; rebuilt when the active language or `indent_queries` source changes
+---@field _symbol_query_cache table|nil {lang,src,query} lazily-compiled symbol query for the tree-sitter document outline; rebuilt when the active language or `symbol_queries` source changes
 local View = {}
 View.__index = View
 
@@ -183,6 +184,7 @@ function View.new(buffer)
         _hl_last_vend = nil,
         _hl_last_gen = nil,
         _indent_query_cache = nil,
+        _symbol_query_cache = nil,
     }, View)
 end
 
@@ -3483,6 +3485,49 @@ function View:_indent_query()
         return nil
     end
     self._indent_query_cache = { lang = self._hl_lang, src = src, query = query }
+    return query
+end
+
+--- Lazily build (or reuse) the compiled symbol query for the active
+--- major mode's `symbol_queries` source + the view's `_hl_lang`. Returns
+--- the ts.Query, or nil if no symbol queries are declared, no language
+--- is set, or the query failed to compile. Cached on
+--- `self._symbol_query_cache`; rebuilt when the language or source
+--- changes (e.g. on mode switch). Used by the tree-sitter document
+--- outline (the no-LSP goto_symbol fallback).
+---@return any|nil query
+function View:_symbol_query()
+    local src = nil
+    for _, m in ipairs(self._major_modes) do
+        if m.symbol_queries ~= nil then
+            src = m.symbol_queries
+        end
+    end
+    if src == nil or self._hl_lang == nil then
+        return nil
+    end
+    local cache = self._symbol_query_cache
+    if cache ~= nil and cache.lang == self._hl_lang and cache.src == src then
+        return cache.query
+    end
+    local ts = require("cursed.ts")
+    local lang_ptr, lerr = ts.lang_get(self._hl_lang)
+    if not lang_ptr then
+        log.warn("view", "symbol query: language unavailable", {
+            language = self._hl_lang,
+            error = tostring(lerr),
+        })
+        return nil
+    end
+    local query, qerr = ts.Query.new(lang_ptr, src)
+    if not query then
+        log.warn("view", "symbol query failed to compile", {
+            language = self._hl_lang,
+            error = tostring(qerr),
+        })
+        return nil
+    end
+    self._symbol_query_cache = { lang = self._hl_lang, src = src, query = query }
     return query
 end
 

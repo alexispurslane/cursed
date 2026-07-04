@@ -1005,6 +1005,88 @@ function completers.document_symbols(editor)
     end
 end
 
+--- Build the intra-document (imenu-style) symbol picker from the
+--- tree-sitter parse tree instead of an LSP `textDocument/documentSymbol`
+--- request. Used as the goto_symbol fallback when no language server is
+--- bound to the buffer (but a major mode with `symbol_queries` is).
+--- Walks `@symbol`-captured declaration nodes once, synchronously (the
+--- tree is current at picker-open time), and client-side-filters by the
+--- typed query. Each node's display text is its first source line
+--- (trimmed); the hidden `data` carries the node's start point as a
+--- 0-based (line, byte-col) the command jumps to via Editor:goto_byte.
+--- Returns a no-item completer when the buffer has no tree-sitter
+--- language, no symbol query, or no parse tree yet.
+--- @param editor Editor
+--- @return fun(text: string): table
+function completers.ts_document_symbols(editor)
+    local view = editor:current_view()
+    local buf = view and view.buffer
+    if view == nil or buf == nil then
+        return function(_text)
+            return {}
+        end
+    end
+    local ts = require("cursed.ts")
+    local query = view:_symbol_query()
+    local tree = view:hl_tree()
+    if query == nil or tree == nil then
+        return function(_text)
+            return {}
+        end
+    end
+    local root = tree:root()
+    if ts.node_is_null(root) then
+        return function(_text)
+            return {}
+        end
+    end
+
+    --- Walk every @symbol capture once, building flat completion items.
+    --- The node's START point (row + byte column) is the jump target;
+    --- the label is the start row's text from that column, trimmed.
+    local items = {}
+    local cursor, cerr = ts.QueryCursor.new()
+    if cursor == nil then
+        log.warn("ts_symbols", "query_cursor_new_failed", { error = tostring(cerr) })
+        return function(_text)
+            return {}
+        end
+    end
+    cursor:exec(query, root)
+    for match in cursor:matches() do
+        for _, cap in ipairs(match.captures) do
+            if cap.name == "symbol" then
+                local node = cap.node
+                local srow, scol = ts.node_point_range(node)
+                local row = tonumber(srow) or 0
+                local col = tonumber(scol) or 0
+                local kind = ts.node_type(node) or "sym"
+                local label = kind
+                local line_text = buf:line_text(row)
+                if line_text ~= nil then
+                    local s = line_text:sub(col + 1)
+                    s = s:gsub("^%s+", "")
+                    -- Collapse trailing block punctuation so the list row
+                    -- stays narrow (e.g. `function foo() end` → `function foo()`).
+                    s = s:gsub("%s*$", "")
+                    if s ~= "" then
+                        label = s
+                    end
+                end
+                items[#items + 1] = {
+                    text = label,
+                    metadata = "L" .. tostring(row + 1) .. "  " .. kind,
+                    data = { line = row, char = col },
+                }
+            end
+        end
+    end
+    log.info("ts_symbols", "document_outline", { count = #items })
+    return function(text)
+        return filter_symbols(items, text)
+    end
+end
+
 --- Build the workspace-wide symbol picker. Debounces a
 --- `workspace/symbol` request per query (server-side filtering), caches
 --- the response, and client-side-refilters the (possibly stale) list so

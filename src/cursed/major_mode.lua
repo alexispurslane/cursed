@@ -79,6 +79,7 @@ local keybind = require("cursed.keybind")
 ---@field injection_query string|nil injections query (walks the block tree for content regions to inject another grammar into — markdown: inline nodes, fenced code blocks, metadata blocks)
 ---@field extra_injected_grammars table<string,string>|nil grammar name → query source, for grammars the injection_query references that have no MajorMode of their own (e.g. markdown_inline, referenced by markdown's injection query)
 ---@field indent_queries string|nil predicate-free tree-sitter query source; `@indent`-captured nodes add one indent level on Return when the cursor is inside them
+---@field symbol_queries string|nil predicate-free tree-sitter query source; `@symbol`-captured nodes feed the tree-sitter document outline (the goto_symbol fallback when no LSP is bound to the buffer)
 ---@field input_hooks table|nil flat list of input-hook specs (build with cursed.input_hook); matched as a suffix of left-of-cursor text and dispatched by View:_run_input_hooks
 ---@field lsp_servers (string|table)[]|nil first-wins list of EITHER bare executable-name strings OR candidate tables `{ bin = "name", args = {"--stdio"}, env = { VAR = "value" } }`, spawned as a language server subprocess when a view activates this mode (managed centrally by the editor)
 ---@field completer function|nil factory `fun(editor): fun(ctx): table` producing this mode's in-buffer completion source (e.g. `completers.lsp`). The editor's `mode_dispatch` resolver instantiates it lazily + caches it; falls back to `buffer_words` when nil.
@@ -99,6 +100,7 @@ MajorMode.__index = MajorMode
 ---@field injection_query? string
 ---@field extra_injected_grammars? table<string,string>
 ---@field indent_queries? string
+---@field symbol_queries? string
 ---@field input_hooks? table
 ---@field lsp_servers? (string|table)[] first-wins list of LSP executables (strings or `{bin,args,env}` tables) to try when this mode activates
 ---@field completer? function factory `fun(editor): fun(ctx): table` for this mode's in-buffer completion source (resolved at runtime by the editor's `mode_dispatch`)
@@ -122,6 +124,7 @@ function MajorMode.new(spec)
         injection_query = spec.injection_query,
         extra_injected_grammars = spec.extra_injected_grammars,
         indent_queries = spec.indent_queries,
+        symbol_queries = spec.symbol_queries,
         input_hooks = spec.input_hooks,
         lsp_servers = spec.lsp_servers,
         completer = spec.completer,
@@ -166,6 +169,7 @@ end
 ---@field injection_query string|nil (inherited)
 ---@field extra_injected_grammars table<string,string>|nil (inherited)
 ---@field indent_queries string|nil (inherited)
+---@field symbol_queries string|nil (inherited)
 ---@field input_hooks table|nil (inherited)
 ---@field lsp_servers (string|table)[]|nil (inherited from template)
 ---@field completer function|nil (inherited from template)
