@@ -210,7 +210,7 @@ local Picker = MajorMode.new({
     on_enter = function(view, _editor)
         view._picker_filter = view._picker_filter or ""
         refilter(view)
-        view:change_display_opts({ whole_line_cursor = false })
+        view:change_display_opts({ whole_line_cursor = false, no_completion = true })
     end,
     keybindings = {
         ["up"] = function(view, _editor)

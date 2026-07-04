@@ -719,7 +719,7 @@ function CompletionMenu:_on_post_command(editor, cmd_name, view)
         self:close()
         return
     end
-    if view == nil or not view.file_loaded then
+    if view == nil or not view.file_loaded or view.no_completion then
         self:close()
         return
     end

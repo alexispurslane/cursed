@@ -165,6 +165,7 @@ function View.new(buffer)
         no_line_numbers = false,
         no_wrap = false,
         whole_line_cursor = false,
+        no_completion = false,
         _wrap_rows = nil,
         _wrap_cum = nil,
         _wrap_built = nil,
@@ -965,7 +966,7 @@ end
 --- resolved from the active major mode. Accepts a table of keys to
 --- set; omitted keys keep their current value. Cascade rules
 --- (no_gutter → no_line_numbers) are applied automatically.
----@param opts { no_gutter: boolean?, no_line_numbers: boolean?, no_wrap: boolean?, whole_line_cursor: boolean? }
+---@param opts { no_gutter: boolean?, no_line_numbers: boolean?, no_wrap: boolean?, whole_line_cursor: boolean?, no_completion: boolean? }
 function View:change_display_opts(opts)
     if opts.no_gutter ~= nil then
         self.no_gutter = opts.no_gutter
@@ -985,6 +986,9 @@ function View:change_display_opts(opts)
     end
     if opts.whole_line_cursor ~= nil then
         self.whole_line_cursor = opts.whole_line_cursor
+    end
+    if opts.no_completion ~= nil then
+        self.no_completion = opts.no_completion
     end
 end
 
