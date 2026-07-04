@@ -2583,16 +2583,20 @@ function Editor:render()
                 end
 
                 -- Indent guides: faint │ at tab-stop boundaries inside
-                -- leading whitespace. Painted AFTER the text layer (which
-                -- would otherwise overwrite them with blank space cells)
-                -- but BEFORE the cursor overlay. Only on the first sub-row
-                -- (the only place indentation lives), and only for guides
-                -- that fall within this sub-row's display-column range.
+                -- leading whitespace. Registered on the overlay layer
+                -- (screen-space floats) rather than painted inline with
+                -- the text, so they compose with extension overlays in a
+                -- single z-ordered flush. Queued BEFORE the cursor overlay
+                -- below so the float flush (registration order) keeps the
+                -- caret on top when it sits on a guide cell. Only on the
+                -- first sub-row (the only place indentation lives), and only
+                -- for guides that fall within this sub-row's display-column
+                -- range.
                 if sub_row == 0 and #guide_cols > 0 then
                     local guide_fg = ui("indent_guide")
                     for _, g in ipairs(guide_cols) do
                         if g < row_w then
-                            term:print(text_x + g, row, "│", guide_fg, row_bg)
+                            ov:put_float(text_x + g, row, "│", guide_fg, row_bg)
                         end
                     end
                 end
@@ -2628,7 +2632,13 @@ function Editor:render()
                                         break
                                     end
                                 end
-                                term:print(text_x + ccol, row, ch, ui("cursor_fg"), ui("cursor_bg"))
+                                ov:put_float(
+                                    text_x + ccol,
+                                    row,
+                                    ch,
+                                    ui("cursor_fg"),
+                                    ui("cursor_bg")
+                                )
                             end
                         end
                     end
@@ -2659,7 +2669,7 @@ function Editor:render()
                                         break
                                     end
                                 end
-                                term:print(text_x + ccol, row, ch, ui("cursor_fg"), ui("drop_bg"))
+                                ov:put_float(text_x + ccol, row, ch, ui("cursor_fg"), ui("drop_bg"))
                             end
                         end
                     end

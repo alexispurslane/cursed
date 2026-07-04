@@ -10,7 +10,6 @@ so the agent can pick up context across sessions.
 
 ## Key Decisions
 
-- alright, now let's use mdview for the hover documentation popups from the LSP
 - we should collapse all consecutive blank lines to just one
 - if a tree sitter parse tree exists for the document, then we should create a simple, globally usable api for finding the smallest tree sitter node surrounding a given position, and ones for walking a tree sitter tree...
 - go with alt-' for expand, and we'll use alt-" for collapse in the future.
@@ -20,14 +19,19 @@ so the agent can pick up context across sessions.
 - But the convention is `forward_<name>_select` (select is a suffix).
 - This will, in the future, allow using tree-sitter based text objects as well.
 - )` tree-sitter-query textobject builder (updated from the old "will, in the future, allow using tree-sitter based text objects" promise — now delivered), with the lazy query compilation, fresh-snapshot-per-call RAII...
+- The command may use tree-sitter as a fallback rather than LSP.
 
 ## Gotchas & Errors
 
-- Actually, the real LSP hover uses CRLF; since I can't easily get a hover to fire non-interactively, let me at least verify `measure` and `render` agree via a tiny in-editor eval with a CRLF markdown...
-- That's redundant; if `desc` is the deepest descendant, its children can't both be strictly smaller AND contain the seed (a child containing the seed would BE a deeper descendant, contradicting `desc`...
-- Command exited with code 1
-- The current shrink collapses to a cursor when it can't descend the tree further, skipping back down through the textobject ladder.
-- Let me build and smoke-test to make sure nothing crashes at load:
-- lua: (command line):2: module 'cursed.colorscheme' not found:
-- /bin/bash: -c: line 4: syntax error near unexpected token `('
 - cursed: -l /tmp/test_xeno failed: module '/tmp/test_xeno' not found:
+- error: unexpected closing delimiter `)` — Fix: This is the right fix.
+- Let me clean up — I appended a broken probe.
+- Let me confirm it was already failing before my change:
+- The pre-existing `_diag_hover_visible` lint warning is unrelated and was already failing before this change.
+- (no output)
+- code actions requires generalized gutter system, save for later, but blocked on that.
+- The only lint failure is the pre-existing `_diag_hover_visible` warning, which per project memory is unrelated and pre-existing.
+
+## Heavily Read
+
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/editor.lua (6 reads) — The only lint failure is the pre-existing `_diag_hover_visible` warning, which p
