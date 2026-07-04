@@ -787,6 +787,56 @@ function EditorListeners.setup(editor)
         end
     end)
 
+    -- Gutter sign: a colored "!" marking the worst diagnostic severity
+    -- overlapping the line (error > warn > info > hint). Mirrors the
+    -- squiggle listener above (same uri lookup + version-gating) but
+    -- resolves to a single per-line glyph rather than per-range
+    -- underlines. Registered into editor.gutter_sign_fns so it occupies
+    -- one fixed gutter column; returns nil (blank slot) for lines with
+    -- no diagnostic. bg=nil lets the render path fall back to the row
+    -- bg so the sign tracks the active-line tint.
+    editor.gutter_sign_fns[#editor.gutter_sign_fns + 1] = function(ed, view, li)
+        local buf = view.buffer
+        if buf == nil or buf.lsp_uri == nil then
+            return nil
+        end
+        local entry = lsp.diagnostics_for_uri(buf.lsp_uri)
+        if entry == nil then
+            return nil
+        end
+        if entry.version ~= nil and buf.lsp_version ~= nil and entry.version ~= buf.lsp_version then
+            return nil
+        end
+        local line_count = view:line_count()
+        -- Find the worst (lowest-numbered) severity among diags whose
+        -- [sl, el] range covers `li`. Lower number = more severe.
+        local worst = nil
+        for _, diag in ipairs(entry.items) do
+            local sl = diag.sl
+            local el = diag.el
+            if sl ~= nil and el ~= nil and sl >= 0 and sl < line_count then
+                if el >= line_count then
+                    el = line_count - 1
+                end
+                if li >= sl and li <= el then
+                    local sev = diag.severity or 3
+                    if worst == nil or sev < worst then
+                        worst = sev
+                    end
+                end
+            end
+        end
+        if worst == nil then
+            return nil
+        end
+        local scheme = ColorScheme.active
+        local name = (worst == 1 and "diagnostic_error")
+            or (worst == 2 and "diagnostic_warn")
+            or (worst == 4 and "diagnostic_hint")
+            or "diagnostic_info"
+        return { fg = scheme and scheme:color(name) or 0xFF5353, bg = nil, char = "!" }
+    end
+
     -- Diagnostic hover popup: when the primary cursor sits inside a
     -- diagnostic span, show that diagnostic's message as a floating
     -- bordered box just above the cursor (falling back to below when

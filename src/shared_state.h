@@ -59,12 +59,39 @@
  *   MSG_LSP_RESPONSE   ptr = struct LspResponse* (lane relays a request
  *                      result back to main; main dispatches by id)
  */
-#define MSG_LSP_SPAWN      11 /* main → lsp: ptr = struct LspSpawnReq* */
-#define MSG_LSP_SEND       12 /* main → lsp: ptr = struct LspSendReq* */
-#define MSG_LSP_KILL       13 /* main → lsp: ptr = struct LspKillReq* */
-#define MSG_LSP_HANDSHAKE  14 /* lsp → main: ptr = struct LspHandshake* */
-#define MSG_LSP_DOC_SYNC   15 /* main → lsp: ptr = struct LspDocSync* (didOpen/didChange/didClose, full-text sync) */
-#define MSG_LSP_RESPONSE   16 /* lsp → main: ptr = struct LspResponse* (generic request-result relay) */
+#define MSG_LSP_SPAWN       11 /* main → lsp: ptr = struct LspSpawnReq* */
+#define MSG_LSP_SEND        12 /* main → lsp: ptr = struct LspSendReq* */
+#define MSG_LSP_KILL        13 /* main → lsp: ptr = struct LspKillReq* */
+#define MSG_LSP_HANDSHAKE   14 /* lsp → main: ptr = struct LspHandshake* */
+#define MSG_LSP_DOC_SYNC    15 /* main → lsp: ptr = struct LspDocSync* (didOpen/didChange/didClose, full-text sync) */
+#define MSG_LSP_RESPONSE   16 /* lsp → main: ptr = struct LspResponse* (generic request-result relay)
+                                 NOTE: 17 reserved for MSG_LSP_NOTIFICATION (declared in shared_ffi.lua).  */
+
+/* ── Proc lane message types ───────────────────────────────────────
+ * A general subprocess-control lane (sibling of the LSP lane, but
+ * shape-agnostic: no JSON-RPC framing) owns arbitrary child
+ * processes. Main assigns a monotonic `procid`; the lane echoes it in
+ * every report. STDOUT/STDERR chunks carry their own bytes (malloc'd,
+ * ownership → main on pop). Main relays inbound reports as
+ * `process_out:<procid>` events on the editor event bus and feeds
+ * STDIN by listening for `process_in:<procid>` events (the proc_client
+ * facade wires that listener at spawn time).
+ *
+ * Outbound (main → lane):
+ *   MSG_PROC_SPAWN  ptr = struct ProcSpawnReq* (JSON spec + procid)
+ *   MSG_PROC_STDIN  ptr = struct ProcStdinReq* (bytes; len==0 → close stdin / EOF)
+ *   MSG_PROC_KILL   ptr = struct ProcKillReq*  (deliver signal; fire-and-forget)
+ *   MSG_SHUTDOWN    lane exits its blocking kevent()
+ *
+ * Inbound (lane → main):
+ *   MSG_PROC_OUTPUT ptr = struct ProcOutput* (stdout/stderr chunk)
+ *   MSG_PROC_EXIT   ptr = struct ProcExit*   (lifecycle: exit/killed/failed/signal-sent)
+ */
+#define MSG_PROC_SPAWN    18 /* main → proc: ptr = struct ProcSpawnReq* */
+#define MSG_PROC_STDIN    19 /* main → proc: ptr = struct ProcStdinReq* */
+#define MSG_PROC_KILL     20 /* main → proc: ptr = struct ProcKillReq*  */
+#define MSG_PROC_OUTPUT   21 /* proc → main: ptr = struct ProcOutput* */
+#define MSG_PROC_EXIT     22 /* proc → main: ptr = struct ProcExit*   */
 
 /* ── LSP server status codes (carried in LspHandshake.status) ──────── */
 #define LSP_STATUS_SPAWNING 0   /* spawned, initialize response not yet received */
@@ -130,10 +157,13 @@ struct SharedState {
     struct RingBuf inbox_hl;    /* highlight → main */
     struct RingBuf outbox_lsp;  /* main → LSP */
     struct RingBuf inbox_lsp;  /* LSP → main */
+    struct RingBuf outbox_proc; /* main → proc */
+    struct RingBuf inbox_proc;  /* proc → main */
     int            main_kq_fd;  /* central kqueue for main lane (tty, resize, inbox wakes) */
     int            io_kq_fd;    /* kqueue for IO lane (outbox wake) */
     int            hl_kq_fd;   /* kqueue for highlight lane (outbox_hl wake) */
     int            lsp_kq_fd; /* kqueue for LSP lane (outbox_lsp wake + child stdout EVFILT_READ) */
+    int            proc_kq_fd; /* kqueue for proc lane (outbox_proc wake + child stdout/stderr EVFILT_READ) */
     _Atomic bool   running;
 
     /* Shared parse-tree slot table (highlight → main). */
@@ -165,12 +195,15 @@ static inline struct SharedState *shared_state_alloc(void)
     atomic_store_explicit(&ss->inbox_lsp.tail, 0, memory_order_relaxed);
     atomic_store_explicit(&ss->outbox_lsp.head, 0, memory_order_relaxed);
     atomic_store_explicit(&ss->outbox_lsp.tail, 0, memory_order_relaxed);
+    atomic_store_explicit(&ss->outbox_proc.head, 0, memory_order_relaxed);
+    atomic_store_explicit(&ss->outbox_proc.tail, 0, memory_order_relaxed);
     atomic_store_explicit(&ss->running, true, memory_order_relaxed);
 
     ss->main_kq_fd = kqueue();
     ss->io_kq_fd = kqueue();
     ss->hl_kq_fd = kqueue();
     ss->lsp_kq_fd = kqueue();
+    ss->proc_kq_fd = kqueue();
 
     /* Each ring wakes its consumer lane via a distinct EVFILT_USER ident.
      * Idents are lane-local: outbox_* wakes the consumer lane (io/hl/lsp),
@@ -188,8 +221,12 @@ static inline struct SharedState *shared_state_alloc(void)
     ss->outbox_lsp.wake_ident = 1;
     ss->inbox_lsp.consumer_kq_fd = ss->main_kq_fd;
     ss->inbox_lsp.wake_ident = 3;
+    ss->outbox_proc.consumer_kq_fd = ss->proc_kq_fd;
+    ss->outbox_proc.wake_ident = 1;
+    ss->inbox_proc.consumer_kq_fd = ss->main_kq_fd;
+    ss->inbox_proc.wake_ident = 4;
 
-    if (ss->main_kq_fd < 0 || ss->io_kq_fd < 0 || ss->hl_kq_fd < 0 || ss->lsp_kq_fd < 0) {
+    if (ss->main_kq_fd < 0 || ss->io_kq_fd < 0 || ss->hl_kq_fd < 0 || ss->lsp_kq_fd < 0 || ss->proc_kq_fd < 0) {
         shared_state_free(ss);
         return NULL;
     }
@@ -216,6 +253,7 @@ static inline void shared_state_free(struct SharedState *ss)
     if (ss->io_kq_fd >= 0) close(ss->io_kq_fd);
     if (ss->hl_kq_fd >= 0) close(ss->hl_kq_fd);
     if (ss->lsp_kq_fd >= 0) close(ss->lsp_kq_fd);
+    if (ss->proc_kq_fd >= 0) close(ss->proc_kq_fd);
     free(ss);
 }
 
@@ -440,6 +478,75 @@ struct LspResponse {
     uint8_t  error_present;/* 1 = this is an error reply (result carries `error`) */
     uint8_t  _pad[3];
     /* followed by result_len bytes of JSON */
+};
+
+/* ── Proc lane payloads ───────────────────────────────────────────── */
+
+/* MSG_PROC_SPAWN (main → proc): spec is a JSON object
+ *   { "argv": ["prog", "arg", ...],  (REQUIRED, argv[0] is the program)
+ *     "env":  { "KEY": "VAL", ... },   (optional; merged into environ via putenv)
+ *     "cwd":  "/path",                  (optional; chdir before execvp)
+ *     "buffer_bytes": 8192 }            (optional; per-stream flush threshold —
+ *                                       the lane accumulates stdout/stderr until
+ *                                       this many bytes accumulate before pushing
+ *                                       one MSG_PROC_OUTPUT, so chatty programs
+ *                                       don't flood main with per-read chunks.
+ *                                       0 = flush every read (unbuffered).
+ *                                       default 8192.)
+ * procid is main-assigned + monotonic; the lane echoes it in every
+ * report. The lane frees the struct + spec bytes. On spawn failure
+ * (fork/exec) the lane reports MSG_PROC_EXIT with kind=FAILED. */
+struct ProcSpawnReq {
+    uint32_t procid;     /* main-assigned id; lane echoes in all reports */
+    uint32_t spec_len;   /* bytes of JSON spec (no NUL) */
+    /* followed by spec_len bytes of JSON */
+};
+
+/* MSG_PROC_STDIN (main → proc): write `ptr` (len bytes) to the child's
+ * stdin. len==0 signals EOF (close child stdin). Ownership of ptr
+ * transfers to the lane — it frees after write (or immediately for
+ * len==0 when ptr is NULL). Lane drops silently if procid unknown/
+ * stdin already closed. */
+struct ProcStdinReq {
+    uint32_t procid;
+    uint32_t len;       /* bytes; 0 == close stdin (EOF) */
+    uint8_t *ptr;       /* malloc'd bytes (NULL when len==0) */
+};
+
+/* MSG_PROC_KILL (main → proc): deliver `signal` to the live process.
+ * Fire-and-forget: the lane sends the signal, then immediately reports
+ * MSG_PROC_EXIT with kind=KILL_SENT (code=signal) as an acknowledgment.
+ * The authoritative death notice (kind=SIGNALED/EXITED) arrives later
+ * when the child's stdout+stderr EOF and waitpid reaps it. */
+struct ProcKillReq {
+    uint32_t procid;
+    uint32_t signal;    /* 9=SIGKILL, 15=SIGTERM, ... */
+};
+
+/* MSG_PROC_OUTPUT (proc → main): a stdout or stderr chunk. ptr is
+ * malloc'd by the lane; ownership transfers to main on pop (ring_pop
+ * copies Msg by value; main frees ptr after copying to a Lua string).
+ * stream: 1=stdout, 2=stderr. */
+struct ProcOutput {
+    uint32_t procid;
+    uint8_t  stream;    /* 1=stdout, 2=stderr */
+    uint8_t  _pad[3];
+    uint32_t len;       /* bytes (may be 0 if a zero-length read slipped) */
+    uint8_t *ptr;       /* malloc'd bytes, ownership → main */
+};
+
+/* MSG_PROC_EXIT (proc → main): lifecycle notification. kind codes:
+ *   EXITED    (0)  process exited; code = exit status (0-255)
+ *   SIGNALED  (1)  process killed by a signal; code = signal number
+ *   FAILED    (2)  spawn failed (fork/exec); code = errno; no child reaped
+ *   KILL_SENT (3)  informational: lane delivered `code` signal at main's request
+ * EXITED/SIGNALED/FAILED are terminal (the procid is retired after);
+ * KILL_SENT is advisory and is followed later by SIGNALED/EXITED. */
+struct ProcExit {
+    uint32_t procid;
+    uint8_t  kind;      /* 0=exited 1=signaled 2=failed 3=kill_sent */
+    uint8_t  _pad[3];
+    uint32_t code;      /* exit status (exited) | signal number (signaled/kill_sent) | errno (failed) */
 };
 
 #endif /* SHARED_STATE_H */

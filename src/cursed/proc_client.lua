@@ -1,0 +1,235 @@
+--- Proc lane main-side facade.
+---
+--- The actual subprocess management (fork/exec/pipes/waiting) lives in
+--- the proc lane (cursed.proc_lane). This module is the main-thread
+--- handle to that lane: it mints monotonic procids, builds the wire
+--- structs (ProcSpawnReq / ProcStdinReq / ProcKillReq), pushes them to
+--- outbox_proc, and — crucially — wires the editor event bus so that
+--- `process_in:<procid>` events become STDIN writes and inbox
+--- MSG_PROC_OUTPUT/EXIT messages become `process_out:<procid>` events.
+---
+--- Lifecycle:
+---   spawn(argv, opts) -> procid
+---     - assigns a fresh procid
+---     - registers editor.event_system:on("process_in:<procid>", fn)
+---       whose fn(arg) forwards bytes to the lane (nil/false → EOF)
+---       via send_stdin
+---     - pushes MSG_PROC_SPAWN
+---     - returns the procid
+---     On spawn failure (lane can't fork/exec), main learns via the
+---     inbox MSG_PROC_EXIT(FAILED) — spawn itself returns the procid.
+---
+---   send_stdin(procid, bytes)
+---     - bytes is a string; nil/false → EOF (close child stdin)
+---     - pushes MSG_PROC_STDIN (malloc'd copy; lane frees)
+---
+---   kill(procid, signal)
+---     - pushes MSG_PROC_KILL (SIGTERM default)
+---     - lane acks via MSG_PROC_EXIT(KILL_SENT); the authoritative
+---       death notice (SIGNALED/EXITED) arrives later
+---
+---   on_proc_exit(procid)
+---     - unregisters the `process_in:<procid>` listener (called by
+---       main.lua's drain_proc_inbox on a TERMINAL EXIT)
+---
+--- For the inverse direction (lane → main), see drain_proc_inbox in
+--- main.lua: it pops inbox_proc, frees malloc'd payloads, and emits
+--- `process_out:<procid>` events with (kind, code) or (stream, bytes).
+
+local ffi = require("ffi")
+local log = require("cursed.log")
+local json = require("cursed.json_ffi")
+local constants = require("cursed.shared")
+
+local M = {}
+
+-- SharedState (set once from main.lua via setup).
+local function ss()
+    return M._ss
+end
+
+-- Default signals.
+local SIGTERM = 15
+
+-- procid → registered `process_in:<procid>` handler (for :off on exit).
+local _in_handlers = {} ---@type table<integer, function>
+
+--- Build + push a ProcSpawnReq. Takes ownership of nothing on the Lua
+--- side; the lane frees the malloc'd buf + spec bytes.
+---@param procid integer
+---@param spec_json string
+local function push_spawn(procid, spec_json)
+    local s = ss()
+    if s == nil then
+        return
+    end
+    local total = ffi.sizeof("struct ProcSpawnReq") + #spec_json
+    local buf = ffi.C.calloc(1, total)
+    if buf == nil then
+        log.warn("proc", "spawn calloc failed", { procid = procid })
+        return
+    end
+    local req = ffi.cast("struct ProcSpawnReq *", buf)
+    req.procid = procid
+    req.spec_len = #spec_json
+    local base = ffi.cast("char *", buf) + ffi.sizeof("struct ProcSpawnReq")
+    ffi.copy(base, spec_json, #spec_json)
+    s:push(s._ptr.outbox_proc, { type = constants.MSG_PROC_SPAWN, ptr = buf })
+end
+
+--- Build + push a ProcStdinReq. len==0 → EOF (ptr NULL). Ownership of
+--- the malloc'd byte copy transfers to the lane.
+---@param procid integer
+---@param bytes string|nil|false  nil/false → close stdin (EOF)
+local function push_stdin(procid, bytes)
+    local s = ss()
+    if s == nil then
+        return
+    end
+    local buf = ffi.C.calloc(1, ffi.sizeof("struct ProcStdinReq"))
+    if buf == nil then
+        return
+    end
+    local req = ffi.cast("struct ProcStdinReq *", buf)
+    req.procid = procid
+    if bytes == nil or bytes == false then
+        req.len = 0
+        req.ptr = nil
+    else
+        local n = #bytes
+        req.len = n
+        if n > 0 then
+            local copy = ffi.C.malloc(n)
+            if copy ~= nil then
+                ffi.copy(copy, bytes, n)
+                req.ptr = ffi.cast("uint8_t *", copy)
+            else
+                req.len = 0
+                req.ptr = nil
+            end
+        else
+            req.ptr = nil
+        end
+    end
+    s:push(s._ptr.outbox_proc, { type = constants.MSG_PROC_STDIN, ptr = buf })
+end
+
+--- Build + push a ProcKillReq.
+---@param procid integer
+---@param signal integer
+local function push_kill(procid, signal)
+    local s = ss()
+    if s == nil then
+        return
+    end
+    local buf = ffi.C.calloc(1, ffi.sizeof("struct ProcKillReq"))
+    if buf == nil then
+        return
+    end
+    local req = ffi.cast("struct ProcKillReq *", buf)
+    req.procid = procid
+    req.signal = signal
+    s:push(s._ptr.outbox_proc, { type = constants.MSG_PROC_KILL, ptr = buf })
+end
+
+----------------------------------------------------------------------------------------------------
+-- Public API
+----------------------------------------------------------------------------------------------------
+
+--- Wire the facade against the SharedState + editor (called once from
+--- main.lua after the inbox wake is registered). The editor is needed
+--- so spawn can register per-procid `process_in:<id>` listeners.
+---@param editor table
+---@param shared_state SharedState
+function M.setup(editor, shared_state)
+    M._ss = shared_state
+    M._editor = editor
+    M._next_procid = 1
+end
+
+--- Spawn a subprocess. argv is the execvp argv (argv[1..] are args).
+--- opts.env is a string→string table (merged into the child env);
+--- opts.cwd is an optional working directory; opts.buffer_bytes caps
+--- how much stdout/stderr the lane accumulates before flushing a
+--- single chunk to main (default 8192; 0 = flush every read, i.e. no
+--- buffering). Larger values protect main from chatty programs at the
+--- cost of output latency. Returns the assigned procid immediately
+--- (monotonic); spawn failure is reported later via the
+--- `process_out:<procid>` event with kind=failed.
+---@param argv string[]|table  argv[0] is the program
+---@param opts table|nil  { env?: table<string,string>, cwd?: string, buffer_bytes?: integer }
+---@return integer procid
+function M.spawn(argv, opts)
+    opts = opts or {}
+    local procid = M._next_procid
+    M._next_procid = procid + 1
+
+    -- Register the process_in:<procid> listener that forwards STDIN.
+    -- bytes (string) → write; nil/false → EOF.
+    local editor = M._editor
+    local name = "process_in:" .. procid
+    local fn = function(_editor, bytes)
+        push_stdin(procid, bytes)
+    end
+    _in_handlers[procid] = fn
+    if editor then
+        editor.event_system:on(name, fn)
+    end
+
+    local spec = {
+        argv = argv,
+        env = opts.env,
+        cwd = opts.cwd,
+        buffer_bytes = opts.buffer_bytes,
+    }
+    local spec_json, err = json.encode(spec)
+    if spec_json == nil then
+        log.warn("proc", "spawn spec encode failed", { procid = procid, error = err })
+        return procid
+    end
+    push_spawn(procid, spec_json)
+    log.info("proc", "spawn requested", { procid = procid, argv0 = argv[1] })
+    return procid
+end
+
+--- Send bytes to a process's STDIN. nil/false closes stdin (EOF).
+---@param procid integer
+---@param bytes string|nil|false
+function M.send_stdin(procid, bytes)
+    push_stdin(procid, bytes)
+end
+
+--- Deliver a signal to a process (SIGTERM by default). Fire-and-forget;
+--- the lane acks with KILL_SENT, then the authoritative SIGNALED/EXITED
+--- arrives later as the pipes EOF + the child is reaped.
+---@param procid integer
+---@param signal integer|nil  default 15 (SIGTERM)
+function M.kill(procid, signal)
+    push_kill(procid, signal or SIGTERM)
+end
+
+--- Unregister the `process_in:<procid>` listener. Called by
+--- drain_proc_inbox on a TERMINAL exit (exited/signaled/failed) so the
+--- bus stops accepting STDIN for a dead procid. Safe to call repeatedly.
+---@param procid integer
+function M.on_proc_exit(procid)
+    local fn = _in_handlers[procid]
+    if fn ~= nil and M._editor then
+        M._editor.event_system:off("process_in:" .. procid, fn)
+    end
+    _in_handlers[procid] = nil
+end
+
+--- Shutdown: best-effort SIGTERM of every live proc + listener detach.
+--- Normally the lane handles process teardown on MSG_SHUTDOWN; this
+--- only clears the main-side listener registry.
+function M.shutdown()
+    if M._editor then
+        for procid, fn in pairs(_in_handlers) do
+            M._editor.event_system:off("process_in:" .. procid, fn)
+        end
+    end
+    _in_handlers = {}
+end
+
+return M

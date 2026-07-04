@@ -330,6 +330,7 @@ end
 ---@field main_kq table|nil editor's main kqueue instance (attached by main.lua); LSP stdout registered here
 ---@field workspace_dir string|nil editor workspace root (cwd at startup, attached by main.lua); used as the LSP rootUri
 ---@field drain_hl_inbox fun()|nil inline inbox_hl drain (attached by main.lua) for the zero-flash sync-wait path
+---@field proc table|nil proc-lane facade (attached by main.lua): spawn/send_stdin/kill against the proc lane
 ---@field views View[] list of open views
 ---@field active_view integer 1-based index into views
 ---@field term Term
@@ -381,6 +382,7 @@ end
 ---@field _whichkey_node keybind.Trie|nil current trie node while a chord prefix is active (drives the which-key hint)
 ---@field _whichkey_prefix string|nil formatted chord-so-far (e.g. "C-x") while a chord prefix is active
 ---@field _whichkey_page integer which-key hint popup page index (0-based; reset when the prefix node changes)
+---@field gutter_sign_fns fun(editor: Editor, view: View, li: integer): {fg: integer, bg: integer?, char: string}?[] per-line gutter sign callbacks; each returns a glyph spec or nil (blank). One fixed column per callback, painted on every sub-row of the line; evaluated once per visible logical line.
 local Editor = {}
 Editor.__index = Editor
 
@@ -441,6 +443,7 @@ function Editor.new(term)
         _whichkey_node = nil,
         _whichkey_prefix = nil,
         _whichkey_page = 0,
+        gutter_sign_fns = {}, -- overrideable per-line gutter-sign callbacks (see Editor.gutter_sign_fns)
     }, Editor)
     editor.event_system = EventSystem.new(editor)
     editor.overlays = OverlayManager.new(editor)
@@ -2304,6 +2307,15 @@ function Editor:render()
         return
     end
 
+    -- Gutter-sign callbacks (editor.gutter_sign_fns): each consumes one
+    -- fixed column between the line number and the separator. Cached here
+    -- so the per-line evaluation loop below can index them without
+    -- re-reading the editor field per call.
+    local sign_fns = self.gutter_sign_fns
+    local sign_count = sign_fns and #sign_fns or 0
+    -- Digit width of the number field mirrors View:text_geometry.
+    local line_digits = #tostring(line_count)
+
     -- Paint minibuffer chrome (inline bottom strip / floating palette)
     -- via the overlay float sink, and capture how many rows it reserved
     -- below the modeline — the "move-up" amount the buffer region must
@@ -2379,6 +2391,7 @@ function Editor:render()
         local display_text = line_text
 
         local content_len = #display_text
+
         -- Resolve syntax-highlight segments ONCE per logical line
         -- (line-relative byte ranges), then have each grapheme run
         -- filter that single list. The old path called
@@ -2391,6 +2404,18 @@ function Editor:render()
         local total_sub = view:wrap_rows(li)
         t_wraprows = t_wraprows + (profile.now_us() - b)
         t_wraprows = t_wraprows + (profile.now_us() - b)
+        -- Evaluate per-line gutter signs ONCE per logical line and cache
+        -- the results in `signs`; every sub-row of this line (including
+        -- wrapped continuation rows, where the line number itself is
+        -- blanked) paints the same glyphs in the same columns. Each
+        -- callback returns {fg, bg?, char} or nil (blank slot).
+        local signs
+        if sign_count > 0 then
+            signs = {}
+            for i = 1, sign_count do
+                signs[i] = sign_fns[i](self, view, li)
+            end
+        end
         -- Indent-guide columns (text-relative, 0-based) for this line:
         -- one │ at the LAST whitespace cell of each indent level (i.e.
         -- at ts-1, 2·ts-1, …). Placing the guide on the boundary cell
@@ -2447,17 +2472,26 @@ function Editor:render()
                 local _, empty_bg = focus_dim(ui("default_fg"), ui("default_bg"))
                 term:print(0, row, string.rep(" ", w), empty_bg, empty_bg)
                 term:print(block_x, row, string.rep(" ", block_w), row_bg, row_bg)
-                -- Gutter: line number on first sub-row, blank on wrapped
-                -- continuation rows. Painted on row_bg so the active tint
-                -- shows through the gutter.
+                -- Gutter: 1-col left margin + right-aligned line number
+                -- on the first sub-row (blank on wrapped continuation
+                -- rows — the row_bg pre-fill already covers those cells),
+                -- then one column per gutter-sign callback painted on
+                -- EVERY sub-row so multi-row lines stay aligned, then a
+                -- 1-col separator before the text (also covered by the
+                -- pre-fill). Sign slots that returned nil stay blank.
                 if sub_row == 0 then
-                    -- 1-col left margin + right-aligned number + 2-col right margin.
                     local line_num = tostring(li + 1)
-                    local digits = gutter_width - 3
-                    local num_pad = string.rep(" ", digits - #line_num)
-                    term:print(block_x, row, " " .. num_pad .. line_num .. "  ", num_fg, row_bg)
-                else
-                    term:print(block_x, row, string.rep(" ", gutter_width), num_fg, row_bg)
+                    local num_pad = string.rep(" ", line_digits - #line_num)
+                    term:print(block_x, row, " " .. num_pad .. line_num, num_fg, row_bg)
+                end
+                if signs then
+                    local sx = block_x + 2 + line_digits -- +1 left margin +1 separator after number
+                    for i = 1, #signs do
+                        local s = signs[i]
+                        if s then
+                            term:print(sx + (i - 1), row, s.char, s.fg, s.bg or row_bg)
+                        end
+                    end
                 end
 
                 -- Extract the sub-row's grapheme runs: each run carries its

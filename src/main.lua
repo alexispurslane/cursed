@@ -290,6 +290,80 @@ local function drain_lsp_inbox(editor, ss)
 end
 
 ----------------------------------------------------------------------------------------------------
+-- Proc inbox drain — relay subprocess output + lifecycle as
+-- `process_out:<procid>` events on the editor event bus.
+----------------------------------------------------------------------------------------------------
+
+--- Terminal exit kinds (mirror proc_lane.lua / shared_state.h)
+local PROC_KIND_EXITED = 0
+local PROC_KIND_SIGNALED = 1
+local PROC_KIND_FAILED = 2
+local PROC_KIND_KILL_SENT = 3
+
+--- Map a kind code to the event tag callers see as the second arg to
+--- `process_out:<procid>` listeners.
+local function proc_kind_tag(kind)
+    if kind == PROC_KIND_EXITED then
+        return "exited"
+    elseif kind == PROC_KIND_SIGNALED then
+        return "signaled"
+    elseif kind == PROC_KIND_FAILED then
+        return "failed"
+    elseif kind == PROC_KIND_KILL_SENT then
+        return "kill_sent"
+    end
+    return "unknown"
+end
+
+local function drain_proc_inbox(editor, ss)
+    local proc_client = require("cursed.proc_client")
+    local msg = ss:pop(ss._ptr.inbox_proc)
+    while msg ~= nil do
+        editor.event_system:emit("ring_buffer_message", msg.type, msg)
+        if msg.type == shared.MSG_PROC_OUTPUT then
+            if msg.ptr ~= nil then
+                local out = ffi.cast("struct ProcOutput *", msg.ptr)
+                local procid = tonumber(out.procid)
+                local stream = tonumber(out.stream)
+                local len = tonumber(out.len)
+                local ptr = out.ptr
+                ---@cast procid integer
+                ---@cast stream integer
+                ---@cast len integer
+                local bytes = ""
+                if ptr ~= nil and len > 0 then
+                    bytes = ffi.string(ptr, len)
+                end
+                ffi.C.free(ptr)
+                ffi.C.free(out)
+                local stream_tag = (stream == 2) and "stderr" or "stdout"
+                editor.event_system:emit("process_out:" .. procid, stream_tag, bytes)
+            end
+        elseif msg.type == shared.MSG_PROC_EXIT then
+            if msg.ptr ~= nil then
+                local e = ffi.cast("struct ProcExit *", msg.ptr)
+                local procid = tonumber(e.procid)
+                local kind = tonumber(e.kind)
+                local code = tonumber(e.code)
+                ffi.C.free(e)
+                ---@cast procid integer
+                ---@cast kind integer
+                ---@cast code integer
+                editor.event_system:emit("process_out:" .. procid, proc_kind_tag(kind), code)
+                -- Terminal exits retire the procid: drop the
+                -- `process_in:<procid>` listener so the bus stops
+                -- accepting STDIN for a dead process. KILL_SENT is
+                -- advisory (non-terminal) — leave the listener.
+                if kind ~= PROC_KIND_KILL_SENT then
+                    proc_client.on_proc_exit(procid)
+                end
+            end
+        end
+        msg = ss:pop(ss._ptr.inbox_proc)
+    end
+end
+
+----------------------------------------------------------------------------------------------------
 -- Key processing (ported from old main.lua, adapted for View/Editor)
 ----------------------------------------------------------------------------------------------------
 
@@ -921,11 +995,21 @@ local function main()
     main_kq:add_wake(assert(tonumber(ss._ptr.inbox_io.wake_ident)))
     main_kq:add_wake(assert(tonumber(ss._ptr.inbox_hl.wake_ident)))
     main_kq:add_wake(assert(tonumber(ss._ptr.inbox_lsp.wake_ident)))
+    main_kq:add_wake(assert(tonumber(ss._ptr.inbox_proc.wake_ident)))
 
     -- Wire the LSP module's SharedState handle so it can enqueue
     -- SPAWN/SEND/KILL to the LSP lane (outbox_lsp). The lane owns all
     -- subprocess mgmt + JSON decode; main relays via this facade.
     require("cursed.lsp_client").set_shared_state(ss)
+
+    -- Wire the proc lane's SharedState + editor handle so spawn/send_stdin/
+    -- kill can push to outbox_proc and register per-procid `process_in`
+    -- listeners on the bus. drain_proc_inbox (below) is the inverse path.
+    local proc_client = require("cursed.proc_client")
+    proc_client.setup(editor, ss)
+    -- Expose on the editor so init.lua / user code can spawn processes
+    -- against the live image: `editor.proc.spawn({...}, {cwd=...})`.
+    editor.proc = proc_client
 
     -- Expose the editor's main kqueue + workspace root to the
     -- editor-level LSP manager (registered in cursed.editor_listeners):
@@ -1259,6 +1343,8 @@ local function main()
                         drain_hl_inbox(editor, ss)
                     elseif tonumber(ev.ident) == tonumber(ss._ptr.inbox_lsp.wake_ident) then
                         drain_lsp_inbox(editor, ss)
+                    elseif tonumber(ev.ident) == tonumber(ss._ptr.inbox_proc.wake_ident) then
+                        drain_proc_inbox(editor, ss)
                     else
                         drain_inbox(editor, ss)
                     end
@@ -1289,6 +1375,7 @@ local function main()
         drain_inbox(editor, ss)
         drain_hl_inbox(editor, ss)
         drain_lsp_inbox(editor, ss)
+        drain_proc_inbox(editor, ss)
         profile.span("main", "drain_inbox", drain_t0)
 
         -- File-load watchdog: re-check pending loads after the inbox
@@ -1581,6 +1668,7 @@ local function main()
 
     editor.event_system:emit("editor_close")
     lsp.shutdown()
+    require("cursed.proc_client").shutdown()
     term:shutdown()
     ss:stop()
 

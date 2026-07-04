@@ -30,10 +30,13 @@ struct SharedState {
     struct RingBuf inbox_hl;
     struct RingBuf outbox_lsp;
     struct RingBuf inbox_lsp;
+    struct RingBuf outbox_proc;
+    struct RingBuf inbox_proc;
     int            main_kq_fd;
     int            io_kq_fd;
     int            hl_kq_fd;
     int            lsp_kq_fd;
+    int            proc_kq_fd;
     bool    running;
 };
 
@@ -201,6 +204,49 @@ struct LspNotification {
     void    *params_val; /* yyjson_val* — params value, points into *doc */
     /* followed by method_len bytes (method string, no NUL) */
 };
+
+/* ── Proc lane payloads (mirror shared_state.h) ───────────────── */
+
+/* MSG_PROC_SPAWN (main → proc): JSON spec + procid. Lane frees struct + spec. */
+struct ProcSpawnReq {
+    uint32_t procid;     /* main-assigned id; lane echoes in all reports */
+    uint32_t spec_len;   /* bytes of JSON spec (no NUL) */
+    /* followed by spec_len bytes of JSON */
+};
+
+/* MSG_PROC_STDIN (main → proc): write bytes to child stdin. len==0 →
+ * close stdin (EOF). Ownership of ptr → lane (frees after write). */
+struct ProcStdinReq {
+    uint32_t procid;
+    uint32_t len;       /* bytes; 0 == close stdin (EOF) */
+    uint8_t *ptr;       /* malloc'd bytes (NULL when len==0) */
+};
+
+/* MSG_PROC_KILL (main → proc): deliver signal; lane acks via
+ * MSG_PROC_EXIT(KILL_SENT). Fire-and-forget. */
+struct ProcKillReq {
+    uint32_t procid;
+    uint32_t signal;    /* 9=SIGKILL, 15=SIGTERM, ... */
+};
+
+/* MSG_PROC_OUTPUT (proc → main): stdout/stderr chunk. ptr malloc'd by
+ * lane; ownership → main on pop (main frees after copying to a string). */
+struct ProcOutput {
+    uint32_t procid;
+    uint8_t  stream;    /* 1=stdout, 2=stderr */
+    uint8_t  _pad[3];
+    uint32_t len;
+    uint8_t *ptr;       /* malloc'd bytes, ownership → main */
+};
+
+/* MSG_PROC_EXIT (proc → main): lifecycle. kind: 0=exited 1=signaled
+ * 2=failed 3=kill_sent. EXITED/SIGNALED/FAILED are terminal. */
+struct ProcExit {
+    uint32_t procid;
+    uint8_t  kind;
+    uint8_t  _pad[3];
+    uint32_t code;
+};
 ]])
 
 ----------------------------------------------------------------------------------------------------
@@ -225,6 +271,12 @@ local MSG_LSP_HANDSHAKE = 14
 local MSG_LSP_DOC_SYNC = 15
 local MSG_LSP_RESPONSE = 16
 local MSG_LSP_NOTIFICATION = 17 -- server→main inbound JSON-RPC notification
+
+local MSG_PROC_SPAWN = 18 -- main → proc: ptr = struct ProcSpawnReq*
+local MSG_PROC_STDIN = 19 -- main → proc: ptr = struct ProcStdinReq*
+local MSG_PROC_KILL = 20 -- main → proc: ptr = struct ProcKillReq*
+local MSG_PROC_OUTPUT = 21 -- proc → main: ptr = struct ProcOutput*
+local MSG_PROC_EXIT = 22 -- proc → main: ptr = struct ProcExit*
 
 local LSP_STATUS_SPAWNING = 0
 local LSP_STATUS_READY = 1
@@ -260,6 +312,11 @@ return {
     MSG_LSP_DOC_SYNC = MSG_LSP_DOC_SYNC,
     MSG_LSP_RESPONSE = MSG_LSP_RESPONSE,
     MSG_LSP_NOTIFICATION = MSG_LSP_NOTIFICATION,
+    MSG_PROC_SPAWN = MSG_PROC_SPAWN,
+    MSG_PROC_STDIN = MSG_PROC_STDIN,
+    MSG_PROC_KILL = MSG_PROC_KILL,
+    MSG_PROC_OUTPUT = MSG_PROC_OUTPUT,
+    MSG_PROC_EXIT = MSG_PROC_EXIT,
     LSP_STATUS_SPAWNING = LSP_STATUS_SPAWNING,
     LSP_STATUS_READY = LSP_STATUS_READY,
     LSP_STATUS_DEAD = LSP_STATUS_DEAD,

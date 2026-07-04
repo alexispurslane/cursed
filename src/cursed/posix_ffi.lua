@@ -61,6 +61,7 @@ int execvp(const char *command, char *const argv[]);
 int execlp(const char *command, ...);
 int putenv(char *str);
 char *getcwd(char *buf, size_t size);
+int chdir(const char *path);
 
 /* Ensure all output on a tty fd has been transmitted */
 int tcdrain(int fd);

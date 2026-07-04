@@ -2293,7 +2293,13 @@ end
 ---@return integer gutter_width, integer text_x, integer text_width, integer block_x, integer block_w
 function View:text_geometry(w)
     local line_count = self.buffer:line_count()
-    local gutter_width = math.max(3, #tostring(line_count) + 3) -- 1-col left margin + number + 2-col right margin
+    -- Layout after the number: a 1-col separator, then one column
+    -- per gutter-sign callback (editor.gutter_sign_fns), then a
+    -- 1-col separator before the text. When there are no sign
+    -- callbacks this collapses to a single separator column.
+    local sign_fns = (self.editor and self.editor.gutter_sign_fns) or nil
+    local sign_cols = sign_fns and #sign_fns or 0
+    local gutter_width = math.max(3, #tostring(line_count) + sign_cols + 3) -- 1 left margin + number + 1 sep + sign cols + 1 sep
     local avail_text = w - gutter_width
     if avail_text <= 0 then
         return gutter_width, 0, 0, 0, 0

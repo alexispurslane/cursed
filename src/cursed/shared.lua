@@ -93,6 +93,7 @@ function SharedState:stop()
     self:push(self._ptr.outbox_io, { type = shared_ffi.MSG_SHUTDOWN })
     self:push(self._ptr.outbox_hl, { type = shared_ffi.MSG_SHUTDOWN })
     self:push(self._ptr.outbox_lsp, { type = shared_ffi.MSG_SHUTDOWN })
+    self:push(self._ptr.outbox_proc, { type = shared_ffi.MSG_SHUTDOWN })
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -289,6 +290,11 @@ return {
     MSG_LSP_DOC_SYNC = shared_ffi.MSG_LSP_DOC_SYNC,
     MSG_LSP_RESPONSE = shared_ffi.MSG_LSP_RESPONSE,
     MSG_LSP_NOTIFICATION = shared_ffi.MSG_LSP_NOTIFICATION,
+    MSG_PROC_SPAWN = shared_ffi.MSG_PROC_SPAWN,
+    MSG_PROC_STDIN = shared_ffi.MSG_PROC_STDIN,
+    MSG_PROC_KILL = shared_ffi.MSG_PROC_KILL,
+    MSG_PROC_OUTPUT = shared_ffi.MSG_PROC_OUTPUT,
+    MSG_PROC_EXIT = shared_ffi.MSG_PROC_EXIT,
     LSP_STATUS_SPAWNING = shared_ffi.LSP_STATUS_SPAWNING,
     LSP_STATUS_READY = shared_ffi.LSP_STATUS_READY,
     LSP_STATUS_DEAD = shared_ffi.LSP_STATUS_DEAD,

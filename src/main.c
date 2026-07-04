@@ -222,6 +222,39 @@ static void *lsp_lane_thread(void *arg)
     return NULL;
 }
 
+/* ── Proc lane thread ─────────────────────────────────────────────── */
+
+static void *proc_lane_thread(void *arg)
+{
+    struct IOLaneArgs *proc_args = (struct IOLaneArgs *)arg;
+    lua_State *L = proc_args->L;
+    free(proc_args);
+
+    size_t mod_len = 0;
+    const char *mod_bc = find_module("cursed.proc_lane", &mod_len);
+
+    if (mod_bc == NULL) {
+        fprintf(stderr, "cursed: proc_lane module not found\n");
+        return NULL;
+    }
+
+    int status = luaL_loadbuffer(L, mod_bc, mod_len, "cursed.proc_lane");
+    if (status != LUA_OK) {
+        fprintf(stderr, "cursed: proc_lane: failed to load bytecode: %s\n",
+                lua_tostring(L, -1));
+        return NULL;
+    }
+
+    status = lua_pcall(L, 0, 0, 0);
+    if (status != LUA_OK) {
+        fprintf(stderr, "cursed: proc_lane: runtime error: %s\n",
+                lua_tostring(L, -1));
+        return NULL;
+    }
+
+    return NULL;
+}
+
 /* ── Run main lane ───────────────────────────────────────────────── */
 
 static int run_main(lua_State *L)
@@ -340,6 +373,46 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
+    /* Create proc lane state + thread (general subprocess control,
+     * shape-agnostic: no JSON-RPC framing, owns arbitrary children with
+     * stdout/stderr pipes registered on its own kqueue). */
+    lua_State *proc_L = create_lane_state();
+    if (proc_L == NULL) {
+        pthread_cancel(io_thread);
+        pthread_join(io_thread, NULL);
+        lua_close(io_L);
+        pthread_cancel(hl_thread);
+        pthread_join(hl_thread, NULL);
+        lua_close(hl_L);
+        pthread_cancel(lsp_thread);
+        pthread_join(lsp_thread, NULL);
+        lua_close(lsp_L);
+        shared_state_free(g_shared_state);
+        return EXIT_FAILURE;
+    }
+    setup_lane_globals(proc_L, 0, NULL);
+
+    struct IOLaneArgs *proc_args = malloc(sizeof(*proc_args));
+    proc_args->L = proc_L;
+
+    pthread_t proc_thread;
+    rc = pthread_create(&proc_thread, NULL, proc_lane_thread, proc_args);
+    if (rc != 0) {
+        fprintf(stderr, "cursed: failed to create proc lane thread\n");
+        lua_close(proc_L);
+        pthread_cancel(io_thread);
+        pthread_join(io_thread, NULL);
+        lua_close(io_L);
+        pthread_cancel(hl_thread);
+        pthread_join(hl_thread, NULL);
+        lua_close(hl_L);
+        pthread_cancel(lsp_thread);
+        pthread_join(lsp_thread, NULL);
+        lua_close(lsp_L);
+        shared_state_free(g_shared_state);
+        return EXIT_FAILURE;
+    }
+
     /* Create main lane state */
     lua_State *main_L = create_lane_state();
     if (main_L == NULL) {
@@ -352,6 +425,9 @@ int main(int argc, char *argv[])
         pthread_cancel(lsp_thread);
         pthread_join(lsp_thread, NULL);
         lua_close(lsp_L);
+        pthread_cancel(proc_thread);
+        pthread_join(proc_thread, NULL);
+        lua_close(proc_L);
         shared_state_free(g_shared_state);
         return EXIT_FAILURE;
     }
@@ -390,6 +466,11 @@ int main(int argc, char *argv[])
     }
     pthread_join(lsp_thread, NULL);
     lua_close(lsp_L);
+    if (lanes_already_stopped) {
+        pthread_cancel(proc_thread);
+    }
+    pthread_join(proc_thread, NULL);
+    lua_close(proc_L);
 
     /* Free shared state (orig.data munmap'd by main lane before exit) */
     shared_state_free(g_shared_state);
