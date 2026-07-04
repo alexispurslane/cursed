@@ -294,12 +294,62 @@ local function node_named_child_count(node)
     return tonumber(c_api.ts_node_named_child_count(node))
 end
 
+local function node_child(node, idx)
+    return c_api.ts_node_child(node, idx)
+end
+
+local function node_child_count(node)
+    return tonumber(c_api.ts_node_child_count(node))
+end
+
 local function node_parent(node)
     return c_api.ts_node_parent(node)
 end
 
 local function node_descendant_for_byte_range(node, start_byte, end_byte)
     return c_api.ts_node_descendant_for_byte_range(node, start_byte, end_byte)
+end
+
+--- Return an iterator over a node's direct children (all of them,
+--- including anonymous ones), yielding a TSNode per step in order.
+--- Used by tree-walking commands that need to enumerate the children
+--- of a node (e.g. to descend into the next-larger sibling subrange).
+--- Yields nothing when the node is a leaf or null.
+---@param node any TSNode
+---@return function iterator -> TSNode
+local function node_children(node)
+    local n = tonumber(c_api.ts_node_child_count(node))
+    ---@cast n integer
+    local i = 0
+    return function()
+        if i >= n then
+            return nil
+        end
+        local child = c_api.ts_node_child(node, i)
+        i = i + 1
+        return child
+    end
+end
+
+--- Find the smallest tree-sitter node whose byte range CONTAINS
+--- the given [start_byte, end_byte) window (half-open). Uses the
+--- tree-sitter C descendant-for-byte-range lookup, which descends
+--- to the deepest node covering the whole window. Returns the null
+--- node (ts.node_is_null == true) when the window falls outside the
+--- root's span or when `root` is null.
+---
+--- This is the building block for expand-region and any
+--- tree-sitter-position-aware selection command: call it with the
+--- cursor's byte span, then ascend via node_parent to widen.
+---@param root any TSNode root (or any ancestor) to descend from
+---@param start_byte integer 0-based start byte (inclusive)
+---@param end_byte integer 0-based end byte (exclusive); >= start_byte
+---@return any node TSNode (may be null)
+local function smallest_enclosing_node(root, start_byte, end_byte)
+    if c_api.ts_node_is_null(root) then
+        return root
+    end
+    return c_api.ts_node_descendant_for_byte_range(root, start_byte, end_byte)
 end
 
 local function node_string(node)
@@ -847,8 +897,12 @@ return {
     node_point_range = node_point_range,
     node_named_child = node_named_child,
     node_named_child_count = node_named_child_count,
+    node_child = node_child,
+    node_child_count = node_child_count,
+    node_children = node_children,
     node_parent = node_parent,
     node_descendant_for_byte_range = node_descendant_for_byte_range,
+    smallest_enclosing_node = smallest_enclosing_node,
     node_string = node_string,
     tree_cursor_new = tree_cursor_new,
     tree_cursor_delete = tree_cursor_delete,

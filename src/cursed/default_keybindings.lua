@@ -275,6 +275,9 @@ return {
     ["alt-g i"] = "goto_symbol",
     ["alt-g w"] = "workspace_symbol",
 
+    ["alt-'"] = "expand_region",
+    ['alt-"'] = "shrink_region",
+
     -- Escape
     ["escape"] = "escape_key",
 }

@@ -55,6 +55,43 @@ return {
         return view:paragraph_range(line)
     end,
 
+    --- Line: the full content of the line containing `line` (excluding
+    --- the trailing newline). The natural unit between word and
+    --- paragraph in the expand-region ladder. Structural — whole-line,
+    --- not a boundary pattern — so it's a function returning a concrete
+    --- range. On an empty line yields a zero-width selection at col 0.
+    ---@param view table
+    ---@param line integer 0-based line of point
+    ---@param col integer 0-based col of point (unused)
+    ---@return integer sl
+    ---@return integer sc
+    ---@return integer el
+    ---@return integer ec
+    ---@return integer boundary_len
+    line = function(view, line, col)
+        local eol = view:content_len(line)
+        return line, 0, line, eol, 0
+    end,
+
+    --- Buffer: the entire buffer from (0,0) to end-of-file. The largest
+    --- unit in the expand-region ladder (the top rung). Structural, so
+    --- a function returning a concrete range. Useful as a quick
+    --- "select all" textobject that composes with mark/kill/copy like
+    --- any other (e.g. `mark-buffer` selects it, `kill-buffer` would
+    --- cut it).
+    ---@param view table
+    ---@param line integer 0-based line of point (unused)
+    ---@param col integer 0-based col of point (unused)
+    ---@return integer sl
+    ---@return integer sc
+    ---@return integer el
+    ---@return integer ec
+    ---@return integer boundary_len
+    buffer = function(view, line, col)
+        local eo = view:eof_pt()
+        return 0, 0, eo.line, eo.offset, 0
+    end,
+
     --- Sexp: the innermost balanced-pair expression enclosing point,
     --- for the classic () [] {} set. Major modes may override this
     --- entry with their own `sexp({...})` to add language-specific

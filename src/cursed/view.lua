@@ -41,6 +41,7 @@ local IH = require("cursed.input_hook")
 ---@field yank_col integer|nil start col of last yank (for yank-pop); was _yank_col
 ---@field shadow_undo integer|nil undo.count at anchor creation time (for undo-in-selection)
 ---@field shadow_redo integer|nil redo.count at anchor creation time (for undo-in-selection)
+---@field _expand table|nil transient expand-region progression state ({mode="tree"|"textobject", ...}); nil when not expanding
 
 ----------------------------------------------------------------------------------------------------
 -- View class
@@ -3446,6 +3447,56 @@ local function cursor_byte_offset(buf, c)
     return off
 end
 
+--- Full-document byte offset (0-based) of a cursor's position.
+--- Public access to the same arithmetic cursor_byte_offset uses, so
+--- tree-sitter-backed commands (expand-region, etc.) can map a cursor
+--- to the byte tree-sitter nodes are addressed in.
+---@param c Cursor
+---@return integer byte_offset
+function View:cursor_byte_offset(c)
+    return cursor_byte_offset(self.buffer, c)
+end
+
+--- Full-document byte offset (0-based) of an arbitrary (line, byte_col)
+--- position, without needing a full Cursor table. Used by expand-region
+--- to compute the byte window covering the current selection endpoints.
+---@param line integer 0-based line index
+---@param col integer 0-based byte offset within the line
+---@return integer byte_offset
+function View:line_col_byte_offset(line, col)
+    local off = col
+    for i = 0, line - 1 do
+        off = off + self.buffer:line_len(i)
+    end
+    return off
+end
+
+--- Convert a full-document byte offset (0-based) back to a 0-based
+--- (line, byte_col) pair. The column is a byte offset within the
+--- line (matching Cursor.col). Used to map tree-sitter node start/end
+--- bytes back to cursor coordinates. Linear scan over line lengths;
+--- fine for the few calls per expand-region invocation.
+---@param byte integer 0-based full-document byte offset
+---@return integer line 0-based line index
+---@return integer col 0-based byte offset within that line
+function View:byte_to_line_col(byte)
+    local b = self.buffer
+    local count = b:line_count()
+    local off = 0
+    for i = 0, count - 1 do
+        local len = b:line_len(i)
+        if off + len > byte then
+            return i, byte - off
+        end
+        off = off + len
+    end
+    -- Past the end of the last line: clamp to end of the last line.
+    if count > 0 then
+        return count - 1, b:line_len(count - 1)
+    end
+    return 0, 0
+end
+
 --- Lazily build (or reuse) the compiled indent query for the active
 --- major mode's `indent_queries` source + the view's `_hl_lang`. Returns
 --- the ts.Query, or nil if no indent queries are declared, no language is
@@ -4474,7 +4525,29 @@ function View:_select_raw(sl, sc, el, ec)
     self:_set_goal_col(ec)
 end
 
---- Resolve the textobject FUNCTION for `name`: a closure
+--- Apply a 0-based half-open selection range to a SPECIFIC cursor
+--- (mark at start, point at end), used by expand-region to widen a
+--- per-cursor progression. Unlike _select_raw (which always targets
+--- the primary cursor), this works on any cursor in view.cursors so
+--- multi-cursor expand stays coordinated. Records the seed position
+--- on the cursor's `_expand` state so a later motion that moves the
+--- cursor off the seed can invalidate the progression.
+---@param c Cursor
+---@param sl integer
+---@param sc integer
+---@param el integer
+---@param ec integer
+function View:_apply_expand_selection(c, sl, sc, el, ec)
+    c.line = sl
+    c.col = sc
+    c.goal_col = sc
+    c.anchor_line = sl
+    c.anchor_col = sc
+    c.anchor_transient = nil
+    c.line = el
+    c.col = ec
+    c.goal_col = ec
+end
 --- `fn(view, line, col, dir) -> (sl,sc,el,ec,boundary_len)|nil`.
 ---
 --- Registry entries may be:

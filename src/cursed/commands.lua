@@ -2095,8 +2095,456 @@ commands.mark_whole_buffer = function(view, _editor)
 end
 
 ----------------------------------------------------------------------------------------------------
--- Kill-region and region-aware kills
+-- expand-region: progressively widen the selection
+--
+-- Each invocation widens the selection around the cursor to the next
+-- larger enclosing unit. When a tree-sitter parse tree is available
+-- for the buffer (view:hl_tree()), the units are tree-sitter nodes:
+-- start at the smallest node enclosing point, then ascend via
+-- node_parent until the root is reached. When no parse tree is
+-- available (a non-tree-sitter mode), fall back to the textobjects
+-- ladder: word -> bigword -> subsentence -> sentence -> paragraph ->
+-- sexp -> whole buffer.
+--
+-- Progression is per-cursor TRANSIENT state stored on the cursor's
+-- `_expand` field. The tree path caches only the byte range of the
+-- last-selected node — NEVER the TSNode itself, since TSNode embeds a
+-- TSTree* that dangles once the RAII ts.Tree returned by view:hl_tree()
+-- is GC'd between invocations (use-after-free → garbage selections /
+-- crashes). Each invocation re-acquires a fresh tree and re-resolves
+-- the node by its cached byte range. The progression is invalidated
+-- when the previous command was NOT expand_region (so a fresh
+-- invocation re-seeds at the smallest unit).
 ----------------------------------------------------------------------------------------------------
+
+--- The textobject ladder used by expand-region when no parse tree is
+--- available. Ordered from smallest to largest; each entry is a
+--- textobject name resolvable via View:_textobject_fn. The final
+--- pseudo-unit "whole-buffer" is handled inline (it has no textobject fn).
+local EXPAND_TEXTOBJECT_LADDER = {
+    "word",
+    "bigword",
+    "subsentence",
+    "sentence",
+    "line",
+    "paragraph",
+    "sexp",
+    "buffer",
+}
+
+--- Compute the byte window covering the cursor's current position or
+--- selection. A no-selection cursor yields a 1-byte window [b, b+1);
+--- a selection yields [start_byte, end_byte). The end byte is kept >
+--- start byte so ts_node_descendant_for_byte_range can find a covering
+--- node.
+---@param view View
+---@param c Cursor
+---@return integer sb
+---@return integer eb
+local function expand_byte_window(view, c)
+    if c.anchor_line ~= nil then
+        local sl, sc, el, ec = view:selection_ranges_one(c)
+        ---@cast sl integer
+        ---@cast sc integer
+        ---@cast el integer
+        ---@cast ec integer
+        local sb = view:line_col_byte_offset(sl, sc)
+        local eb = view:line_col_byte_offset(el, ec)
+        if eb <= sb then
+            eb = sb + 1
+        end
+        return sb, eb
+    end
+    local sb = view:cursor_byte_offset(c)
+    return sb, sb + 1
+end
+
+--- Acquire a FRESH tree-sitter root for this invocation (see
+--- expand_region for why the tree must be re-acquired each call).
+--- Returns the live root TSNode, or nil if no tree is published yet
+--- or the root is null. The tree returned by view:hl_tree() is an RAII
+--- ts.Tree that gets GC'd (freeing its TSTree) at the end of this
+--- invocation; callers must NOT cache the returned node across calls.
+---@param view View
+---@return any|nil root
+local function expand_tree_root(view)
+    local tree = view:hl_tree()
+    if tree == nil then
+        return nil
+    end
+    local ts = require("cursed.ts")
+    local root = tree:root()
+    if ts.node_is_null(root) then
+        return nil
+    end
+    return root
+end
+
+--- Select a tree-sitter node's byte range on a cursor, remember its
+--- byte range as the new progression ceiling, and PRESERVE the seed
+--- byte (so shrink-region can still descend back toward the original
+--- point after several expand steps).
+---@param view View
+---@param c Cursor
+---@param ts_mod table the cursed.ts module
+---@param node any TSNode (live, from this invocation's tree)
+---@return boolean ok false if node is null
+local function expand_select_node(view, c, ts_mod, node)
+    if node == nil or ts_mod.node_is_null(node) then
+        return false
+    end
+    local sb, eb = ts_mod.node_byte_range(node)
+    local sl, sc = view:byte_to_line_col(sb)
+    local el, ec = view:byte_to_line_col(eb)
+    view:_apply_expand_selection(c, sl, sc, el, ec)
+    c._expand.last_sb = sb
+    c._expand.last_eb = eb
+    return true
+end
+
+--- Reset and re-seed the per-cursor expand-region state. Called on the
+--- first invocation (or after the progression was invalidated) to pick
+--- the smallest unit around the cursor.
+--- If `use_tree` is true, seed from the tree-sitter parse tree (caching
+--- the seed NODE's byte range, NOT the node itself — see
+--- expand_resolve_tree_node for why);
+--- otherwise seed from the textobject ladder at the smallest rung.
+---@param view View
+---@param c Cursor
+---@param use_tree boolean
+local function expand_region_seed(view, c, use_tree)
+    if use_tree then
+        local root = expand_tree_root(view)
+        if root == nil then
+            return
+        end
+        local ts = require("cursed.ts")
+        local sb, eb = expand_byte_window(view, c)
+        local node = ts.smallest_enclosing_node(root, sb, eb)
+        if ts.node_is_null(node) then
+            return
+        end
+        local nsb, neb = ts.node_byte_range(node)
+        -- seed_byte is the point we GREW outward from; shrink-region
+        -- descends back toward it (the deepest descendant of the
+        -- current node containing this byte). Use the cursor's byte for
+        -- a zero-width cursor, or the selection START for an existing
+        -- selection (so shrinking a mark_word selection heads back to
+        -- the word's start, not the cursor at its end).
+        local seed_byte = sb
+        c._expand = { mode = "tree", last_sb = nsb, last_eb = neb, seed_byte = seed_byte }
+    else
+        -- Textobject ladder: a no-selection cursor / fresh invocation
+        -- starts at the smallest rung; expand_region_apply advances.
+        -- seed_line/seed_col pin the point we grew from so shrink can
+        -- re-resolve smaller rungs from the SAME position (the cursor
+        -- moves to the selection end during expand, so the current
+        -- cursor position can't drive shrink).
+        local line, col = c.line, c.col
+        c._expand = { mode = "textobject", index = 0, seed_line = line, seed_col = col }
+    end
+end
+
+--- Apply the expand-region selection for a cursor at its current
+--- progression. Selects the unit the progression currently points at.
+---@param view View
+---@param c Cursor
+---@return boolean selected false if there is no further unit to expand to
+local function expand_region_apply(view, c)
+    local st = c._expand
+    if st == nil then
+        return false
+    end
+    if st.mode == "tree" then
+        local ts = require("cursed.ts")
+        -- Re-acquire a fresh tree each call (the cached node is NOT
+        -- live — TSNode embeds a TSTree* that dangles once the prior
+        -- call's RAII Tree was GC'd). Re-resolve by byte range.
+        local root = expand_tree_root(view)
+        if root == nil then
+            return false
+        end
+        local node = ts.smallest_enclosing_node(root, st.last_sb, st.last_eb)
+        return expand_select_node(view, c, ts, node)
+    else
+        -- textobject: st.index points at the NEXT ladder unit to try.
+        local line, col = c.line, c.col
+        for i = st.index + 1, #EXPAND_TEXTOBJECT_LADDER do
+            local name = EXPAND_TEXTOBJECT_LADDER[i]
+            local fn = view:_textobject_fn(name)
+            if fn ~= nil then
+                local sl, sc, el, ec = fn(view, line, col, nil)
+                if sl ~= nil then
+                    ---@cast sc integer
+                    ---@cast el integer
+                    ---@cast ec integer
+                    view:_apply_expand_selection(c, sl, sc, el, ec)
+                    st.index = i
+                    return true
+                end
+            end
+        end
+        -- Past the top rung (`buffer`, which selects the whole
+        -- file). If a tree-sitter parse tree is available, transition
+        -- to the tree path so further widens ascend parse-tree nodes
+        -- above the whole-buffer node (the root). If no tree, there's
+        -- nothing larger: reselect the buffer and report ceiling.
+        local root = expand_tree_root(view)
+        if root ~= nil then
+            local ts = require("cursed.ts")
+            local sb, eb = expand_byte_window(view, c)
+            local node = ts.smallest_enclosing_node(root, sb, eb)
+            if not ts.node_is_null(node) then
+                local nsb, neb = ts.node_byte_range(node)
+                st.mode = "tree"
+                st.last_sb = nsb
+                st.last_eb = neb
+                st.seed_byte = sb
+                return expand_select_node(view, c, ts, node)
+            end
+        end
+        local lc = view:line_count()
+        local last = view:content_len(lc - 1)
+        view:_apply_expand_selection(c, 0, 0, lc - 1, last)
+        st.index = #EXPAND_TEXTOBJECT_LADDER + 1
+        return true
+    end
+end
+
+--- Widen the per-cursor progression by one step and apply it.
+--- Returns true if a wider unit was selected, false if already at the
+--- top (no further widening possible).
+---@param view View
+---@param c Cursor
+local function expand_region_widen(view, c)
+    local st = c._expand
+    if st == nil then
+        return false
+    end
+    if st.mode == "tree" then
+        local ts = require("cursed.ts")
+        -- Re-acquire a fresh tree (the cached node is NOT live; see
+        -- expand_region_apply). Re-resolve the last-selected node by its
+        -- byte range, then ascend to its parent and select the parent.
+        local root = expand_tree_root(view)
+        if root == nil then
+            return false
+        end
+        local node = ts.smallest_enclosing_node(root, st.last_sb, st.last_eb)
+        if ts.node_is_null(node) then
+            return false
+        end
+        -- Ascend past any ancestors that share the SAME byte range as
+        -- the re-resolved node (tree-sitter frequently wraps a node in
+        -- a parent of identical span, e.g. assignment_statement /
+        -- assignment, program / first stmt). Without this, re-resolving
+        -- an identical-range parent returns the inner node again,
+        -- node_parent returns the same-range parent, and we'd loop.
+        -- Stop at the first ancestor STRICTLY larger than the current
+        -- selection — that's the next expand step.
+        local cur_sb = st.last_sb
+        local cur_eb = st.last_eb
+        local parent = ts.node_parent(node)
+        while parent ~= nil and not ts.node_is_null(parent) do
+            local psb, peb = ts.node_byte_range(parent)
+            if psb < cur_sb or peb > cur_eb then
+                return expand_select_node(view, c, ts, parent)
+            end
+            -- Same range: keep climbing to find a strictly larger ancestor.
+            parent = ts.node_parent(parent)
+        end
+        return false
+    else
+        return expand_region_apply(view, c)
+    end
+end
+
+--- Shrink the per-cursor progression by one step and apply it (the
+--- inverse of expand_region_widen). Returns true if a smaller unit was
+--- selected, false if already at the smallest unit (in which case the
+--- command collapses the selection to a cursor at the seed point).
+---
+--- Tree path: re-resolve the current node, then descend to the deepest
+--- STRICTLY-SMALLER descendant containing the seed byte (the point we
+--- originally grew outward from). Uses descendant_for_byte_range ON
+--- the current node — so the result is a descendant of the current
+--- node, not a re-resolved node from the root. Same-range descendants
+--- (a child sharing its parent's exact span) are skipped so we don't
+--- loop. If no strictly-smaller descendant contains the seed, we're at
+--- the smallest unit — collapse to a cursor at the seed byte.
+---
+--- Textobject path: decrement the ladder index and re-resolve that
+--- rung from the seed (line,col) (NOT the current cursor — the cursor
+--- moved to the selection end during expand, so re-resolving from it
+--- would pick a unit in the wrong place).
+---@param view View
+---@param c Cursor
+---@return boolean shrunk true if a smaller unit was selected
+local function expand_region_shrink(view, c)
+    local st = c._expand
+    if st == nil then
+        return false
+    end
+    if st.mode == "tree" then
+        local ts = require("cursed.ts")
+        local root = expand_tree_root(view)
+        if root == nil then
+            return false
+        end
+        local node = ts.smallest_enclosing_node(root, st.last_sb, st.last_eb)
+        if ts.node_is_null(node) then
+            return false
+        end
+        local seed_sb = st.seed_byte
+        local seed_eb = seed_sb + 1
+        -- Descend to the deepest descendant of `node` that contains the
+        -- seed byte. Because we call descendant_for_byte_range ON node
+        -- (not root), the result is strictly within node's subtree. This
+        -- is the natural inverse of expand's node_parent ascent.
+        local desc = ts.node_descendant_for_byte_range(node, seed_sb, seed_eb)
+        if ts.node_is_null(desc) then
+            return false
+        end
+        local csb, ceb = ts.node_byte_range(desc)
+        -- If the deepest seed-containing descendant is STRICTLY smaller
+        -- than the current selection, shrink to it. (A descendant with
+        -- an identical span to its parent — common in tree-sitter
+        -- wrappers — has been skipped by descendant_for_byte_range:
+        -- it returns the deepest, which is never a same-range wrapper.)
+        if csb > st.last_sb or ceb < st.last_eb then
+            return expand_select_node(view, c, ts, desc)
+        end
+        -- No strictly-smaller tree descendant contains the seed.
+        -- This happens in two cases:
+        --  (a) we're at the ROOT (whole-buffer node), reached by widening
+        --      past `buffer` via the textobject->tree handoff; OR
+        --  (b) we're at an ordinary tree leaf, reached by descending
+        --      within the tree after the textobject->tree handoff.
+        -- Only in case (a) can we hand shrink back to the textobject
+        -- ladder (descending buffer -> sexp -> ... -> word); in case (b)
+        -- there's no larger-than-leaf textobject rung the cursor's seed
+        -- point would resolve to, so we collapse straight to a cursor.
+        local is_whole_buffer = st.last_sb == 0
+        if is_whole_buffer then
+            local seed_line, seed_col = view:byte_to_line_col(st.seed_byte)
+            st.mode = "textobject"
+            st.index = #EXPAND_TEXTOBJECT_LADDER
+            st.seed_line = seed_line
+            st.seed_col = seed_col
+            -- Re-select the top textobject rung from the seed so the
+            -- transition lands on a concrete selection (buffer == whole
+            -- file); the next shrink steps down the ladder.
+            local top_name = EXPAND_TEXTOBJECT_LADDER[#EXPAND_TEXTOBJECT_LADDER]
+            local fn = view:_textobject_fn(top_name)
+            if fn ~= nil then
+                local sl, sc, el, ec = fn(view, seed_line, seed_col, nil)
+                if sl ~= nil then
+                    ---@cast sc integer
+                    ---@cast el integer
+                    ---@cast ec integer
+                    view:_apply_expand_selection(c, sl, sc, el, ec)
+                    return true
+                end
+            end
+        end
+        -- Collapse to the seed cursor (case (b), or the top-rung
+        -- textobject failed to resolve).
+        local sl, sc = view:byte_to_line_col(st.seed_byte)
+        c.line = sl
+        c.col = sc
+        c.goal_col = sc
+        c.anchor_line = nil
+        c.anchor_col = nil
+        c._expand = nil
+        return false
+    else
+        -- textobject: walk the ladder DOWN from the current index.
+        if st.index == nil or st.index <= 1 then
+            -- Below the smallest rung: collapse to a cursor at the seed
+            -- and clear the progression.
+            c.line = st.seed_line
+            c.col = st.seed_col
+            c.goal_col = st.seed_col
+            c.anchor_line = nil
+            c.anchor_col = nil
+            c._expand = nil
+            return false
+        end
+        local target = st.index - 1
+        local line, col = st.seed_line, st.seed_col
+        for i = target, 1, -1 do
+            local name = EXPAND_TEXTOBJECT_LADDER[i]
+            local fn = view:_textobject_fn(name)
+            if fn ~= nil then
+                local sl, sc, el, ec = fn(view, line, col, nil)
+                if sl ~= nil then
+                    ---@cast sc integer
+                    ---@cast el integer
+                    ---@cast ec integer
+                    view:_apply_expand_selection(c, sl, sc, el, ec)
+                    st.index = i
+                    return true
+                end
+            end
+        end
+        -- No smaller rung resolved: collapse to a cursor at the seed.
+        c.line = st.seed_line
+        c.col = st.seed_col
+        c.goal_col = st.seed_col
+        c.anchor_line = nil
+        c.anchor_col = nil
+        c._expand = nil
+        return false
+    end
+end
+
+--- Tree-sitter path driver: seed from the current cursor, then on
+--- repeats ascend the parse tree. shrink_region (bound to alt-") is the
+--- symmetric inverse.
+commands.expand_region = function(view, editor)
+    local tree = view:hl_tree()
+    local use_tree = tree ~= nil
+    local prev_was_expand = editor._last_command == "expand_region"
+        or editor._last_command == "shrink_region"
+    for _, c in ipairs(view.cursors) do
+        local st = c._expand
+        local seed = st == nil or st.mode ~= (use_tree and "tree" or "textobject")
+        if prev_was_expand and not seed then
+            -- Continue widening.
+            if not expand_region_widen(view, c) then
+                editor.status_message = "already at the largest unit"
+            end
+        else
+            -- Fresh seed: drop any prior selection progression and start
+            -- from the smallest unit around the cursor.
+            expand_region_seed(view, c, use_tree)
+            if not expand_region_apply(view, c) then
+                editor.status_message = "nothing to expand here"
+            end
+        end
+    end
+end
+
+--- Shrink-region: the symmetric inverse of expand-region. Each
+--- invocation narrows the selection one step back down the progression
+--- (tree-sitter subtree toward the seed byte, or the textobject ladder
+--- toward smaller rungs). Continues an expand-region progression only
+--- if the previous command was expand- or shrink-region; otherwise it's
+--- a no-op (nothing to shrink). Collapsing past the smallest unit drops
+--- the selection entirely (cursor returns to the seed point).
+commands.shrink_region = function(view, editor)
+    local prev_was_expand = editor._last_command == "expand_region"
+        or editor._last_command == "shrink_region"
+    if not prev_was_expand then
+        editor.status_message = "nothing to shrink"
+        return
+    end
+    for _, c in ipairs(view.cursors) do
+        if not expand_region_shrink(view, c) then
+            editor.status_message = "already at the smallest unit"
+        end
+    end
+end
 
 --- Kill the active selection(s), pushing the deleted text onto the
 --- kill ring. Multi-cursor: every selection is killed as one undo
