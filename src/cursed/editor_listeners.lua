@@ -397,6 +397,37 @@ function EditorListeners.setup(editor)
         })
     end)
 
+    -- Auto-generated textobject commands (#textobjects): on every
+    -- view_open (covers the initial empty view + the default
+    -- textobjects) and every mode_enter (covers mode-specific
+    -- textobjects like lua's `statement`), register mark_<name> /
+    -- forward_<name> / backward_<name> / *_select commands for any
+    -- textobject in the view's merged set that doesn't already have
+    -- a command. Idempotent (never overwrites hand-written / user-
+    -- bound commands); see commands.register_textobject_commands.
+    local commands_mod = require("cursed.commands")
+    es:on("view_open", function(_ed, view)
+        commands_mod.register_textobject_commands(view)
+    end)
+    es:on("mode_enter", function(_ed, instance, view)
+        -- mode_enter fires BEFORE the entering mode is appended to
+        -- view._major_modes, so view:_get_textobjects() wouldn't yet
+        -- see the new mode's textobjects. Pass the instance's
+        -- textobjects explicitly so e.g. lua's `statement` gets its
+        -- commands immediately on mode entry.
+        commands_mod.register_textobject_commands(view, instance.textobjects)
+    end)
+    -- A parse tree just landed for the view. Re-register textobject
+    -- commands: a mode may declare tree-sitter textobjects (TO.ts{...})
+    -- that are only meaningful once a tree exists, but the commands
+    -- themselves are registered the same way (they re-acquire the tree
+    -- lazily at call time). Belt-and-suspenders alongside mode_enter —
+    -- covers any ordering edge where a ts textobject's command wasn't
+    -- registered at mode_enter time.
+    es:on("hl_tree_ready", function(_ed, view)
+        commands_mod.register_textobject_commands(view)
+    end)
+
     -- Last-command history (#7): Emacs `last-command` /
     -- `command-before-this` + rerun. The post_command hook fires with
     -- cmd_name (nil for chords bound directly to functions — those have

@@ -4168,4 +4168,116 @@ commands.mdview_demo = function(_view, editor)
     require("cursed.mdview").toggle_demo(editor)
 end
 
+----------------------------------------------------------------------------------------------------
+-- Auto-generated textobject commands
+--
+-- For every textobject in the active view's MERGED set (defaults +
+-- every active major mode's `textobjects`), register a sextet of
+-- commands mirroring the hand-written mark_word / forward_word /
+-- backward_word / *_select family:
+--   mark_<name>          — select the containing unit (dir=nil)
+--   forward_<name>       — move forward one unit
+--   backward_<name>      — move backward one unit
+--   forward_<name>_select   — forward, extending the selection
+--   backward_<name>_select  — backward, extending the selection
+--
+-- Mode-specific textobjects (e.g. lua's `statement`) get commands too;
+-- they no-op in buffers where that textobject doesn't resolve
+-- (select_range returns false, move_word reports end-of-document).
+--
+-- Registered idempotently: a `mode_enter` listener calls this with the
+-- view after each transition, so newly-available textobjects get
+-- commands without clobbering user-defined ones (commands[name] is
+-- checked first and NEVER overwritten).
+--
+-- One goal: a user (or major mode) only has to declare `textobjects =
+-- { foo = TO.ts {...} }` and immediately gets mark_foo / forward_foo /
+-- backward_foo / *_select for free, bound from their keybindings or M-x.
+----------------------------------------------------------------------------------------------------
+
+--- State of an auto-generated textobject command's closure: the
+--- textobject NAME (resolved lazily at call time so the closure survives
+--- a mode's textobjects being re-merged on the next transition).
+local function make_textobject_cmd(kind, name)
+    if kind == "mark" then
+        return function(view, _editor)
+            local p = view:p()
+            view:select_range(name, p.line, p.col)
+        end
+    elseif kind == "forward" then
+        return function(view, _editor, ...)
+            return view:move_word(repeat_count(...), name)
+        end
+    elseif kind == "backward" then
+        return function(view, _editor, ...)
+            return view:move_word(-repeat_count(...), name)
+        end
+    elseif kind == "forward_select" then
+        return function(view, editor, ...)
+            editor._extend = true
+            view:_begin_shift_select()
+            return view:move_word(math.abs(repeat_count(...)), name)
+        end
+    elseif kind == "backward_select" then
+        return function(view, editor, ...)
+            editor._extend = true
+            view:_begin_shift_select()
+            return view:move_word(-math.abs(repeat_count(...)), name)
+        end
+    end
+end
+
+local TO_KINDS = { "mark", "forward", "backward", "forward_select", "backward_select" }
+
+--- Build the command name for a (kind, textobject-name) pair, matching
+--- the established convention: mark_<name>, forward_<name>,
+--- backward_<name>, forward_<name>_select, backward_<name>_select
+--- (e.g. forward_word_select — the _select is a trailing suffix).
+local function cmd_name_for(kind, name)
+    if kind == "mark" then
+        return "mark_" .. name
+    elseif kind:sub(-7) == "_select" then
+        return kind:sub(1, -8) .. "_" .. name .. "_select"
+    else
+        return kind .. "_" .. name
+    end
+end
+
+--- Register `mark_<name>` / `forward_<name>` / `backward_<name>` /
+--- `*_select` commands for every textobject in `view`'s merged set that
+--- doesn't already have a command by that name. Idempotent: calling
+--- on a mode transition only adds commands for newly-seen textobjects
+--- and NEVER overwrites existing commands (hand-written or user-bound).
+---
+--- `extra_textobjects` (optional) is merged on top of the view's set —
+--- used by the `mode_enter` listener, which fires BEFORE the new mode
+--- is appended to `view._major_modes` (so `view:_get_textobjects()`
+--- wouldn't yet see the entering mode's textobjects). The listener
+--- passes the entering instance's `textobjects` here so e.g. lua's
+--- `statement` textobject gets its commands the instant the mode is
+--- entered, regardless of the mode-list mutation ordering.
+--- Returns the list of newly-registered command names.
+---@param view View
+---@param extra_textobjects table? optional name→definition overrides
+---@return string[]
+function commands.register_textobject_commands(view, extra_textobjects)
+    local tos = view:_get_textobjects()
+    if extra_textobjects then
+        for k, v in pairs(extra_textobjects) do
+            tos[k] = v
+        end
+    end
+    local added = {}
+    for name in pairs(tos) do
+        for _, kind in ipairs(TO_KINDS) do
+            local cmd_name = cmd_name_for(kind, name)
+            if commands[cmd_name] == nil then
+                commands[cmd_name] = make_textobject_cmd(kind, name)
+                added[#added + 1] = cmd_name
+            end
+        end
+    end
+    return added
+end
+
 return commands

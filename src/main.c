@@ -360,12 +360,34 @@ int main(int argc, char *argv[])
     /* Run main lane (blocks until editor exits) */
     int exit_code = run_main(main_L);
 
-    /* Cleanup */
+    /* Cleanup.
+     *
+     * The worker lanes (IO/highlight/LSP) block in kevent() waiting for
+     * work. In the normal TUI exit path, main has already set
+     * running=false and poked the lane wake-idents so each lane spins
+     * once, observes running=false, and returns — pthread_join then
+     * reaps a clean exit. In the HEADLESS path (-e/-l/-h), main returns
+     * before the TUI ever starts, so the lanes are still parked in
+     * kevent() and a plain pthread_join would block forever. Detect that
+     * (running already false) and cancel-join instead. Cancellation is
+     * safe here: we tear down every Lua state + the shared state
+     * immediately after, so any in-flight lane work is discarded along
+     * with its state. */
+    int lanes_already_stopped = (g_shared_state != NULL && !g_shared_state->running);
     lua_close(main_L);
+    if (lanes_already_stopped) {
+        pthread_cancel(io_thread);
+    }
     pthread_join(io_thread, NULL);
     lua_close(io_L);
+    if (lanes_already_stopped) {
+        pthread_cancel(hl_thread);
+    }
     pthread_join(hl_thread, NULL);
     lua_close(hl_L);
+    if (lanes_already_stopped) {
+        pthread_cancel(lsp_thread);
+    }
     pthread_join(lsp_thread, NULL);
     lua_close(lsp_L);
 

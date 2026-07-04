@@ -618,10 +618,170 @@ ffi.C.signal(SIGBUS, function(signum)
     os.exit(128 + tonumber(signum))
 end)
 
+----------------------------------------------------------------------------------------------------
+-- CLI option parsing (-e, -l, -h)
+--
+-- These run HEADLESS: no terminal, no editor, no event loop. They let
+-- you drive cursed's library code (parsers, buffers, FFI) from a one-
+-- liner, e.g. for tree-sitter node-name inspection:
+--   build/cursed -e 'local ts=require"cursed.ts"; \
+--     local p=ts.Parser.new(ts.lang.lua()); \
+--     print(ts.node_string(p:parse_string("local x=1"):root()))'
+-- `arg` becomes the filtered (file) list after extraction, so the TUI
+-- path below only sees filenames when no -e/-l is present.
+----------------------------------------------------------------------------------------------------
+--- Print usage to stderr and return exit code 2 (arg error).
+local function usage()
+    io.stderr:write([[
+usage: cursed [-e EXPR | -l MODULE]... [FILE...]
+       cursed -h
+
+  -e EXPR    evaluate a Lua chunk headlessly (may repeat; -l/-e compose)
+  -l MODULE  require MODULE headlessly (may repeat; -l/-e compose)
+  -h         show this help
+
+When -e/-l are given, cursed runs them and exits (no TUI). Without
+them, FILE... opens in the editor as usual.
+]])
+    return 2
+end
+
+--- Parse CLI args into { evals={}, requires={}, files={} }.
+--- A flag's argument may be glued (-eEXPR) or separate (-e EXPR).
+--- Returns nil + errmsg on a bad flag, or nil + "__usage__" for -h/--help.
+---@return table|nil parsed
+---@return string|nil errmsg
+local function parse_cli_args()
+    local out = { evals = {}, requires = {}, files = {} }
+    if not arg then
+        return out
+    end
+    local i = 1
+    local n = #arg
+    while i <= n do
+        local a = arg[i]
+        if a == "-h" or a == "--help" then
+            return nil, "__usage__"
+        elseif a == "-e" or a == "--eval" then
+            if i == n then
+                return nil, "option -e requires an argument"
+            end
+            out.evals[#out.evals + 1] = arg[i + 1]
+            i = i + 2
+        elseif a == "-l" or a == "--require" then
+            if i == n then
+                return nil, "option -l requires an argument"
+            end
+            out.requires[#out.requires + 1] = arg[i + 1]
+            i = i + 2
+        elseif type(a) == "string" and (a:match("^-e(.+)$") or a:match("^--eval=(.+)$")) then
+            out.evals[#out.evals + 1] = a:match("^-e(.+)$") or a:match("^--eval=(.+)$")
+            i = i + 1
+        elseif type(a) == "string" and (a:match("^-l(.+)$") or a:match("^--require=(.+)$")) then
+            out.requires[#out.requires + 1] = a:match("^-l(.+)$") or a:match("^--require=(.+)$")
+            i = i + 1
+        elseif type(a) == "string" and a:sub(1, 1) == "-" and a ~= "-" then
+            return nil, ("unknown option: %s"):format(a)
+        else
+            out.files[#out.files + 1] = a
+            i = i + 1
+        end
+    end
+    return out
+end
+
+--- Run headless -e/-l requests in order, then exit. Returns an exit
+--- code: 0 on success, 1 on a Lua error. The chunk's first returned
+--- value, if a number, is used as the exit code (so `-e 'return 3'`
+--- exits 3). Anything printed goes to stdout normally.
+---@param parsed table { evals = string[], requires = string[] }
+---@return integer
+local function run_headless(parsed)
+    for _, mod in ipairs(parsed.requires) do
+        local ok, err = pcall(require, mod)
+        if not ok then
+            io.stderr:write(("cursed: -l %s failed: %s\n"):format(mod, tostring(err)))
+            return 1
+        end
+    end
+    for _, expr in ipairs(parsed.evals) do
+        local fn, err = load(expr, "=eval")
+        if not fn then
+            io.stderr:write(("cursed: -e parse error: %s\n"):format(tostring(err)))
+            return 1
+        end
+        local rok, rc_or_err = pcall(fn)
+        if not rok then
+            io.stderr:write(("cursed: -e error: %s\n"):format(tostring(rc_or_err)))
+            return 1
+        end
+        if type(rc_or_err) == "number" then
+            return math.floor(rc_or_err)
+        end
+    end
+    return 0
+end
+
 local function main()
     -- Configure logging
     log.configure({ level = "info", output = "/tmp/cursed.log" })
     log.info("main", "starting")
+
+    -- Parse -e/-l/-h. When headless requests are present, run them and
+    -- exit without touching the terminal. The filtered file list is
+    -- re-exposed as `arg` for the TUI path below so the existing arg
+    -- loop keeps working unchanged.
+    local parsed, perr = parse_cli_args()
+    if parsed == nil then
+        if perr == "__usage__" then
+            local rc = usage()
+            -- Same as the headless path: signal the lanes to stop so
+            -- main.c's cleanup doesn't deadlock on pthread_join.
+            pcall(function()
+                local shared = require("cursed.shared")
+                local ss = shared.SharedState.from_global()
+                ss:stop()
+            end)
+            return rc
+        end
+        io.stderr:write(("cursed: %s\n"):format(perr))
+        io.stderr:write("try 'cursed -h' for usage.\n")
+        return 2
+    end
+    if #parsed.evals > 0 or #parsed.requires > 0 then
+        -- Re-expose the file list as `arg` in case a headless chunk
+        -- inspects it, then run and exit.
+        if arg then
+            for i = 1, #parsed.files do
+                arg[i] = parsed.files[i]
+            end
+            for i = #parsed.files + 1, #arg do
+                arg[i] = nil
+            end
+        end
+        local rc = run_headless(parsed)
+        -- Signal the worker lanes to stop. ss:stop() sets running=false
+        -- AND pushes MSG_SHUTDOWN to each lane's outbox (ring_push
+        -- triggers EVFILT_USER on the parked kevent, so each lane wakes,
+        -- observes the shutdown, and returns). main.c's cleanup then
+        -- pthread_join's a clean exit instead of deadlocking (the lanes
+        -- are parked in kevent(); without the wake, join would block).
+        pcall(function()
+            local shared = require("cursed.shared")
+            local ss = shared.SharedState.from_global()
+            ss:stop()
+        end)
+        return rc
+    end
+    -- No headless flags: re-expose files as `arg` for the TUI path.
+    if arg then
+        for i = 1, #parsed.files do
+            arg[i] = parsed.files[i]
+        end
+        for i = #parsed.files + 1, #arg do
+            arg[i] = nil
+        end
+    end
 
     local term, err = tb.Term.new()
     if not term then
@@ -803,6 +963,16 @@ local function main()
     require("cursed.editor_listeners").setup(editor)
     require("cursed.whichkey").setup(editor)
     require("cursed.mdview").setup(editor)
+
+    -- Backfill textobject commands for views opened BEFORE
+    -- editor_listeners.setup (the initial view + anything init.lua
+    -- added): their `view_open` fired before the listener existed, so
+    -- register their default textobjects here. Later views/mode-entry
+    -- are covered by the live view_open / mode_enter listeners.
+    local commands_mod = require("cursed.commands")
+    for _, v in ipairs(editor.views) do
+        commands_mod.register_textobject_commands(v)
+    end
 
     -- Announce editor readiness. Fires AFTER init.lua (config.load, run
     -- above) and default listeners are registered, so both user and

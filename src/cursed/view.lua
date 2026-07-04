@@ -1794,6 +1794,21 @@ function View:hl_tree()
     return ts.Tree.new(ptr), gen
 end
 
+--- Public accessor for the view's active tree-sitter LANGUAGE name
+--- (the bundled grammar the highlight lane is parsing with), or nil
+--- when no tree-sitter mode is active / the language isn't set yet.
+--- Tree-sitter textobject builders (cursed.textobject.ts) use this to
+--- compile their query against the right grammar without reaching into
+--- the private `_hl_lang` field, and without requiring cursed.view at
+--- module load (the builder calls this lazily at call time).
+---@return string|nil
+function View:ts_language()
+    if not self._hl_enabled then
+        return nil
+    end
+    return self._hl_lang
+end
+
 --- Dispatch a query for a contiguous bucket range [bucket_start,
 --- bucket_end) to the lane. Bumps gen, sends MSG_HL_QUERY with the
 --- current text snapshot + (optional) edit. If a query is already in
@@ -2138,6 +2153,17 @@ function View:_hl_install_spans(
         ---@cast p table
         self._hl_pending = nil
         self:_hl_dispatch(p.bucket_start, p.bucket_end, p.has_edit, p.edit)
+    end
+    -- A successful span install means the lane has published a parse
+    -- tree for this view (it parses + queries in one step). Emit
+    -- `hl_tree_ready` so consumers that need a live tree-sitter tree —
+    -- tree-sitter textobjects (cursed.textobject.ts), expand-region's
+    -- tree path — can refresh their mode-specific effort (e.g. register
+    -- `mark_<name>` commands for mode-specific `ts` textobjects that
+    -- weren't registrable at mode_enter time because no tree existed
+    -- yet). Fires on every successful install (cheap; listeners filter).
+    if self.editor and self.editor.event_system then
+        self.editor.event_system:emit("hl_tree_ready", self)
     end
     return true
 end

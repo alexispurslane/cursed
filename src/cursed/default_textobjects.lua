@@ -7,6 +7,12 @@
 ---     ({"begin","end"}, {"(",")"}). The sexp commands
 ---     (forward_sexp, mark_sexp, transpose_sexp, ...) consult the
 ---     active major mode's `sexp` entry to drive matching.
+---   * `ts({ query = "...", capture = "name", lang? = "..." })` —
+---     a tree-sitter QUERY textobject. Runs the (cached) query against
+---     the view's shared parse tree and treats each capture's byte
+---     range as a unit, with the same dir semantics as pattern/sexp.
+---     Language-specific; belongs in a MajorMode's `textobjects`, not
+---     here (defaults are language-agnostic).
 --- Legacy bare pattern strings are also still accepted.
 ---
 --- Used by move_word(n, obj_name), select_range(name, ...), and the

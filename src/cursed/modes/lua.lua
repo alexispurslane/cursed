@@ -209,6 +209,30 @@ return {
             { "begin", "end" },
             { "do", "end" },
         }),
+        -- Tree-sitter textobject: the statement enclosing point.
+        -- mark-statement / move-to-next-statement / kill-statement all
+        -- work because `ts` plugs into the same textobject contract as
+        -- pattern()/sexp(). `lang` is omitted so the builder resolves
+        -- the active mode's grammar ("lua") lazily at call time.
+        -- `variable_declaration` covers `local x = 1` / `local function`;
+        -- the rest are the bare statement node types.
+        statement = TO.ts({
+            query = [[ [
+  (variable_declaration)
+  (assignment_statement)
+  (function_declaration)
+  (function_call)
+  (if_statement)
+  (for_statement)
+  (while_statement)
+  (repeat_statement)
+  (return_statement)
+  (do_statement)
+  (break_statement)
+  (goto_statement)
+  (label_statement)
+] @capture ]],
+        }),
     },
     -- Syntax-aware indent (electric Return): when the cursor sits inside
     -- one of these block nodes, Return adds one extra indent level on the
