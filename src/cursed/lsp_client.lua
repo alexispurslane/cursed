@@ -26,7 +26,17 @@
 --- MSG_LSP_RESPONSE (generic request response, id-routed), and
 --- MSG_LSP_NOTIFICATION (generic server notification, method-routed).
 --- Both the response + notification paths transfer a lane-parsed
---- yyjson_doc; main walks it into a Lua table and frees the doc.
+--- yyjson_doc; main's drain_lsp_inbox walks it into a Lua table, frees
+--- the doc, then RE-EMITS on the editor event bus:
+---   • `"lsp_response:" .. id`       → (result, is_error, client_id)
+---   • `"lsp_notification:" .. method` → (params, client_id)
+---   • `"lsp_status:" .. client_id`   → (exe_name, status, prev_status)
+--- (per handshake transition)
+--- So callers register one-shot listeners for the request id they
+--- minted (via mint_request_id) instead of passing a callback; lsp_client
+--- holds NO callback or notification-handler registry itself. The
+--- `lsp_status:<cid>` events are consumed by `on_status` (start/restart
+--- commands) and any future lifecycle subscriber.
 
 local ffi = require("ffi")
 local constants = require("cursed.shared")
@@ -86,8 +96,9 @@ M._pending_opens = {}
 --- items=flat[] } where each item is { sl, sc, el, ec, severity,
 --- message, source, code } (0-based LSP line + UTF-16 character
 --- offsets; severity 1..4 or 0; message/source/code are strings or
---- nil). Materialized ONCE on arrival by
---- `handle_publish_diagnostics` walking the lane-parsed params table
+--- nil). Materialized ONCE on arrival by `M.store_diagnostics` (the
+--- `"lsp_notification:textDocument/publishDiagnostics"` subscriber in
+--- editor_listeners.lua) walking the lane-parsed params table
 --- (val_to_lua on the doc the lane handed via MSG_LSP_NOTIFICATION) —
 --- main never runs yyjson_read. Cleared per-uri by an empty array, by
 --- drop_client_docs, or by buffer_close.
@@ -100,23 +111,6 @@ local _next_client_id = 1
 --- Next request id to mint. id 1 is reserved for the lane's own
 --- `initialize` request; main-owned requests start at 2.
 local _next_request_id = 2
-
---- Pending main-owned requests: id → callback(decoded_result, is_error).
---- The lane relays every non-initialize response back as MSG_LSP_RESPONSE;
---- apply_response walks the lane-parsed yyjson value into a Lua table
---- (the heavy yyjson_read ran off-main on the lane; main only walks)
---- + invokes the matching callback here, then frees the doc.
---- @type table<integer, fun(result:any, is_error:boolean)>
-M._pending_requests = {}
-
---- Inbound-notification handlers: method → handler(params, client_id).
---- The lane relays every server notification (method set, no id) back as
---- MSG_LSP_NOTIFICATION; apply_notification walks the lane-parsed params
---- value into a Lua table (val_to_lua), frees the doc, and dispatches
---- here by method. Mirrors the request-callback registry. Handlers are
---- registered via on_notification; unhandled methods are logged + dropped.
---- @type table<string, fun(params:any, client_id:integer)>
-M._notification_handlers = {}
 
 --- LSP_STATUS_* code (uint8 from the lane) → status string.
 --- Kept in sync with shared_state.h LSP_STATUS_*.
@@ -374,6 +368,55 @@ function M.unbind_mode(mode_name)
     end
 end
 
+--- Kill ONE client (the single-process form of `shutdown`). Enqueues a
+--- `MSG_LSP_KILL` for just this client_id and proactively marks it killed
+--- in the registry so `is_live()` returns false immediately (without
+--- waiting for the lane's KILLED handshake round-trip), clears any mode
+--- bindings pointing at this cid so a fresh `spawn_for_mode` re-spawns,
+--- drops this client's open-doc + trigger-char state (no didClose — the
+--- process is being killed), and leaves the entry in place so the
+--- modeline still distinguishes killed/missing from spawning/ready.
+--- The lane's eventual KILLED handshake is idempotent against this.
+--- Returns true on a known client; false if the cid isn't registered
+--- (so the caller can still report "nothing to stop").
+--- @param client_id integer
+--- @return boolean killed true if a request was enqueued / state cleared
+function M.kill_client(client_id)
+    local entry = M.clients[client_id]
+    if entry == nil then
+        return false
+    end
+    local s = ss()
+    if s ~= nil then
+        local req =
+            ffi.cast("struct LspKillReq *", ffi.C.calloc(1, ffi.sizeof("struct LspKillReq")))
+        req.client_id = client_id
+        ffi.copy(req.exe_name, entry.exe_name, math.min(#entry.exe_name, 63))
+        s:push(s._ptr.outbox_lsp, { type = constants.MSG_LSP_KILL, ptr = req })
+    end
+    -- Proactively mark killed + clear bindings/docs so callers can treat
+    -- this client as gone without a handshake round-trip (mirrors the
+    -- terminal-status branch of apply_handshake).
+    entry.status = "killed"
+    for mode_name, mb_cid in pairs(M.mode_bindings) do
+        if mb_cid == client_id then
+            M.mode_bindings[mode_name] = nil
+        end
+    end
+    M.drop_client_docs(client_id)
+    M.trigger_chars[client_id] = nil
+    return true
+end
+
+--- Short name of the executable a client was spawned from, or nil when
+--- the cid isn't registered. Convenience for status messages.
+--- @param client_id integer
+--- @return string|nil
+function M.client_name(client_id)
+    local entry = M.clients[client_id]
+    return entry and entry.exe_name or nil
+end
+
 ----------------------------------------------------------------------------------------------------
 -- Outbound requests / notifications
 ----------------------------------------------------------------------------------------------------
@@ -422,42 +465,90 @@ function M.notify(client_id, method, params)
 end
 
 --- Mint the next request id (main-owned; skips id 1 = lane's initialize).
---- Stored so apply_response can route the reply.
---- @param callback fun(result:any, is_error:boolean) invoked on main when
----   the response arrives; result is the decoded JSON value.
+--- Pure counter bump — no callback registry. The caller pairs this id
+--- with a one-shot listener on the editor event bus (event name
+--- `"lsp_response:" .. id`); main's drain_lsp_inbox emits that event
+--- with `(result, is_error, client_id)` when the lane relays the
+--- response. This replaces the old id→callback table.
 --- @return integer id the minted request id
-function M.mint_request_id(callback)
+function M.mint_request_id()
     local id = _next_request_id
     _next_request_id = _next_request_id + 1
-    M._pending_requests[id] = callback
     return id
 end
 
---- Register a handler for an inbound server notification (method set,
---- no id). The handler receives the parsed `params` Lua table + the
---- client_id; the lane-parsed yyjson doc is already freed by the time
---- it runs. Registering nil clears the handler._unregisterd methods
---- are logged + dropped by apply_notification.
---- @param method string e.g. "textDocument/publishDiagnostics"
---- @param handler fun(params:any, client_id:integer)|nil
-function M.on_notification(method, handler)
-    M._notification_handlers[method] = handler
+--- Register a one-shot listener on the editor event bus for the next
+--- response to request `id`. `fn` is called as `fn(editor, result,
+--- is_error, client_id)` EXACTLY ONCE (when main's drain_lsp_inbox emits
+--- `"lsp_response:" .. id`), then self-unregisters via `:off`. The
+--- self-unregistration during emit is safe because each event name has
+--- exactly one handler (the one we register here), so `:off` mutating
+--- the handler array mid-`for` doesn't disturb any other handler.
+--- Register BEFORE issuing the request; here both the listener register
+--- and the `request_*` enqueue happen synchronously inside the same
+--- command callback, and the response arrives in a future drain, so no
+--- register-vs-emit race exists. No-op if `editor`/its event_system nil.
+--- @param editor table? editor (needs `.event_system`)
+--- @param id integer request id (returned by a request_* / mint_request_id)
+--- @param fn fun(editor:table, result:any, is_error:boolean, client_id:integer)
+function M.on_response(editor, id, fn)
+    local es = editor and editor.event_system
+    if es == nil then
+        return
+    end
+    local event = "lsp_response:" .. tostring(id)
+    local function handler(ed, result, is_err, cid)
+        es:off(event, handler)
+        fn(ed, result, is_err, cid)
+    end
+    es:on(event, handler)
+end
+
+--- Register a one-shot listener for the NEXT non-spawning lifecycle
+--- transition of `client_id`. `fn` is called as `fn(editor, exe_name,
+--- status, prev_status)` EXACTLY ONCE on the first `lsp_status:<cid>`
+--- emit whose `status ~= "spawning"`, then self-unregisters via `:off`
+--- (same mid-emit-off safety as on_response — exactly one handler per
+--- event name). Main sets status="spawning" proactively at spawn time
+--- WITHOUT emitting, so the lane's first handshake emit IS the settle
+--- (ready / missing / dead / killed); we defensively skip a stray
+--- "spawning" re-emit too. Use this from start/restart commands to
+--- surface the spawn outcome without forcing the user to watch the
+--- modeline. No-op if `editor`/its event_system nil.
+--- @param editor table? editor (needs `.event_system`)
+--- @param client_id integer the spawned client id
+--- @param fn fun(editor:table, exe_name:string, status:string, prev_status:string?)
+function M.on_status(editor, client_id, fn)
+    local es = editor and editor.event_system
+    if es == nil then
+        return
+    end
+    local event = "lsp_status:" .. tostring(client_id)
+    local function handler(ed, exe_name, status, prev_status)
+        if status == "spawning" then
+            return -- wait for the actual settle
+        end
+        es:off(event, handler)
+        fn(ed, exe_name, status, prev_status)
+    end
+    es:on(event, handler)
 end
 
 --- Request textDocument/formatting for a document on the server bound
 --- to `client_id`. `opts` is { tab_size = N, insert_spaces = bool }.
---- `callback` receives the decoded result (a TextEdit[] array, or nil
---- if the server returns null). No-op + returns nil if not ready.
+--- Returns the request id; subscribe to `"lsp_response:" .. id` on the
+--- editor event bus to receive `(result, is_error, client_id)` where
+--- `result` is a TextEdit[] array, or nil if the server returns null.
+--- No-op + returns nil if not ready.
 --- @param client_id integer
 --- @param uri string file:// URI
 --- @param opts {tab_size:integer, insert_spaces:boolean}
---- @param callback fun(result:any, is_error:boolean)
 --- @return integer|nil id the request id, or nil if not ready
-function M.request_format(client_id, uri, opts, callback)
+function M.request_format(client_id, uri, opts)
     if not M.is_ready(client_id) then
         return nil
     end
-    local id = M.mint_request_id(callback)
+    local id = M.mint_request_id()
     enqueue_send("textDocument/formatting", {
         textDocument = { uri = uri },
         options = {
@@ -473,10 +564,11 @@ end
 --
 -- Mirrors request_format: mints a main-owned request id + enqueues a
 -- textDocument/completion request. The result (a CompletionList or
--- CompletionItem[] or null) flows back via apply_response → the supplied
--- callback, decoded on the lane and re-encoded as just the `result`
+-- CompletionItem[] or null) flows back via apply_response → the editor
+-- event bus as `"lsp_response:" .. id` carrying `(result, is_error,
+-- client_id)`, decoded on the lane and re-encoded as just the `result`
 -- field, so the (potentially large) list crosses the boundary as one
--- small JSON blob and main only does the final decode + dispatch.
+-- small JSON blob and main only does the final decode + emit.
 --
 -- `position.character` is a 0-based UTF-16 code-unit offset per the LSP
 -- spec; callers must convert from the buffer's 0-based byte col.
@@ -491,21 +583,22 @@ local COMPLETION_TRIGGER_CHARACTER = 2
 --- `client_id`. `position` is `{ line = L, character = C }` with L a
 --- 0-based line and C a 0-based UTF-16 code-unit offset. `trigger` is an
 --- optional single character the user just typed (forces triggerKind=2).
---- `callback` receives the decoded result (a CompletionList
---- `{items=,isIncomplete=}`, a CompletionItem[] array, or nil for null).
---- No-op + returns nil if the server isn't ready.
+--- Returns the request id; subscribe to `"lsp_response:" .. id` on the
+--- editor event bus to receive `(result, is_error, client_id)` where
+--- `result` is a CompletionList `{items=,isIncomplete=}`, a
+--- CompletionItem[] array, or nil for null. No-op + returns nil if
+--- the server isn't ready.
 --- @param client_id integer
 --- @param uri string file:// URI
---- @param position {line:integer, character:integer} LSP position
+--- @param position {line:integer,character:integer} LSP position
 --- @param trigger string? single trigger character just typed, or nil
---- @param callback fun(result:any, is_error:boolean)
 --- @return integer|nil id the request id, or nil if not ready
-function M.request_completion(client_id, uri, position, trigger, callback)
+function M.request_completion(client_id, uri, position, trigger)
     if not M.is_ready(client_id) then
         log.info("lsp_complete", "request_skipped_not_ready", { client_id = client_id, uri = uri })
         return nil
     end
-    local id = M.mint_request_id(callback)
+    local id = M.mint_request_id()
     local ctx
     if trigger ~= nil and trigger ~= "" then
         ctx = {
@@ -539,21 +632,21 @@ end
 -- (the generic doc-transfer path) and is a Location, Location[],
 -- LocationLink[] (if the client declared hierarchical chrSupport — we
 -- don't, so servers return plain Location/Location[]), or null. Main
--- dispatches by id against the pending-request registry; the callback
--- normalizes the shape and reuses Editor:jump_to_location.
+-- re-emits it on the event bus as `"lsp_response:" .. id`; the
+-- requester normalizes the shape and reuses Editor:jump_to_location.
 ----------------------------------------------------------------------------------------------------
 
 --- Request textDocument/definition at `position` on the server bound to
 --- `client_id`. `position` is `{ line = L, character = C }` with L a 0-based
---- line and C a 0-based UTF-16 code-unit offset. `callback` receives the
---- decoded result (a Location, Location[], LocationLink[], or nil for
---- null) + `is_error`. No-op + returns nil if not ready.
+--- line and C a 0-based UTF-16 code-unit offset. Returns the request id;
+--- subscribe to `"lsp_response:" .. id` to receive `(result, is_error,
+--- client_id)` where `result` is a Location, Location[], LocationLink[],
+--- or nil for null. No-op + returns nil if not ready.
 --- @param client_id integer
 --- @param uri string file:// URI
---- @param position {line:integer, character:integer} LSP position
---- @param callback fun(result:any, is_error:boolean)
+--- @param position {line:integer,character:integer} LSP position
 --- @return integer|nil id the request id, or nil if not ready
-function M.request_definition(client_id, uri, position, callback)
+function M.request_definition(client_id, uri, position)
     if not M.is_ready(client_id) then
         log.info(
             "lsp",
@@ -562,7 +655,7 @@ function M.request_definition(client_id, uri, position, callback)
         )
         return nil
     end
-    local id = M.mint_request_id(callback)
+    local id = M.mint_request_id()
     enqueue_send("textDocument/definition", {
         textDocument = { uri = uri },
         position = position,
@@ -570,22 +663,112 @@ function M.request_definition(client_id, uri, position, callback)
     return id
 end
 
---- Request hover info at a position. Callback receives the `Hover`
---- result (`{ range?, contents }`) or nil/error per the generic
---- response contract (`cb(result, is_error)`). `contents` is
---- MarkupContent / MarkedString / MarkedString[] — left to the caller
---- to normalize.
+----------------------------------------------------------------------------------------------------
+-- Code actions (textDocument/codeAction)
+--
+-- Same request/response pattern as definition/hover/completion: mint a
+-- main-owned request id, enqueue the request to the lane, route the reply
+-- back via the generic MSG_LSP_RESPONSE path. The result (a
+-- (Command|CodeAction)[] or null) is decoded on the lane and re-emitted
+-- on the editor event bus as `"lsp_response:" .. id` carrying
+-- `(result, is_error, client_id)`.
+--
+-- `range` is the cursor-or-selection LSP range (start/end with 0-based
+-- line + 0-based UTF-16 character). `context` carries the diagnostics
+-- overlapping the range (so the server can return fixes-for-those),
+-- `only` (filter by CodeActionKind), and `triggerKind` (1=Invoked=manual,
+-- 2=Automatic). Callers pass `context = nil` for a plain manual invoke.
+----------------------------------------------------------------------------------------------------
+
+--- LSP CodeAction trigger kinds (spec): 1=Invoked (manual), 2=Automatic.
+local CODE_ACTION_TRIGGER_INVOKED = 1
+
+--- Request textDocument/codeAction for `range` on the server bound to
+--- `client_id`. `range` is `{ start = {line,character}, ["end"] = {line,character} }`
+--- (LSP positions, 0-based line + 0-based UTF-16 code-unit offset).
+--- `context` is `{ diagnostics = [...], only = ...?, triggerKind = ...? }`;
+--- pass nil to send a plain manual invoke (triggerKind=Invoked, no
+--- diagnostics). Returns the request id; subscribe to
+--- `"lsp_response:" .. id` to receive `(result, is_error, client_id)`
+--- where `result` is a (Command|CodeAction)[] or nil for null.
+--- No-op + returns nil if not ready.
+--- @param client_id integer
+--- @param uri string file:// URI
+--- @param range {start:{line:integer,character:integer},["end"]:{line:integer,character:integer}} LSP range
+--- @param context {diagnostics:table[]?,only:string[]?,triggerKind:integer?}|nil
+--- @return integer|nil id the request id, or nil if not ready
+function M.request_code_actions(client_id, uri, range, context)
+    if not M.is_ready(client_id) then
+        log.info(
+            "lsp",
+            "code actions request skipped (not ready)",
+            { client_id = client_id, uri = uri }
+        )
+        return nil
+    end
+    local id = M.mint_request_id()
+    local ctx = context
+    if ctx == nil then
+        ctx = { triggerKind = CODE_ACTION_TRIGGER_INVOKED }
+    elseif ctx.triggerKind == nil then
+        ctx = {
+            diagnostics = ctx.diagnostics,
+            only = ctx.only,
+            triggerKind = CODE_ACTION_TRIGGER_INVOKED,
+        }
+    end
+    enqueue_send("textDocument/codeAction", {
+        textDocument = { uri = uri },
+        range = range,
+        context = ctx,
+    }, id, client_id)
+    return id
+end
+
+--- Request workspace/executeCommand for a CodeAction/Command whose
+--- `command` field names a server-side command (no embedded edit). The
+--- server applies its own mutation here; we don't request a back-path
+--- (no workspace/applyEdit inbound-request handling yet), so callers
+--- should prefer actions whose `edit` is populated when available.
+--- Returns the request id; subscribe to `"lsp_response:" .. id` to
+--- receive `(result, is_error, client_id)` where `result` is
+--- server-defined (often nil). No-op + returns nil if not ready.
+--- @param client_id integer
+--- @param command string command identifier from a Command/CodeAction
+--- @param arguments any[]|nil arguments array for the command
+--- @return integer|nil id the request id, or nil if not ready
+function M.request_execute_command(client_id, command, arguments)
+    if not M.is_ready(client_id) then
+        log.info(
+            "lsp",
+            "executeCommand request skipped (not ready)",
+            { client_id = client_id, command = command }
+        )
+        return nil
+    end
+    local id = M.mint_request_id()
+    enqueue_send("workspace/executeCommand", {
+        command = command,
+        arguments = arguments,
+    }, id, client_id)
+    return id
+end
+
+--- Request hover info at a position. Returns the request id; subscribe
+--- to `"lsp_response:" .. id` to receive `(result, is_error, client_id)`
+--- where `result` is the `Hover` (`{ range?, contents }`) or nil/error.
+--- `contents` is MarkupContent / MarkedString / MarkedString[] — left
+--- to the caller to normalize.
 ---@param client_id integer
 ---@param uri string
 ---@param position table {line, character} (UTF-16)
----@param callback fun(result: table|nil, is_error: boolean)
 ---@return integer|nil id
-function M.request_hover(client_id, uri, position, callback)
+function M.request_hover(client_id, uri, position)
     if not M.is_ready(client_id) then
         log.info("lsp", "hover request skipped (not ready)", { client_id = client_id, uri = uri })
         return nil
     end
-    local id = M.mint_request_id(callback)
+    local id = M.mint_request_id()
     enqueue_send("textDocument/hover", {
         textDocument = { uri = uri },
         position = position,
@@ -607,7 +790,7 @@ end
 -- handshake completes (status == ready). Main mints the version counter
 -- but DEFERS the actual didOpen until the READY handshake lands. Callers
 -- record intent via sync_open_for_mode (sets the buffer's lsp_* fields +
--- marks want_open); the `lsp_status` READY transition in drain_lsp_inbox
+-- marks want_open); the `lsp_status:<cid>` READY transition in drain_lsp_inbox
 -- flushes pending opens for that client via flush_pending_opens below.
 ----------------------------------------------------------------------------------------------------
 
@@ -779,9 +962,12 @@ function M.drop_client_docs(client_id)
             M._diagnostics_by_uri[uri] = nil
         end
     end
-    -- A dead server won't reply to its pending requests, so their
-    -- callbacks simply never fire (the closures GC once the table entry
-    -- is overwritten by id reuse — ids are main-minted + monotonic).
+    -- A dead server won't reply to its pending requests; the one-shot
+    -- `"lsp_response:" .. id` listeners bound for them simply never
+    -- fire (and so never self-unregister). They're tiny closures; ids
+    -- are main-minted + monotonic so the event-name keys are unique and
+    -- never collide with a future request. Worst case the editor leaks a
+    -- handful of small closures per dead-server un-replied request.
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -848,7 +1034,7 @@ end
 --- modeline distinguishes them; mode bindings pointing at a terminal
 --- client are cleared so a re-enter re-spawns. Frees the struct.
 --- @param ptr any struct LspHandshake*
---- @return {client_id:integer, exe_name:string, status:string}|nil parsed info for the caller to emit as an event
+--- @return {client_id:integer, exe_name:string, status:string, prev_status:string?}|nil parsed info for the caller to emit as an event
 function M.apply_handshake(ptr)
     if ptr == nil then
         return nil
@@ -925,11 +1111,18 @@ function M.set_shared_state(s)
 end
 
 --- Consume a MSG_LSP_RESPONSE (called from main.lua's drain_lsp_inbox).
---- Decodes the trailing result JSON via yyjson + dispatches it to the
---- matching pending-request callback (registered by mint_request_id).
---- Frees the struct. Unknown ids (e.g. after a client died) are dropped.
+--- Decodes the trailing result value via yyjson (the heavy yyjson_read
+--- ran off-main on the lane), frees the doc + struct, then RETURNS the
+--- `(id, result, is_error, client_id)` tuple so the caller can emit it
+--- on the editor event bus as `"lsp_response:" .. id` — main owns the
+--- routing; lsp_client owns no callback registry. Unknown ids (e.g.
+--- after a client died before its reply landed) are still returned; the
+--- matching event simply has no subscribers and is a no-op emit.
 --- @param ptr any struct LspResponse*
---- @return integer|nil client_id replied (nil if ptr was nil)
+--- @return integer|nil id request id, or nil if ptr was nil
+--- @return any result decoded JSON value (nil if absent/error)
+--- @return boolean? is_error true if the response was an LSP error
+--- @return integer|nil client_id owning client id
 function M.apply_response(ptr)
     if ptr == nil then
         return nil
@@ -945,7 +1138,7 @@ function M.apply_response(ptr)
 
     -- Walk the lane-parsed value into a Lua table (no re-parse; the
     -- heavy yyjson_read ran off-main on the lane). The result table is
-    -- independent of the doc, so free the doc before dispatching.
+    -- independent of the doc, so free the doc before returning.
     local result = nil
     if doc ~= nil and val ~= nil then
         local ok, v = pcall(json.val_to_lua, val)
@@ -964,24 +1157,22 @@ function M.apply_response(ptr)
         client_id = cid,
         id = id,
         is_error = is_err,
-        has_callback = M._pending_requests[id] ~= nil,
     })
-    local cb = M._pending_requests[id]
-    if cb ~= nil then
-        M._pending_requests[id] = nil
-        cb(result, is_err)
-    end
-    return cid
+    return id, result, is_err, cid
 end
 
 --- Consume a MSG_LSP_NOTIFICATION (called from main's drain_lsp_inbox).
 --- The lane already parsed the body into a yyjson_doc (yyjson_read ran
 --- off-main); here we walk the `params` value into a Lua table via
---- val_to_lua, free the doc, then dispatch by method to a handler
---- registered via on_notification. Unhandled methods are logged +
---- dropped. Mirrors apply_response but method-routed instead of id-routed.
+--- val_to_lua, free the doc, then RETURN the `(method, params, client_id)`
+--- tuple so the caller can emit it on the editor event bus as
+--- `"lsp_notification:" .. method` — main owns the routing; lsp_client
+--- owns no notification-handler registry. Mirrors apply_response but is
+--- method-routed instead of id-routed.
 --- @param ptr any struct LspNotification*
---- @return integer|nil client_id
+--- @return string|nil method e.g. "textDocument/publishDiagnostics"
+--- @return any params decoded params value (nil if absent/error)
+--- @return integer|nil client_id owning client id
 function M.apply_notification(ptr)
     if ptr == nil then
         return nil
@@ -1010,27 +1201,22 @@ function M.apply_notification(ptr)
         end
     end
     json.free_doc(doc) -- always free the tree, even on partial walk
-
-    local h = M._notification_handlers[method]
-    if h ~= nil then
-        h(params, cid)
-    else
-        log.debug("lsp", "notification dropped (no handler)", { method = method })
-    end
-    return cid
+    return method, params, cid
 end
 
---- Handler for textDocument/publishDiagnostics (registered via
---- on_notification at module load). Receives the parsed `params` table
---- ({ uri, version?, diagnostics[] }) and stores flat per-diagnostic
---- records keyed by uri; an empty array removes the uri's entry so
---- stale squiggles don't linger. Each item keeps the same shape the
---- yyjson slice-walk previously produced:
+--- Store diagnostics from a parsed `textDocument/publishDiagnostics`
+--- notification. Subscribed to (in editor_listeners.lua) as the handler
+--- for the `"lsp_notification:textDocument/publishDiagnostics"` event —
+--- main's drain_lsp_inbox emits it with `(params, client_id)`.
+--- Receives the parsed `params` table ({ uri, version?, diagnostics[] })
+--- and stores flat per-diagnostic records keyed by uri; an empty array
+--- removes the uri's entry so stale squiggles don't linger. Each item
+--- keeps the same shape the yyjson slice-walk previously produced:
 ---   { sl, sc, el, ec, severity, message, source, code }
 --- with 0-based LSP line + UTF-16 char offsets (callers convert).
 --- @param params any parsed publishDiagnostics params table
 --- @param cid integer owning client id
-local function handle_publish_diagnostics(params, cid)
+function M.store_diagnostics(params, cid)
     if type(params) ~= "table" then
         return
     end
@@ -1074,7 +1260,6 @@ local function handle_publish_diagnostics(params, cid)
     end
     log.info("lsp", "diagnostics_stored", { uri = uri, count = #items })
 end
-M.on_notification("textDocument/publishDiagnostics", handle_publish_diagnostics)
 
 --- Clear stored diagnostics for a uri (e.g. on buffer close).
 ---@param uri string

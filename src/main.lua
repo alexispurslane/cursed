@@ -278,12 +278,30 @@ local function drain_lsp_inbox(editor, ss)
         if msg.type == shared.MSG_LSP_HANDSHAKE then
             local info = require("cursed.lsp_client").apply_handshake(msg.ptr)
             if info ~= nil then
-                editor.event_system:emit("lsp_status", info.client_id, info.exe_name, info.status)
+                -- Per-client event so subscribers can scope to one server
+                -- (mirrors lsp_response:<id> / lsp_notification:<method>).
+                -- The payload carries prev_status so a smart listener can
+                -- dedupe a repeated same-state re-emit.
+                editor.event_system:emit(
+                    "lsp_status:" .. tostring(info.client_id),
+                    info.exe_name,
+                    info.status,
+                    info.prev_status
+                )
             end
         elseif msg.type == shared.MSG_LSP_RESPONSE then
-            require("cursed.lsp_client").apply_response(msg.ptr)
+            -- lsp_client decodes + frees; returns the id-routed tuple so
+            -- main can re-emit on the event bus. Subscribers register
+            -- one-shot listeners against `"lsp_response:" .. id`.
+            local id, result, is_err, cid = require("cursed.lsp_client").apply_response(msg.ptr)
+            if id ~= nil then
+                editor.event_system:emit("lsp_response:" .. tostring(id), result, is_err, cid)
+            end
         elseif msg.type == shared.MSG_LSP_NOTIFICATION then
-            require("cursed.lsp_client").apply_notification(msg.ptr)
+            local method, params, cid = require("cursed.lsp_client").apply_notification(msg.ptr)
+            if method ~= nil and method ~= "" then
+                editor.event_system:emit("lsp_notification:" .. method, params, cid)
+            end
         end
         msg = ss:pop(ss._ptr.inbox_lsp)
     end

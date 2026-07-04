@@ -124,7 +124,7 @@ end
 --- `error` value, and ships the doc + value pointer to main. Main walks
 --- the value into a Lua table (val_to_lua) and frees the doc. Ownership
 --- transfers to main; the lane frees nothing on success. Shape-agnostic
---- — main dispatches by id against its pending-request registry. On a
+--- — main re-emits the response on its event bus keyed by id. On a
 --- parse failure the lane NACKs the caller by shipping a doc-less
 --- response (main fires the callback with is_error=true, result=nil)
 --- rather than leaking the pending entry.
@@ -171,9 +171,9 @@ end
 --- `msg.id == nil`). Parses body_text ONCE into a yyjson_doc (yyjson_read
 --- runs off-main), navigates to the `params` value, and ships the doc +
 --- value pointer + the method string to main. Main walks `params` into
---- a Lua table (val_to_lua), frees the doc, and dispatches by method to
---- a handler registered via on_notification. Ownership transfers to
---- main; the lane frees nothing on success. Mirrors relay_response.
+--- a Lua table (val_to_lua), frees the doc, and re-emits on its event
+--- bus keyed by method. Ownership transfers to main; the lane frees
+--- nothing on success. Mirrors relay_response.
 --- `params` may be absent (some notifications carry none) — params_val
 --- is then nil and the handler receives nil.
 local function relay_notification(client, msg, body_text)
@@ -393,8 +393,8 @@ function LSPClient:_dispatch(msg, body_text)
     -- A response (id set, method nil). id == 1 is the lane-owned
     -- initialize handshake; anything else is a main-owned request whose
     -- result we relay back generically so the lane stays shape-agnostic
-    -- (TextEdit[] today, completions/hover tomorrow) — main dispatches
-    -- by id against its pending-request registry.
+    -- (TextEdit[] today, completions/hover tomorrow) — main re-emits
+    -- on its event bus keyed by id.
     if msg.id ~= nil and msg.method == nil then
         if tonumber(msg.id) == 1 then
             -- initialize response → READY. Mark + relay before the
@@ -446,9 +446,10 @@ function LSPClient:_dispatch(msg, body_text)
 
     -- Notifications (msg.method set, no id): route generically. Every
     -- inbound notification flows through relay_notification →
-    -- MSG_LSP_NOTIFICATION → main's on_notification registry. New
-    -- notifications (window/showMessage, $/progress, ...) need no lane
-    -- changes — only a main-side handler registered by method.
+    -- MSG_LSP_NOTIFICATION → apply_notification → main's event-bus emit
+    -- `"lsp_notification:" .. method`. New notifications (window/
+    -- showMessage, $/progress, ...) need no lane changes — only a
+    -- main-side subscriber on the event bus.
     -- Server-initiated requests (method + id) are distinct: they expect
     -- a response and aren't notifications; log + drop for now.
     if msg.method and msg.id == nil then

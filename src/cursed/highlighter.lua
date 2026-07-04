@@ -1,3 +1,4 @@
+---@diagnostic disable: no-unknown
 --- Syntax highlighter built on the bundled tree-sitter grammars.
 ---
 --- A Highlighter owns a TSParser + a TSQuery. Given a buffer's full text

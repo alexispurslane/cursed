@@ -830,7 +830,12 @@ commands.format = function(view, editor)
         insert_spaces = view.expand_tab ~= false,
     }
     editor.status_message = "formatting…"
-    local id = lsp.request_format(cid, uri, opts, function(result, is_error)
+    local id = lsp.request_format(cid, uri, opts)
+    if id == nil then
+        editor.status_message = "language server not ready"
+        return
+    end
+    lsp.on_response(editor, id, function(_ed, result, is_error)
         if is_error then
             editor.status_message = "format failed: server error"
             return
@@ -864,9 +869,6 @@ commands.format = function(view, editor)
         end
         editor.status_message = ("formatted (%d edits)"):format(applied)
     end)
-    if id == nil then
-        editor.status_message = "language server not ready"
-    end
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -898,48 +900,45 @@ commands.goto_definition = function(view, editor)
     local text = buf:line_text(p.line) or ""
     local char = utf8.byte_to_utf16_col(text, p.col)
     editor.status_message = "finding definition…"
-    local id = lsp.request_definition(
-        cid,
-        uri,
-        { line = p.line, character = char },
-        function(result, is_error)
-            if is_error then
-                editor.status_message = "definition request failed: server error"
-                return
-            end
-            if result == nil then
-                editor.status_message = "no definition"
-                return
-            end
-            -- Normalize the spec's three result shapes to one Location.
-            -- LSP allows: Location | Location[] | LocationLink[] (the latter
-            -- only if the client declared linkSupport; we didn't, so servers
-            -- return plain Location/Location[] — but handle both safely).
-            local loc = result
-            if type(loc) == "table" then
-                if loc.uri == nil and loc[1] ~= nil then
-                    loc = loc[1] -- Location[] / LocationLink[] → first
-                end
-            end
-            if type(loc) ~= "table" or loc.uri == nil then
-                editor.status_message = "no definition"
-                return
-            end
-            -- LocationLink uses targetUri/targetRange; Location uses uri/range.
-            local turi = loc.targetUri or loc.uri
-            local trange = loc.targetSelectionRange or loc.targetRange or loc.range
-            local start = trange and trange.start
-            if turi == nil or start == nil then
-                editor.status_message = "no definition"
-                return
-            end
-            editor:jump_to_location(turi, start.line, start.character)
-            editor.status_message = nil
-        end
-    )
+    local id = lsp.request_definition(cid, uri, { line = p.line, character = char })
     if id == nil then
         editor.status_message = "language server not ready"
+        return
     end
+    lsp.on_response(editor, id, function(_ed, result, is_error)
+        if is_error then
+            editor.status_message = "definition request failed: server error"
+            return
+        end
+        if result == nil then
+            editor.status_message = "no definition"
+            return
+        end
+        -- Normalize the spec's three result shapes to one Location.
+        -- LSP allows: Location | Location[] | LocationLink[] (the latter
+        -- only if the client declared linkSupport; we didn't, so servers
+        -- return plain Location/Location[] — but handle both safely).
+        local loc = result
+        if type(loc) == "table" then
+            if loc.uri == nil and loc[1] ~= nil then
+                loc = loc[1] -- Location[] / LocationLink[] → first
+            end
+        end
+        if type(loc) ~= "table" or loc.uri == nil then
+            editor.status_message = "no definition"
+            return
+        end
+        -- LocationLink uses targetUri/targetRange; Location uses uri/range.
+        local turi = loc.targetUri or loc.uri
+        local trange = loc.targetSelectionRange or loc.targetRange or loc.range
+        local start = trange and trange.start
+        if turi == nil or start == nil then
+            editor.status_message = "no definition"
+            return
+        end
+        editor:jump_to_location(turi, start.line, start.character)
+        editor.status_message = nil
+    end)
 end
 
 commands.insert_file = function(view, editor)
@@ -1792,6 +1791,385 @@ end
 --- declares a symbol query + the buffer has a parse tree). The LSP path
 --- jumps via Editor:jump_to_location (URI + UTF-16 char); the TS path
 --- jumps within the current view via Editor:goto_byte (byte column).
+----------------------------------------------------------------------------------------------------
+-- LSP process management (ctrl-c prefix)
+--
+-- `ctrl-c` is the LSP prefix (Emacs C-c convention: reserved for user/
+-- major-mode chords). The bare `ctrl-c` leaf is intentionally not bound
+-- so the prefix can extend:
+--   ctrl-c a   → code actions at the cursor / over the selection
+--   ctrl-c s   → start the language server for this buffer's mode
+--   ctrl-c k   → kill the language server serving this buffer
+--   ctrl-c ctrl-r → restart (kill + re-spawn) the language server
+--
+-- Implementation: these commands re-use the same centralized
+-- mode_enter listener (editor_listeners.lua) that auto-spawns the
+-- server on buffer activation. `lsp_start`/`lsp_restart` re-emit
+-- `mode_enter` for the lsp_servers-declaring mode instance — the
+-- listener's spawn_for_mode is idempotent (reuses a live client) and
+-- its `buf.lsp_client_id == nil` guard re-binds + re-didOpens only
+-- after a kill has cleared the buffer's per-doc fields.
+----------------------------------------------------------------------------------------------------
+
+--- Find the major-mode instance (top of stack wins) that declares
+--- `lsp_servers` for this buffer — i.e. the mode that "owns" LSP.
+--- Walks `view._major_modes` high→low precedence, mirroring the
+--- modeline's status lookup.
+--- @param view View?
+--- @return MajorModeInstance|nil
+local function lsp_mode_for_view(view)
+    if view == nil or view._major_modes == nil then
+        return nil
+    end
+    for i = #view._major_modes, 1, -1 do
+        local m = view._major_modes[i]
+        if m.lsp_servers ~= nil and #m.lsp_servers > 0 then
+            return m
+        end
+    end
+    return nil
+end
+
+--- Start the language server for the current buffer's mode. Re-emits
+--- `mode_enter` for the lsp_servers-declaring mode instance so the
+--- centralized listener spawn-gets (idempotent: reuses a live server,
+--- spawns fresh when none/missing/killed) and re-binds the buffer's
+--- per-doc LSP fields + didOpen. No-op (with a status message) when no
+--- mode declares a server, when one is already up, or when the editor
+--- has no workspace root.
+commands.lsp_start = function(view, editor)
+    local instance = lsp_mode_for_view(view)
+    if instance == nil then
+        editor.status_message = "no language server configured for this buffer"
+        return
+    end
+    local name, status = lsp.server_status_for(instance.lsp_servers)
+    if status == "ready" or status == "spawning" then
+        editor.status_message = ("language server already running (%s)"):format(name or "?")
+        return
+    end
+    if editor.workspace_dir == nil then
+        editor.status_message = "no workspace directory"
+        return
+    end
+    view:_emit_mode_event("mode_enter", instance)
+    -- Now that mode_enter has synchronously spawn_for_mode'd (binding
+    -- mode_name → a fresh client_id), watch for the lane's settle
+    -- handshake on that new cid and surface it as a status_message so
+    -- the user gets "ready" / "not on PATH" / "failed to start" when
+    -- the spawn actually resolves, instead of a stuck "starting…".
+    local started_cid = lsp.client_for_mode(instance.name)
+    if started_cid ~= nil then
+        lsp.on_status(editor, started_cid, function(_ed, n, st)
+            if st == "ready" then
+                editor.status_message = ("language server ready (%s)"):format(n or "?")
+            elseif st == "missing" then
+                editor.status_message = ("language server not on PATH (%s)"):format(n or "?")
+            elseif st == "dead" then
+                editor.status_message = ("language server failed to start (%s)"):format(n or "?")
+            elseif st == "killed" then
+                editor.status_message = ("language server stopped (%s)"):format(n or "?")
+            end
+        end)
+    end
+    editor.status_message = ("starting language server (%s)…"):format(name or "?")
+end
+
+--- Kill the language server bound to the current buffer (the
+--- single-process form of `lsp.shutdown`). Clears the buffer's per-doc
+--- LSP fields (lsp_client_id/uri/language_id) so a follow-up start or
+--- restart re-binds + re-didOpens. Other buffers sharing the same
+--- server binary will see ⛏ srv✝ in their modeline until they too
+--- re-trigger a spawn (or this command is invoked on them).
+commands.lsp_kill = function(view, editor)
+    local buf = view and view.buffer
+    local cid = buf and buf.lsp_client_id
+    if cid == nil then
+        editor.status_message = "no language server bound to this buffer"
+        return
+    end
+    local name = lsp.client_name(cid)
+    local ok = lsp.kill_client(cid)
+    if not ok then
+        editor.status_message = "no language server bound to this buffer"
+        return
+    end
+    -- Drop the buffer's per-doc fields; the start/restart paths re-bind
+    -- them via the mode_enter listener's didOpen.
+    if buf ~= nil then
+        buf.lsp_client_id = nil
+        buf.lsp_uri = nil
+        buf.lsp_language_id = nil
+    end
+    editor.status_message = ("stopped language server%s"):format(
+        name ~= nil and (" (" .. name .. ")") or ""
+    )
+end
+
+--- Restart the language server bound to the current buffer: kill it,
+--- clear the buffer's per-doc fields, then re-emit mode_enter so the
+--- centralized listener spawns a fresh client + re-binds the buffer
+--- (didOpen). No-op-with-message when no mode declares a server.
+commands.lsp_restart = function(view, editor)
+    local buf = view and view.buffer
+    local instance = lsp_mode_for_view(view)
+    if instance == nil then
+        editor.status_message = "no language server configured for this buffer"
+        return
+    end
+    if editor.workspace_dir == nil then
+        editor.status_message = "no workspace directory"
+        return
+    end
+    local cid = buf and buf.lsp_client_id
+    if cid ~= nil then
+        lsp.kill_client(cid)
+        -- Mirror lsp_kill's buffer-field clear so the re-emitted
+        -- mode_enter's `buf.lsp_client_id == nil` guard re-binds.
+        buf.lsp_client_id = nil
+        buf.lsp_uri = nil
+        buf.lsp_language_id = nil
+    end
+    view:_emit_mode_event("mode_enter", instance)
+    local name = (select(1, lsp.server_status_for(instance.lsp_servers))) or "?"
+    -- Mirror lsp_start: the re-emitted mode_enter synchronously bound a
+    -- fresh client_id; watch for its settle so "restarting…" resolves
+    -- into "ready" / "not on PATH" / "failed to start" when the spawn
+    -- actually lands. (A stray KILLED handshake from the OLD killed cid
+    -- lands on a different event name and never reaches this one.)
+    local restarted_cid = lsp.client_for_mode(instance.name)
+    if restarted_cid ~= nil then
+        lsp.on_status(editor, restarted_cid, function(_ed, n, st)
+            if st == "ready" then
+                editor.status_message = ("language server ready (%s)"):format(n or "?")
+            elseif st == "missing" then
+                editor.status_message = ("language server not on PATH (%s)"):format(n or "?")
+            elseif st == "dead" then
+                editor.status_message = ("language server failed to start (%s)"):format(n or "?")
+            elseif st == "killed" then
+                editor.status_message = ("language server stopped (%s)"):format(n or "?")
+            end
+        end)
+    end
+    editor.status_message = ("restarting language server (%s)…"):format(name)
+end
+
+----------------------------------------------------------------------------------------------------
+-- Code actions (textDocument/codeAction)
+--
+-- Issue a codeAction request at the cursor (or the active selection's
+-- range) to the buffer's bound server (if any + ready) and pop the
+-- returned actions up in the minibuffer as a completion-list picker.
+-- On selection: apply the chosen action — if it carries an embedded
+-- `WorkspaceEdit` (the common case: refactor/extract/organize-imports/
+-- fix-all), apply it locally via Editor:apply_workspace_edit; if it
+-- names a server-side `command` (Command or CodeAction.command), issue
+-- `workspace/executeCommand` and let the server do its own mutation.
+-- Async: the request round-trips through the lane; the callback fires
+-- from main's drain_lsp_inbox when the response lands.
+--
+-- Range: when the primary cursor has an active selection (anchor set),
+-- the LSP range is the selection's [start..end); otherwise it's a
+-- zero-width range at the cursor (position == position). The cursor's
+-- byte column is converted to a 0-based UTF-16 code-unit offset per spec.
+-- Context: any diagnostics overlapping the range are passed through
+-- (from lsp.diagnostics_for_uri), since some servers only return
+-- fix-actions when the triggering diagnostics are named.
+----------------------------------------------------------------------------------------------------
+
+--- Convert a (line, byte_col) to an LSP position {line, character} with
+--- 0-based line + 0-based UTF-16 code-unit offset. Memory of the
+--- goto_definition path, factored out for use in both range ends.
+--- @param buf Buffer
+--- @param line integer 0-based line
+--- @param byte_col integer 0-based BYTE col
+--- @return {line:integer, character:integer}
+local function lsp_position(buf, line, byte_col)
+    local text = buf:line_text(line) or ""
+    return { line = line, character = utf8.byte_to_utf16_col(text, byte_col) }
+end
+
+--- Does this diagnostic item (in stored flat LSP coords — 0-based line
+--- + UTF-16 char) overlap the [sline..eline] range? A diag overlaps if
+--- its start line <= eline AND its end line >= sline (a multi-line diag
+--- counts once per line it touches).
+--- @param item table {sl,sc,el,ec,severity,message,source,code}
+--- @param sline integer
+--- @param eline integer
+--- @return boolean
+local function diag_overlaps(item, sline, eline)
+    return item.sl <= eline and item.el >= sline
+end
+
+--- Re-shape a stored diagnostic (flat {sl,sc,el,ec,...}) back to the LSP
+--- wire form `{ range = { start = {line,character}, ["end"] = ... },
+--- severity, message, source, code }` for embedding in a codeAction
+--- request context.
+--- @param item table
+--- @return table
+local function diag_to_wire(item)
+    return {
+        range = {
+            start = { line = item.sl, character = item.sc },
+            ["end"] = { line = item.el, character = item.ec },
+        },
+        severity = item.severity,
+        message = item.message,
+        source = item.source,
+        code = item.code,
+    }
+end
+
+commands.code_actions = function(view, editor)
+    local buf = view and view.buffer
+    local cid = buf and buf.lsp_client_id
+    local uri = buf and buf.lsp_uri
+    if cid == nil or uri == nil then
+        editor.status_message = "no language server for this buffer"
+        return
+    end
+    if not lsp.is_ready(cid) then
+        editor.status_message = "language server not ready"
+        return
+    end
+
+    -- Build the LSP range: selection if anchored, else zero-width at cursor.
+    local p = view:p()
+    local sline, schar, eline, echar
+    if p.anchor_line then
+        local sl, sc, el, ec = view:selection_ranges_one(p)
+        ---@cast sl integer
+        ---@cast sc integer
+        ---@cast el integer
+        ---@cast ec integer
+        -- Empty selection (anchor == cursor): treat as a point at cursor.
+        if sl == el and sc == ec then
+            sline = p.line
+            schar = lsp_position(buf, p.line, p.col).character
+            eline = sline
+            echar = schar
+        else
+            sline = sl
+            schar = lsp_position(buf, sl, sc).character
+            eline = el
+            echar = lsp_position(buf, el, ec).character
+        end
+    else
+        sline = p.line
+        schar = lsp_position(buf, p.line, p.col).character
+        eline = sline
+        echar = schar
+    end
+
+    -- Build the context: explicitly-invoked kind + diagnostics overlapping
+    -- the range (some servers only return fix-all / specific actions
+    -- when the triggering diagnostic is named).
+    local ctx = { triggerKind = 1 } -- 1 = Invoked
+    local stored = lsp.diagnostics_for_uri(uri)
+    if stored ~= nil and stored.items ~= nil then
+        local diags = {}
+        for _, d in ipairs(stored.items) do
+            if diag_overlaps(d, sline, eline) then
+                diags[#diags + 1] = diag_to_wire(d)
+            end
+        end
+        if #diags > 0 then
+            ctx.diagnostics = diags
+        end
+    end
+
+    editor.status_message = "finding code actions…"
+    local id = lsp.request_code_actions(cid, uri, {
+        start = { line = sline, character = schar },
+        ["end"] = { line = eline, character = echar },
+    }, ctx)
+    if id == nil then
+        editor.status_message = "language server not ready"
+        return
+    end
+    lsp.on_response(editor, id, function(_ed, result, is_error)
+        if is_error then
+            editor.status_message = "code actions failed: server error"
+            return
+        end
+        if result == nil or #result == 0 then
+            editor.status_message = "no code actions"
+            return
+        end
+
+        -- Build the picker items: one per returned action/command.
+        local items = {}
+        for _, a in ipairs(result) do
+            if type(a) == "table" and type(a.title) == "string" then
+                items[#items + 1] = { text = a.title, metadata = a.kind, data = a }
+            end
+        end
+        if #items == 0 then
+            editor.status_message = "no code actions"
+            return
+        end
+
+        local state = { selected = nil }
+        editor.status_message = nil
+        editor:read_from_minibuffer({
+            prompt = "Code action: ",
+            completion = true,
+            completer = completers.static_list(items),
+            on_change = make_symbol_tracker(editor, state),
+            on_submit = function(_input)
+                local action = state.selected
+                if action == nil then
+                    editor.status_message = "no code action selected"
+                    return
+                end
+                if action.edit ~= nil then
+                    local r = editor:apply_workspace_edit(action.edit)
+                    local n = #r.touched
+                    if n > 0 then
+                        editor.status_message = ("applied (%d doc%s)"):format(
+                            n,
+                            n == 1 and "" or "s"
+                        )
+                    else
+                        editor.status_message = "code action made no in-buffer edits"
+                    end
+                elseif action.command ~= nil then
+                    -- `command` may be a server-side command id (string)
+                    -- per the Command shape, OR for a CodeAction it's a
+                    -- Command table `{ command=, arguments?= }`.
+                    local cmd_id, cmd_args
+                    if type(action.command) == "table" then
+                        cmd_id = action.command.command
+                        cmd_args = action.command.arguments
+                    else
+                        cmd_id = action.command
+                        cmd_args = action.arguments
+                    end
+                    if type(cmd_id) ~= "string" or cmd_id == "" then
+                        editor.status_message = "code action has no executable command"
+                        return
+                    end
+                    editor.status_message = "running command…"
+                    local exec_id = lsp.request_execute_command(cid, cmd_id, cmd_args)
+                    if exec_id == nil then
+                        editor.status_message = "language server not ready"
+                        return
+                    end
+                    lsp.on_response(editor, exec_id, function(_e, _res, err)
+                        if err then
+                            editor.status_message = "code action failed: server error"
+                        else
+                            editor.status_message = "ran: " .. (action.title or cmd_id)
+                        end
+                    end)
+                else
+                    editor.status_message = "code action has no edit or command"
+                end
+            end,
+        })
+    end)
+end
+
 commands.goto_symbol = function(view, editor)
     local buf = view and view.buffer
     local cid = buf and buf.lsp_client_id

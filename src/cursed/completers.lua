@@ -305,6 +305,47 @@ function completers.yes_no_all()
 end
 
 ----------------------------------------------------------------------------------------------------
+-- Static list (codeAction picker, etc.)
+--
+-- A zero-cost completer factory for picking from a precomputed list of
+-- items the caller already has (e.g. an LSP codeAction response). Each
+-- item is `{ text = string, metadata = string?, data = any }`; the
+-- display text + metadata drive substring filtering (case-insensitive,
+-- whitespace-AND), and `data` rides along untouched so the command's
+-- on_change/on_submit can resolve the backing entry via the
+-- minibuffer's `_completions[index].data`.
+----------------------------------------------------------------------------------------------------
+
+--- Build a completer over a fixed list of items. Case-insensitive
+--- substring filter; empty query returns the whole list. The returned
+--- items are the SAME table references as the input (not copies), so
+--- `.data` identity is preserved end-to-end.
+--- @param items {text:string,metadata:string?,data:any}[]
+--- @return fun(text: string): table
+function completers.static_list(items)
+    if items == nil then
+        items = {}
+    end
+    return function(text)
+        if #text == 0 then
+            return items
+        end
+        local terms = space_terms(text)
+        if #terms == 0 then
+            return items
+        end
+        local out = {}
+        for _, it in ipairs(items) do
+            local hay = ((it.text or "") .. " " .. (it.metadata or "")):lower()
+            if matches_all(hay, terms) then
+                out[#out + 1] = it
+            end
+        end
+        return out
+    end
+end
+
+----------------------------------------------------------------------------------------------------
 -- LSP completion (in-buffer, general purpose)
 --
 -- Mode- and server-agnostic completion source: it uses whichever LSP
@@ -516,57 +557,56 @@ function completers.lsp(editor)
                         return b:write_text_direct()
                     end)
                 end
-                lsp().request_completion(
-                    cid,
-                    uri,
-                    { line = rline, character = rchar },
-                    rtrig,
-                    function(result, is_error)
-                        c.pending = false
-                        if is_error or result == nil then
-                            if c.items == nil then
-                                c.items = {}
-                            end
-                            log.info("lsp_complete", "completer_response", {
-                                cid = cid,
-                                is_error = is_error,
-                                result_nil = result == nil,
-                                kept_stale_count = c.items ~= nil and #c.items or 0,
-                            })
-                            return
+                local comp_id =
+                    lsp().request_completion(cid, uri, { line = rline, character = rchar }, rtrig)
+                if comp_id == nil then
+                    c.pending = false
+                    return
+                end
+                lsp().on_response(editor, comp_id, function(_ed, result, is_error)
+                    c.pending = false
+                    if is_error or result == nil then
+                        if c.items == nil then
+                            c.items = {}
                         end
-                        local raw_items, incomplete
-                        if type(result) == "table" then
-                            if result.items ~= nil then
-                                raw_items = result.items
-                                incomplete = result.isIncomplete == true
-                            else
-                                raw_items = result
-                                incomplete = false
-                            end
-                        end
-                        local mapped = {}
-                        if type(raw_items) == "table" then
-                            for _, it in ipairs(raw_items) do
-                                local m = it ~= nil and type(it) == "table" and map_lsp_item(it)
-                                    or nil
-                                if m ~= nil then
-                                    mapped[#mapped + 1] = m
-                                end
-                            end
-                        end
-                        c.items = mapped
-                        c.is_incomplete = incomplete
                         log.info("lsp_complete", "completer_response", {
                             cid = cid,
-                            is_error = false,
-                            raw_count = type(raw_items) == "table" and #raw_items or 0,
-                            mapped_count = #mapped,
-                            is_incomplete = incomplete,
+                            is_error = is_error,
+                            result_nil = result == nil,
+                            kept_stale_count = c.items ~= nil and #c.items or 0,
                         })
-                        retick()
+                        return
                     end
-                )
+                    local raw_items, incomplete
+                    if type(result) == "table" then
+                        if result.items ~= nil then
+                            raw_items = result.items
+                            incomplete = result.isIncomplete == true
+                        else
+                            raw_items = result
+                            incomplete = false
+                        end
+                    end
+                    local mapped = {}
+                    if type(raw_items) == "table" then
+                        for _, it in ipairs(raw_items) do
+                            local m = it ~= nil and type(it) == "table" and map_lsp_item(it) or nil
+                            if m ~= nil then
+                                mapped[#mapped + 1] = m
+                            end
+                        end
+                    end
+                    c.items = mapped
+                    c.is_incomplete = incomplete
+                    log.info("lsp_complete", "completer_response", {
+                        cid = cid,
+                        is_error = false,
+                        raw_count = type(raw_items) == "table" and #raw_items or 0,
+                        mapped_count = #mapped,
+                        is_incomplete = incomplete,
+                    })
+                    retick()
+                end)
             end
 
             --- Client-side-filter the (possibly stale) cached items by prefix.
@@ -966,7 +1006,8 @@ function completers.document_symbols(editor)
         end
         state.pending = true
         log.info("lsp_symbols", "document_symbol_request", { cid = cid })
-        local id = lsp().mint_request_id(function(result, is_error)
+        local id = lsp().mint_request_id()
+        lsp().on_response(editor, id, function(_ed, result, is_error)
             state.pending = false
             if is_error or result == nil or type(result) ~= "table" then
                 state.items = {}
@@ -1127,7 +1168,8 @@ function completers.workspace_symbols(editor)
             cid = cid,
             query = query,
         })
-        local id = lsp().mint_request_id(function(result, is_error)
+        local id = lsp().mint_request_id()
+        lsp().on_response(editor, id, function(_ed, result, is_error)
             state.pending = false
             if is_error or result == nil or type(result) ~= "table" then
                 state.items = {}

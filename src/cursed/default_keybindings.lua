@@ -97,6 +97,22 @@ return {
     -- LSP go-to-definition (textDocument/definition) at the cursor.
     ["alt-."] = "goto_definition",
 
+    -- LSP code actions (textDocument/codeAction) at the cursor / over the
+    -- active selection. Pops the returned actions in the minibuffer;
+    -- applying a chosen action runs its embedded WorkspaceEdit locally
+    -- or issues workspace/executeCommand for server-side commands.
+    -- `ctrl-c` is the LSP prefix (Emacs convention: C-c reserved for
+    -- user/major-mode chords); the bare `ctrl-c` leaf is intentionally
+    -- unbound so the prefix can extend:
+    --   ctrl-c a       → code actions
+    --   ctrl-c s       → start the language server for this buffer's mode
+    --   ctrl-c k       → kill the language server serving this buffer
+    --   ctrl-c ctrl-r  → restart (kill + re-spawn) the language server
+    ["ctrl-c a"] = "code_actions",
+    ["ctrl-c s"] = "lsp_start",
+    ["ctrl-c k"] = "lsp_kill",
+    ["ctrl-c ctrl-r"] = "lsp_restart",
+
     -- Manual completion at point (forces the in-buffer popup now).
     ["alt-/"] = "complete",
 
@@ -171,9 +187,12 @@ return {
     ["ctrl-x ctrl-t"] = "transpose_lines",
     ["ctrl-x alt-t"] = "transpose_sentences",
 
-    -- Cancel
+    -- Cancel. `ctrl-g` is keyboard-quit; `ctrl-x ctrl-c` quits the
+    -- editor. The bare `ctrl-c` leaf was removed so `ctrl-c` is a pure
+    -- prefix (Emacs convention: C-c is reserved for user/major-mode
+    -- chords), freeing `ctrl-c a` (code actions) and future ctrl-c
+    -- sub-bindings.
     ["ctrl-g"] = "keyboard_quit",
-    ["ctrl-c"] = "quit",
 
     -- Mark / Selection
     ["ctrl-space"] = "set_mark",

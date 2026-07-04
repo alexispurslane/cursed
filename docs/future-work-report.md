@@ -16,6 +16,23 @@ The client currently supports 6 of ~30+ LSP request types: completion, hover, go
 
 1. **`textDocument/codeAction`** — Request available code actions at/before the cursor, show them in a completion-like minibuffer menu, and apply the selected action via `workspace/applyEdit`. Requires nothing structural beyond adding the request in `lsp_client.lua`, routing it through the LSP lane, and a command in `commands.lua` that mirrors the existing `goto_definition` async callback pattern.
    - *Blocker for:* gutter-based action icons (blocked on a generalized gutter system — see next section)
+
+     **DONE.** `lsp_client.request_code_actions` (textDocument/codeAction) +
+     `lsp_client.request_execute_command` (workspace/executeCommand) landed
+     alongside `request_definition`. `commands.code_actions` issues the
+     request at the cursor or over the active selection (byte→UTF-16 col
+     conversion), passes overlapping diagnostics through in the context,
+     and pops the result in the minibuffer via a new `completers.static_list`
+     picker (`{text=title, metadata=kind, data=action}` items, `.data`
+     preserved end-to-end via `mb._completions[index]`). On submit, actions
+     with an embedded `.edit` are applied client-side by
+     `Editor:apply_workspace_edit` (handles `changes` and `documentChanges`
+     TextDocumentEdit; resource ops reported as skipped), actions naming a
+     `.command` are issued via workspace/executeCommand. Each touched
+     buffer gets the same clamp/wrap-cache/hl-cold-requery resync as
+     `format` + a didChange so the server stays in lock-step. Bound to
+     `ctrl-c a` (the bare `ctrl-c` leaf was removed so the prefix is free).
+     Gutter-icon variants (item #9) remain blocked on the gutter system.
    
 2. **`textDocument/rename`** — Rename symbol at cursor. Requires `request_rename()`, `prepareRename()` (to catch unsupported positions), and applying the single-edit workspace edit result to the buffer as one undo group.
 
@@ -97,8 +114,7 @@ These don't exist yet but are needed for several of the above:
 | Low-Medium | `textDocument/signatureHelp` — reuses completion popup or overlay |
 | Medium | `textDocument/inlayHints` — overlay rendering + request protocol |
 | Medium | `textDocument/documentLink` — overlay underlines + hover |
-| Medium | `textDocument/codeAction` — completion menu + applyEdit handling |
-| Medium | Auto-save — event listener or background task |
+| Medium | Auto-save — event-listener or background task |
 | Medium | Move indent guides to overlays |
 | Medium | Indent guide overlay implementation |
 | Medium | Find-files-in-directory |

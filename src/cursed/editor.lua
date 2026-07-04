@@ -1109,6 +1109,143 @@ function Editor:jump_to_location(uri, line, char)
     end
 end
 
+---------------------------------------------------------------------------------------------------
+-- Workspace edit application (applyEdit, client-side)
+--
+-- A CodeAction's `.edit` is a WorkspaceEdit whose shape per the spec is:
+--   { changes?: { [uri]: TextEdit[] },
+--     documentChanges?: (TextDocumentEdit | CreateFile | RenameFile | DeleteFile)[] }
+-- We resolve each uri's edits to the open view/buffer that backs it (if any)
+-- and apply them as ONE undo group via Buffer:apply_lsp_edits. Edits on
+-- already-open docs are the common case (organize imports, refactor,
+-- extract). Edits targeting unopened or externally-created files are
+-- skipped here (no LSP-side file write/read wiring yet); the caller is
+-- told which uris were touched vs skipped so the status message is
+-- honest. After mutation each affected view gets the same clamp /
+-- wrap-cache invalidate / highlighter cold-requery resync the `format`
+-- command + undo path use, plus a didChange so the server's view of the
+-- document tracks ours.
+---------------------------------------------------------------------------------------------------
+
+--- Find the open view whose buffer backs `uri` (lsp_uri match). Returns
+--- nil if no view currently displays the document.
+--- @param uri string file:// URI
+--- @return View|nil
+function Editor:view_for_lsp_uri(uri)
+    if uri == nil then
+        return nil
+    end
+    for _, v in ipairs(self.views) do
+        local b = v.buffer
+        if b ~= nil and b.lsp_uri == uri then
+            return v
+        end
+    end
+    return nil
+end
+
+--- Per-view post-bulk-mutation resync shared by apply_workspace_edit +
+--- `format`. Clamps cursors, invalidates the wrap cache, and re-roots the
+--- synchronous highlighter so the mutated span renders correctly on the
+--- next frame instead of going plain until async buckets land. Safe no-op
+--- when no highlighter mode is active.
+--- @param view View
+local function resync_after_external_edit(view)
+    view:clamp_cursor()
+    view:invalidate_wrap_cache()
+    local c = view:p()
+    local starts = view:_hl_line_starts()
+    local byte = (starts[c.line + 1] or 0) + c.col
+    view:_hl_cold_requery(byte)
+end
+
+--- Apply an LSP WorkspaceEdit across the editor's open documents. Handles
+--- both `changes` (uri → TextEdit[] map) and `documentChanges` (array of
+--- `TextDocumentEdit`; resource operations CreateFile/RenameFile/DeleteFile
+--- are reported as skipped via `skips` since we don't write files from
+--- LSP edits yet). Edits are applied as one undo group per affected
+--- buffer via Buffer:apply_lsp_edits (which sorts + applies right-to-left
+--- so coordinates stay valid), then each affected view is resync'd + the
+--- text is didChange-synced back to its bound server.
+--- @param ws_edit table WorkspaceEdit `{ changes?, documentChanges? }`
+--- @return {touched:string[], skipped:string[]} touched uris applied, skipped uris/kinds
+function Editor:apply_workspace_edit(ws_edit)
+    local lsp = require("cursed.lsp_client")
+    local touched = {}
+    local skipped = {}
+    if type(ws_edit) ~= "table" then
+        return { touched = touched, skipped = skipped }
+    end
+
+    -- Collect (uri → TextEdit[]) pairs from both shapes, then apply each
+    -- exactly once. `changes` is a flat map; `documentChanges` is an array.
+    local per_uri = {} ---@type table<string, table[]>
+    local function collect(uri, edits)
+        if type(uri) ~= "string" or uri == "" then
+            return
+        end
+        if type(edits) ~= "table" then
+            return
+        end
+        per_uri[uri] = per_uri[uri] or {}
+        for _, e in ipairs(edits) do
+            per_uri[uri][#per_uri[uri] + 1] = e
+        end
+    end
+
+    local changes = ws_edit.changes
+    if type(changes) == "table" then
+        for uri, edits in pairs(changes) do
+            collect(uri, edits)
+        end
+    end
+
+    local doc_changes = ws_edit.documentChanges
+    if type(doc_changes) == "table" then
+        for _, dc in ipairs(doc_changes) do
+            if type(dc) == "table" then
+                -- TextDocumentEdit: { textDocument: { uri }, edits: TextEdit[] }
+                local td = dc.textDocument
+                if type(td) == "table" and type(td.uri) == "string" and dc.edits ~= nil then
+                    collect(td.uri, dc.edits)
+                else
+                    -- CreateFile / RenameFile / DeleteFile / skip
+                    local kind = dc.kind or "resourceOperation"
+                    skipped[#skipped + 1] = tostring(kind)
+                end
+            end
+        end
+    end
+
+    -- Apply each uri's edits to its open view's buffer. Mutations to
+    -- documents we have open are the supported case; edit targets we
+    -- don't have a buffer for are skipped (reported).
+    for uri, edits in pairs(per_uri) do
+        local view = self:view_for_lsp_uri(uri)
+        if view == nil or view.buffer == nil then
+            skipped[#skipped + 1] = uri
+        else
+            local buf = view.buffer
+            buf:apply_lsp_edits(edits)
+            resync_after_external_edit(view)
+            -- Sync the (now-mutated) text back to the server so its view
+            -- stays in lock-step; mirrors `format`'s post-apply didChange.
+            -- Pass buf.lsp_client_id directly inline so LLS keeps the
+            -- `~= nil` narrowing from the if-guard (an intermediate local
+            -- would widen back to integer|nil).
+            if buf.lsp_client_id ~= nil and buf.lsp_uri ~= nil then
+                local v = buf.lsp_version or 0
+                lsp.sync_change(buf.lsp_client_id, buf.lsp_uri, v, function()
+                    return buf:write_text_direct()
+                end)
+            end
+            touched[#touched + 1] = uri
+        end
+    end
+
+    return { touched = touched, skipped = skipped }
+end
+
 --- Insert a file's contents at the cursor (async via IO lane).
 ---@param filepath string raw path from the user (may contain ~, $ENV)
 function Editor:insert_file(filepath)

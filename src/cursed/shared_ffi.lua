@@ -193,9 +193,9 @@ struct LspResponse {
  * ONCE into a yyjson_doc (yyjson_read runs off-main), navigates to the
  * JSON-RPC `params` value, and ships the doc + value pointer + the
  * method string to main. Main walks `params` into a Lua table via
- * val_to_lua, frees the doc, then dispatches by method to a handler
- * registered via on_notification. Ownership of the doc transfers to
- * main. Mirrors struct LspResponse; replaces the former per-method
+ * val_to_lua, frees the doc, then re-emits on main's event bus keyed
+ * by method. Ownership of the doc transfers to main. Mirrors struct
+ * LspResponse; replaces the former per-method
  * structs (e.g. LspDiagnostics). */
 struct LspNotification {
     uint32_t client_id;

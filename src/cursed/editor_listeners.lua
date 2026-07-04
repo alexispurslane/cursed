@@ -628,6 +628,16 @@ function EditorListeners.setup(editor)
         view:_hl_cold_requery(byte)
     end)
 
+    -- LSP inbound notifications are re-emitted on the event bus by
+    -- main's drain_lsp_inbox as `"lsp_notification:" .. method` carrying
+    -- `(params, client_id)`. The publishDiagnostics handler is the only
+    -- one cursed consumes today; it flattens the parsed params into the
+    -- per-uri flat records the squiggle + diagnostic-jump paths read.
+    -- Other methods are simply un-subscribed (the emit is then a no-op).
+    es:on("lsp_notification:textDocument/publishDiagnostics", function(_ed, params, cid)
+        lsp.store_diagnostics(params, cid)
+    end)
+
     -- Squiggle DEMO (no LSP data source yet): when
     -- `editor._squiggle_demo` is on (toggle via M-x toggle_squiggle_demo),
     -- squiggle the primary cursor's current word in diagnostic_error
@@ -994,36 +1004,39 @@ function EditorListeners.setup(editor)
                         local text = captured.buf:line_text(p.line) or ""
                         local char = utf8.byte_to_utf16_col(text, p.col)
                         local seq = captured.seq
-                        lsp.request_hover(
+                        local hover_id = lsp.request_hover(
                             captured.cid,
                             captured.uri,
-                            { line = p.line, character = char },
-                            function(result, is_error)
-                                if seq ~= ed._hover_seq then
-                                    return -- stale: cursor moved since armed
-                                end
-                                if is_error or result == nil then
-                                    ed._hover_md = nil
-                                    ed._hover_w = nil
-                                    return
-                                end
-                                local value = normalize_hover_contents(result.contents)
-                                if value == nil or value == "" then
-                                    ed._hover_md = nil
-                                    ed._hover_w = nil
-                                    return
-                                end
-                                -- Cache the raw markdown + the width it
-                                -- was sized for. The paint path measures
-                                -- + renders it via mdview (markdown
-                                -- formatting, tree-sitter code blocks,
-                                -- inline code, links-as-label+(url)).
-                                local term = ed.term
-                                local max_w = math.min(math.max(20, term:width() - 4), 64)
-                                ed._hover_md = value
-                                ed._hover_w = max_w - 2
-                            end
+                            { line = p.line, character = char }
                         )
+                        if hover_id == nil then
+                            return true -- not ready; one-shot arms again later
+                        end
+                        lsp.on_response(ed, hover_id, function(_e, result, is_error)
+                            if seq ~= ed._hover_seq then
+                                return -- stale: cursor moved since armed
+                            end
+                            if is_error or result == nil then
+                                ed._hover_md = nil
+                                ed._hover_w = nil
+                                return
+                            end
+                            local value = normalize_hover_contents(result.contents)
+                            if value == nil or value == "" then
+                                ed._hover_md = nil
+                                ed._hover_w = nil
+                                return
+                            end
+                            -- Cache the raw markdown + the width it
+                            -- was sized for. The paint path measures
+                            -- + renders it via mdview (markdown
+                            -- formatting, tree-sitter code blocks,
+                            -- inline code, links-as-label+(url)).
+                            local term = ed.term
+                            local max_w = math.min(math.max(20, term:width() - 4), 64)
+                            ed._hover_md = value
+                            ed._hover_w = max_w - 2
+                        end)
                         return true -- one-shot
                     end)
                 end
