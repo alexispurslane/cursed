@@ -743,6 +743,15 @@ function EditorListeners.setup(editor)
             return scheme and scheme:color(name) or 0xFF5353
         end
         local line_count = view:line_count()
+        -- Visible viewport line range. Only queue squiggles for lines that
+        -- can actually appear on screen this frame. Without this, the
+        -- listener queued EVERY diagnostic range in the document (hundreds
+        -- on view.lua), and each _paint_underline call then walked the
+        -- wrap cache from the scroll anchor (O(distance)) only to find the
+        -- line off-screen and paint nothing — ~80ms/frame of pure waste.
+        local top_li = view.scroll_li or 0
+        local max_y = ed.term:height() - ed:footer_rows() - 1
+        local bottom_li = view:viewport_line_at_row(max_y)
         for _, diag in ipairs(entry.items) do
             local sl = diag.sl
             local el = diag.el
@@ -763,7 +772,15 @@ function EditorListeners.setup(editor)
             if el < sl then
                 goto continue
             end
-            for line = sl, el do
+            -- Viewport filter: skip ranges entirely off-screen, and clamp
+            -- the per-line loop to the visible window so a multi-line
+            -- diagnostic can't queue thousands of off-screen squiggles.
+            if el < top_li or sl > bottom_li then
+                goto continue
+            end
+            local lo_line = math.max(sl, top_li)
+            local hi_line = math.min(el, bottom_li)
+            for line = lo_line, hi_line do
                 local text = buf:line_text(line)
                 local clen = view:content_len(line)
                 -- LSP range is [start, end): exclusive end. Start col on
@@ -845,6 +862,37 @@ function EditorListeners.setup(editor)
             or (worst == 4 and "diagnostic_hint")
             or "diagnostic_info"
         return { fg = scheme and scheme:color(name) or 0xFF5353, bg = nil, char = "!" }
+    end
+
+    -- Gutter sign: a yellow "!" on lines that have available code actions.
+    -- The cache is populated by the `code_actions` command response handler
+    -- (commands.code_actions). Each entry carries a snapshot of the buffer's
+    -- lsp_version; if the buffer has been edited since (version mismatch),
+    -- the stale cache is ignored (returns nil) so the sign disappears.
+    editor.gutter_sign_fns[#editor.gutter_sign_fns + 1] = function(ed, view, li)
+        local buf = view.buffer
+        if buf == nil or buf.lsp_uri == nil then
+            return nil
+        end
+        local cached = ed._code_action_lines_by_uri[buf.lsp_uri]
+        if cached == nil then
+            return nil
+        end
+        -- Version check: if the buffer has been modified since the cache
+        -- was populated, the cached lines are stale — don't show them.
+        if
+            cached.version ~= nil
+            and buf.lsp_version ~= nil
+            and cached.version ~= buf.lsp_version
+        then
+            return nil
+        end
+        if cached.lines[li] then
+            local scheme = ColorScheme.active
+            local fg = scheme and scheme:color("code_action") or 0xE5C07B
+            return { fg = fg, bg = nil, char = "!" }
+        end
+        return nil
     end
 
     -- Diagnostic hover popup: when the primary cursor sits inside a

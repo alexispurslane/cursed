@@ -123,6 +123,8 @@ local CONCEPT_SLOTS = {
     diagnostic_warn = 0x09, -- base09: orange
     diagnostic_info = 0x0D, -- base0D: blue
     diagnostic_hint = 0x03, -- base03: dim
+    -- code_action: yellow "!" gutter sign on lines with available code actions.
+    code_action = 0x0A, -- base0A: yellow
     -- Modern chrome accents (palette-driven; each maps to a base slot).
     -- active_line_bg tints the row under the primary cursor so the
     -- user's eye lands on it — the single biggest "modern editor"

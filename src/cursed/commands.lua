@@ -2078,6 +2078,10 @@ commands.code_actions = function(view, editor)
         end
     end
 
+    -- Clear stale code-action line cache so previous results don't linger
+    -- on the gutter if the response returns empty or errors.
+    editor._code_action_lines_by_uri[uri] = nil
+
     editor.status_message = "finding code actions…"
     local id = lsp.request_code_actions(cid, uri, {
         start = { line = sline, character = schar },
@@ -2106,8 +2110,33 @@ commands.code_actions = function(view, editor)
         end
         if #items == 0 then
             editor.status_message = "no code actions"
+            -- Clear stale cache: no actions available for this URI.
+            editor._code_action_lines_by_uri[uri] = nil
             return
         end
+
+        -- Populate the code-action line cache for the gutter sign.
+        -- For each action that carries a `diagnostics` field, mark the
+        -- start line of each referenced diagnostic as having an action.
+        -- Also snapshot the buffer version so the gutter sign can detect
+        -- staleness (returns nil when the buffer has been edited since).
+        local lines = {}
+        for _, a in ipairs(result) do
+            if type(a) == "table" and a.diagnostics then
+                for _, d in ipairs(a.diagnostics) do
+                    if type(d) == "table" and d.range and d.range.start then
+                        local lnum = d.range.start.line
+                        if lnum ~= nil then
+                            lines[lnum] = true
+                        end
+                    end
+                end
+            end
+        end
+        editor._code_action_lines_by_uri[uri] = {
+            lines = lines,
+            version = buf.lsp_version,
+        }
 
         local state = { selected = nil }
         editor.status_message = nil

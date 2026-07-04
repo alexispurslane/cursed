@@ -45,6 +45,7 @@ local OverlayManager = {}
 OverlayManager.__index = OverlayManager
 
 local log = require("cursed.log")
+local profile = require("cursed.profile")
 
 --- Create the overlay manager. Stored on the editor as `editor.overlays`.
 ---@param editor Editor owning editor (for term + footer_rows + current_view)
@@ -218,8 +219,14 @@ function OverlayManager:emit_render()
         if listeners then
             n = #listeners
         end
-        log.info("overlay", "emit_render", { listeners = n })
+        -- Per-frame trace; gated on profiling so production runs don't
+        -- write+flush a JSON line every frame.
+        if profile.enabled then
+            log.info("overlay", "emit_render", { listeners = n })
+        end
+        local t0 = profile.now_us()
         es:emit("render_overlay", self._editor)
+        profile.span("overlay", "emit_render", t0, { listeners = n })
     end
 end
 
@@ -229,21 +236,51 @@ end
 --- earlier ones. Clears the queues.
 function OverlayManager:flush()
     local term = self._term
+    local n_un = #self._underline
+    local n_file = #self._file
+    local n_float = #self._float
+    local flush_t0 = profile.now_us()
+    -- Underline stats are only accumulated when profiling; the production
+    -- hot path (_paint_underline) is untouched.
+    self._un_stats = profile.enabled
+            and { t_wrap = 0, t_vp = 0, t_sq = 0, cells = 0, entries = 0, skipped = 0 }
+        or nil
+    local t_un = profile.now_us()
     for _, u in ipairs(self._underline) do
         self:_paint_underline(u)
     end
+    local uns = self._un_stats
+    if uns ~= nil then
+        profile.span("overlay", "flush_underline", t_un, {
+            count = n_un,
+            entries = uns.entries,
+            skipped = uns.skipped,
+            cells = uns.cells,
+            wrap_us = uns.t_wrap,
+            viewport_us = uns.t_vp,
+            squiggle_us = uns.t_sq,
+        })
+    else
+        profile.span("overlay", "flush_underline", t_un, { count = n_un })
+    end
+    self._un_stats = nil
+    local t_file = profile.now_us()
     for _, o in ipairs(self._file) do
         local sx, sy = self:file_to_screen(o.line, o.col)
         if sx ~= nil and sy ~= nil then
             term:print(sx, sy, o.text, o.fg, o.bg)
         end
     end
+    profile.span("overlay", "flush_file", t_file, { count = n_file })
+    local t_float = profile.now_us()
     for _, o in ipairs(self._float) do
         term:print(o.sx, o.sy, o.text, o.fg, o.bg)
     end
+    profile.span("overlay", "flush_float", t_float, { count = n_float })
     self._file = {}
     self._float = {}
     self._underline = {}
+    profile.span("overlay", "flush", flush_t0, { underline = n_un, file = n_file, float = n_float })
 end
 
 --- Resolve a single `put_underline` entry to screen cells and OR the
@@ -251,8 +288,17 @@ end
 --- anchors scrolled out of view, lines past the document, and cells
 --- outside the buffer area. Reads view geometry exactly as the renderer,
 --- so the squiggle tracks the glyph it sits under as you scroll.
+---
+--- Two paths: a fast path (production) with zero instrumentation, and a
+--- profiled path that accumulates per-flush stats (cell count + where the
+--- time goes: wrap_sub_position / viewport_row_for_line / squiggle_cell)
+--- into self._un_stats for the `flush_underline` span. Selected by
+--- `profile.enabled` so the hot per-cell loop is untouched in production.
 ---@param u table {line, s_col, e_col, rgb}
 function OverlayManager:_paint_underline(u)
+    if self._un_stats ~= nil then
+        return self:_paint_underline_profiled(u)
+    end
     local view = self:_v()
     if not view then
         return
@@ -283,6 +329,59 @@ function OverlayManager:_paint_underline(u)
                         term:squiggle_cell(sx, sy, u.rgb)
                     end
                 end
+            end
+        end
+    end
+end
+
+--- Profiled counterpart of `_paint_underline`. Identical logic, plus
+--- timing of each sub-phase accumulated into self._un_stats. Only called
+--- when profiling is enabled (self._un_stats ~= nil).
+---@param u table {line, s_col, e_col, rgb}
+function OverlayManager:_paint_underline_profiled(u)
+    local stats = self._un_stats
+    if stats == nil then
+        return
+    end
+    stats.entries = stats.entries + 1
+    local view = self:_v()
+    if not view then
+        stats.skipped = stats.skipped + 1
+        return
+    end
+    local g = self:_geom()
+    if not g then
+        stats.skipped = stats.skipped + 1
+        return
+    end
+    local line = u.line
+    if line < 0 or line >= view:line_count() then
+        stats.skipped = stats.skipped + 1
+        return
+    end
+    local tw = profile.now_us()
+    local s_sub, s_scol = view:wrap_sub_position(line, u.s_col)
+    local e_sub, e_scol = view:wrap_sub_position(line, u.e_col)
+    stats.t_wrap = stats.t_wrap + (profile.now_us() - tw)
+    local row_w = view.wrap_width or g.w
+    local term = self._term
+    for sub = s_sub, e_sub do
+        local col_lo = (sub == s_sub) and s_scol or 0
+        local col_hi = (sub == e_sub) and e_scol or row_w
+        if col_hi > col_lo then
+            local tvp = profile.now_us()
+            local sy = view:viewport_row_for_line(line, sub)
+            stats.t_vp = stats.t_vp + (profile.now_us() - tvp)
+            if sy >= 0 and sy <= g.max_y then
+                local tsq = profile.now_us()
+                for col = col_lo, col_hi - 1 do
+                    local sx = g.text_x + col
+                    if sx >= 0 and sx < g.w then
+                        term:squiggle_cell(sx, sy, u.rgb)
+                        stats.cells = stats.cells + 1
+                    end
+                end
+                stats.t_sq = stats.t_sq + (profile.now_us() - tsq)
             end
         end
     end

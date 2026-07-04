@@ -80,6 +80,10 @@ local IH = require("cursed.input_hook")
 ---@field _graph_cache table[]|nil cache: _graph_cache[li+1] = {byte_starts, widths, prefix, line_len} (parsed grapheme skeleton, stripped-of-newline text)
 ---@field _graph_line_text string[]|nil cache: _graph_cache's source text (line w/o trailing newline) for slice-on-boundary rendering; nil if LRU-evicted while skeleton retained
 ---@field _graph_gen integer|nil cache generation counter for the grapheme cache (mirrors _wrap_gen)
+---@field _vp_row_cache table|nil viewport-relative screen-row cache: li -> row of (li, 0) rel. to the current scroll anchor; nil = stale. The cache is scoped to a single anchor (scroll_li/scroll_sub_row) + wrap generation + wrap_width (captured in _vp_row_sig), so it is rebuilt lazily after any scroll / edit / reflow. Within a stable frame it shares one forward walk across all callers (render + overlays) instead of re-walking from the anchor per call -- O(farthest query) total, not O(N x distance).
+---@field _vp_row_sig string|nil signature (_wrap_gen|wrap_width|scroll_li|scroll_sub_row) the _vp_row_cache was built against
+---@field _vp_row_filled_to integer|nil highest li >= anchor covered by _vp_row_cache (forward extent)
+---@field _vp_row_filled_from integer|nil lowest li <= anchor covered by _vp_row_cache (backward extent)
 ---@field _hl_lang string|nil currently configured language (intent only)
 ---@field _hl_query string|nil current query source (intent only)
 ---@field _hl_injection_query string|nil injection query source, for languages that inject other grammars into regions of the block tree (intent only)
@@ -175,6 +179,10 @@ function View.new(buffer)
         _graph_cache = nil,
         _graph_line_text = nil,
         _graph_gen = nil,
+        _vp_row_cache = nil,
+        _vp_row_sig = nil,
+        _vp_row_filled_to = nil,
+        _vp_row_filled_from = nil,
         _hl_lang = nil,
         _hl_query = nil,
         _hl_view_id = view_id,
@@ -2519,6 +2527,15 @@ function View:invalidate_wrap_cache()
     self._graph_cache = nil
     self._graph_line_text = nil
     self._graph_gen = nil
+    -- The viewport-relative screen-row cache depends on wrap_rows, so a
+    -- wrap reflow (resize / edit) invalidates it. (The lookup also
+    -- self-invalidates via its signature, but clearing here keeps the
+    -- stale table from lingering across a reflow that doesn't immediately
+    -- re-query.)
+    self._vp_row_cache = nil
+    self._vp_row_sig = nil
+    self._vp_row_filled_to = nil
+    self._vp_row_filled_from = nil
     -- Invalidate the auto-scroll guard: a wrap reflow (resize or edit)
     -- can shift the cursor's screen row even though its logical (line,
     -- col) is unchanged, so the guard's stored position no longer proves
@@ -2814,33 +2831,84 @@ function View:viewport_row_for_line(li, sub, budget)
     if n == 0 or li < 0 then
         return 0
     end
+    local row0, clamped = self:_vp_row_of_li0(li, budget)
+    -- Legacy backward walk clamps the WHOLE result to 0 (not row0+sub)
+    -- when its budget is exhausted, so honor that here.
+    if clamped then
+        return 0
+    end
+    return row0 + (sub or 0)
+end
+
+--- Cached viewport-relative screen row of (li, 0) for the current
+--- anchor. Manages _vp_row_cache: a table mapping li -> row(li, 0)
+--- (which may be negative for lines above the anchor), built forward /
+--- backward from the anchor on demand with a simple recurrence
+--- (row(li,0) = row(li-1,0) + wrap_rows(li-1)). The cache is scoped to a
+--- signature combining the wrap generation, wrap_width, and the scroll
+--- anchor; any of those changing invalidates it (rebuild on next query).
+--- Backward extension respects `budget`: a line more than `budget` rows
+--- above the anchor is not walked (work-bounding) and signals `clamped`
+--- so the caller returns 0 (the legacy clamp-to-top).
+---@param li integer 0-based line index
+---@param budget integer? max backward rows before clamping (default 10000)
+---@return integer row0 viewport-relative row of (li, 0)
+---@return boolean clamped true when the backward walk would exceed budget
+function View:_vp_row_of_li0(li, budget)
     local a_li = self.scroll_li or 0
     local a_sub = self.scroll_sub_row or 0
+    local buf = self.buffer._ptr
+    local gen = tonumber(buf.undo.count) + tonumber(buf.redo.count)
+    local sig = gen .. "|" .. tostring(self.wrap_width) .. "|" .. a_li .. ":" .. a_sub
+    local cache = self._vp_row_cache
+    if cache == nil or self._vp_row_sig ~= sig then
+        cache = {}
+        self._vp_row_cache = cache
+        self._vp_row_sig = sig
+        self._vp_row_filled_to = a_li
+        self._vp_row_filled_from = a_li
+        -- row(a_li, 0) = -a_sub (anchor sits at sub a_sub within line a_li).
+        cache[a_li] = -a_sub
+    end
     if li == a_li then
-        return sub - a_sub
+        return cache[a_li], false
     elseif li > a_li then
-        -- Forward: accumulate wrap_rows from a_li+1 .. li.
-        local row = (self:wrap_rows(a_li) or 1) - a_sub
-        for i = a_li + 1, li - 1 do
-            row = row + (self:wrap_rows(i) or 1)
+        -- Forward: extend the filled run to cover li, filling every
+        -- intermediate line so subsequent nearer queries are O(1) hits.
+        -- Forward is never budget-bounded (legacy forward walk isn't).
+        local ft = self._vp_row_filled_to or a_li
+        if li > ft then
+            for i = ft + 1, li do
+                cache[i] = cache[i - 1] + (self:wrap_rows(i - 1) or 1)
+            end
+            self._vp_row_filled_to = li
         end
-        row = row + sub
-        return row
+        return cache[li], false
     else
-        -- Backward: accumulate wrap_rows from li+1 .. a_li.
-        local lim = budget or 10000
-        local row = sub - a_sub
-        local i = a_li
-        while i > li and lim > 0 do
-            i = i - 1
-            row = row - (self:wrap_rows(i) or 1)
-            lim = lim - 1
+        -- Backward: legacy clamps to 0 when the line is more than `budget`
+        -- rows above the anchor (and bounds the walk's work to `budget`).
+        -- Honor that BEFORE walking so a far-above query never pays
+        -- O(distance) -- the cache is keyed nearby (viewport), but this
+        -- keeps a stray far query from blowing up.
+        local b = budget or 10000
+        if (a_li - li) > b then
+            return 0, true
         end
-        if i > li then
-            -- Ran out of budget: clamp to top.
-            return 0
+        local ff = self._vp_row_filled_from or a_li
+        if li < ff then
+            local i = ff
+            while i > li do
+                local prev = i - 1
+                cache[prev] = cache[i] - (self:wrap_rows(prev) or 1)
+                i = prev
+            end
+            self._vp_row_filled_from = li
         end
-        return row
+        local r = cache[li]
+        if r == nil then
+            return 0, true
+        end
+        return r, false
     end
 end
 

@@ -23,22 +23,17 @@ so the agent can pick up context across sessions.
 
 ## Gotchas & Errors
 
-- code actions requires generalized gutter system, save for later, but blocked on that.
-- The only lint failure is the pre-existing `_diag_hover_visible` warning, which per project memory is unrelated and pre-existing.
 - ts`, which resolves tree-sitter C symbols at load time — those only exist linked into the real `cursed` binary, so headless `luajit` can't load it.
 - )` — `(stream, bytes)` where stream is `"stdout"`/`"stderr"`, or `(kind, code)` where kind is `"exited"`/`"signaled"`/`"failed"`/`"kill_sent"`.
 - Command aborted
 - === Pane ===
 - usage: cursed [-e EXPR | -l MODULE]... [FILE...]
 - The listener surfaces the spawn settle as a status message: `"language server ready (X)"` / `"not on PATH (X)"` / `"failed to start (X)"` / `"stopped (X)"`.
+- stylua --check src — Fix: The new one is `_code_action_lines_by_uri` — I need to add a field annotation.
+- stylua --check src
 
 ## Heavily Read
 
-- src/cursed/lsp_client.lua (18 reads) — Now I'll implement. Starting with `lsp_client.lua`:
-- src/cursed/commands.lua (16 reads) — Let me look at the symbol-finder command pattern using `palette` (lines 1783, 18
-- src/cursed/editor.lua (5 reads) — Now the `Editor:apply_workspace_edit`. Let me find a good insertion point and ex
-- src/cursed/completers.lua (12 reads) — `filter_symbols` is a local defined lexically after my new `static_list`, so it'
-- src/cursed/default_keybindings.lua (3 reads) — Let me look at the symbol-finder command pattern using `palette` (lines 1783, 18
-- src/main.lua (4 reads) — Checking definitively:
-- src/cursed/editor_listeners.lua (8 reads) — Let me look at how LSP is currently spawned by mode_enter, so I can wire start/k
-- src/cursed/lsp_lane.lua (5 reads) — Let me also clean up the stale doc references in `lsp_lane.lua` / `shared_ffi.lu
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/editor_listeners.lua (4 reads) — Now let me register the gutter sign. I'll add it right after the diagnostic gutt
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/commands.lua (7 reads) — Now let me read more of the context around the gutter sign registration and the 
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/editor.lua (5 reads) — Now let me read more of the context around the gutter sign registration and the

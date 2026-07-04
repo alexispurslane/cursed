@@ -441,10 +441,15 @@ local function process_key(editor, view, trie, key_state, key_node, token, ev, p
     -- through to normal dispatch (and, being a non-edit command,
     -- dismisses the menu via the post_command hook). A parallel
     -- controller to the minibuffer's — does NOT touch the minibuffer.
-    log.info("main_process_key", "completion_menu_intercept", {
-        token = token,
-        active = editor.completion_menu and editor.completion_menu.active,
-    })
+    -- Per-keystroke trace; gated on profiling so production runs don't
+    -- write+flush a JSON line to disk on every key (a real hot-path
+    -- cost that was previously unconditional at the default info level).
+    if profile.enabled then
+        log.info("main_process_key", "completion_menu_intercept", {
+            token = token,
+            active = editor.completion_menu and editor.completion_menu.active,
+        })
+    end
     if editor.completion_menu and editor.completion_menu.active then
         if editor.completion_menu:handle_key(editor, token) then
             return key_state, key_node, nil
@@ -1352,9 +1357,19 @@ local function main()
             tv = ffi.new("struct timeval", 0, wait_us)
         end
 
+        local select_t0 = profile.now_us()
         local select_rv = pffi.C.select(maxfd, readfds, nil, nil, tv)
+        local select_wait_us = profile.now_us() - select_t0
+        -- Distinguish "blocked in select" from "did work"; loop_iter is
+        -- total wall time (select + work). loop_work (emitted at end of
+        -- body) is everything after select() returned.
+        profile.report("main", "select_wait", select_wait_us, {
+            ready = (select_rv > 0) and 1 or 0,
+        })
+        local work_t0 = profile.now_us()
 
         -- Drain any pending kqueue events (non-blocking)
+        local kq_t0 = profile.now_us()
         if select_rv > 0 and pffi.fd_set_isset(readfds, kq_fd) then
             local events, n = main_kq:wait(0)
             for i = 0, n - 1 do
@@ -1380,12 +1395,15 @@ local function main()
                 end
             end
         end
+        profile.span("main", "kq_drain", kq_t0)
 
         -- Drain wake pipe (self-pipe trick for request_quit)
+        local wake_t0 = profile.now_us()
         if select_rv > 0 and pffi.fd_set_isset(readfds, wake_pipe_r) then
             local drain_buf = ffi.new("uint8_t[32]")
             pffi.C.read(wake_pipe_r, drain_buf, 32)
         end
+        profile.span("main", "wake_pipe_drain", wake_t0)
 
         -- Eager non-blocking inbox drain. select() reliably wakes on the
         -- main kq_fd when an EVFILT_USER trigger fires (the inbox wakes are
@@ -1397,16 +1415,25 @@ local function main()
         -- change to the wake registration ordering. ss:pop is a no-op on
         -- an empty ring, so this is cheap.
         local drain_t0 = profile.now_us()
+        local d1 = profile.now_us()
         drain_inbox(editor, ss)
+        profile.span("main", "drain_io", d1)
+        local d2 = profile.now_us()
         drain_hl_inbox(editor, ss)
+        profile.span("main", "drain_hl", d2)
+        local d3 = profile.now_us()
         drain_lsp_inbox(editor, ss)
+        profile.span("main", "drain_lsp", d3)
+        local d4 = profile.now_us()
         drain_proc_inbox(editor, ss)
-        profile.span("main", "drain_inbox", drain_t0)
+        profile.span("main", "drain_proc", d4)
+        profile.span("main", "drain_all", drain_t0)
 
         -- File-load watchdog: re-check pending loads after the inbox
         -- drain above (a MSG_FILE_LOADED/MSG_FILE_ERROR may have just
         -- resolved a view). If everything is loaded now, cancel the
         -- watchdog task so it never fires spuriously post-startup.
+        local watchdog_t0 = profile.now_us()
         if load_watchdog_task ~= nil then
             local any_pending = false
             for _, v in ipairs(editor.views) do
@@ -1421,6 +1448,7 @@ local function main()
                 log.info("main", "file-load watchdog cleared (all views loaded)")
             end
         end
+        profile.span("main", "file_load_watchdog", watchdog_t0)
 
         -- Process all buffered termbox events.
         -- termbox2 reads from the tty in one read() call and buffers
@@ -1445,6 +1473,7 @@ local function main()
             end
             had_input = true
             key_count = key_count + 1
+            local key_t0 = profile.now_us()
 
             local view_cur = editor:current_view()
             local focused_view = editor:focused_view()
@@ -1653,6 +1682,7 @@ local function main()
                 end
             end
             ::continue_drain::
+            profile.span("main", "process_key_one", key_t0, { had_input = had_input })
         until editor._quit_requested or #key_state == 0
         profile.span("main", "process_keys", keys_t0, { count = key_count })
         -- When in a chord (prefix matched), stop draining — we need
@@ -1669,14 +1699,18 @@ local function main()
         editor.universal_args = nil
 
         -- Fire minibuffer on_change (e.g. isearch live update)
+        local mb_t0 = profile.now_us()
         editor:minibuffer_notify_change()
+        profile.span("main", "minibuffer_notify", mb_t0)
 
         -- Reset blink on input so the caret stays solid while typing.
         -- The blink toggle itself is a scheduled background task; run
         -- timers here after input processing so a deadline-only wake
         -- flips the phase before render.
         if had_input then
+            local rb_t0 = profile.now_us()
             editor:reset_blink()
+            profile.span("main", "reset_blink", rb_t0)
         end
         local tasks_t0 = profile.now_us()
         editor:tick_background_tasks()
@@ -1692,6 +1726,7 @@ local function main()
         local render_t0 = profile.now_us()
         editor:render()
         profile.span("main", "render", render_t0)
+        profile.span("main", "loop_work", work_t0)
         profile.span("main", "loop_iter", loop_t0)
     end
 

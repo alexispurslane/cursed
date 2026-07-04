@@ -42,6 +42,7 @@ local tb = require("cursed.tb")
 local ColorScheme = require("cursed.colorscheme")
 local completers = require("cursed.completers")
 local log = require("cursed.log")
+local profile = require("cursed.profile")
 
 ----------------------------------------------------------------------------------------------------
 -- UI color helper (mirrors Editor's local `ui`; isolated so this module
@@ -302,11 +303,13 @@ end
 
 --- Close the popup and cancel any pending auto-open debounce.
 function CompletionMenu:close()
-    log.info("completion_menu", "close", {
-        active = self.active,
-        items = #self._items,
-        task = self._debounce_task ~= nil,
-    })
+    if profile.enabled then
+        log.info("completion_menu", "close", {
+            active = self.active,
+            items = #self._items,
+            task = self._debounce_task ~= nil,
+        })
+    end
     self._editor:cancel_task(self._debounce_task)
     self._debounce_task = nil
     self.active = false
@@ -667,10 +670,12 @@ local MENU_TOKENS = {
 ---@param token string? keybind token
 ---@return boolean handled
 function CompletionMenu:handle_key(_editor, token)
-    log.info("completion_menu", "handle_key", {
-        token = token,
-        active = self.active,
-    })
+    if profile.enabled then
+        log.info("completion_menu", "handle_key", {
+            token = token,
+            active = self.active,
+        })
+    end
     if not self.active or token == nil then
         return false
     end
@@ -709,12 +714,23 @@ end
 ---@param cmd_name string? command name (nil when dispatched to a fn)
 ---@param view View the active view at dispatch
 function CompletionMenu:_on_post_command(editor, cmd_name, view)
-    log.info("completion_menu", "post_command", {
-        cmd_name = cmd_name,
-        view_loaded = view ~= nil and view.file_loaded or false,
-        mb_active = editor.minibuffer and editor.minibuffer.active or false,
-        menu_active = self.active,
-    })
+    -- Fast no-op: menu already dismissed and this command cannot reopen
+    -- it (only __printable typing or a keep-alive deletion can reopen via
+    -- the trigger-char / debounce paths below). Pure motion (C-n/C-p/
+    -- arrows/M-x/etc.) with the menu closed used to fall through to
+    -- close() (a no-op here) + emit two per-keystroke log lines on every
+    -- key — the churn the profiler flagged. Bail before any logging.
+    if not self.active and cmd_name ~= "__printable" and not KEEP_ALIVE_COMMANDS[cmd_name] then
+        return
+    end
+    if profile.enabled then
+        log.info("completion_menu", "post_command", {
+            cmd_name = cmd_name,
+            view_loaded = view ~= nil and view.file_loaded or false,
+            mb_active = editor.minibuffer and editor.minibuffer.active or false,
+            menu_active = self.active,
+        })
+    end
     if editor.minibuffer and editor.minibuffer.active then
         self:close()
         return
@@ -773,16 +789,18 @@ function CompletionMenu:_render(editor)
     -- must paint below the cursor. _tick owns open/close gating; _render
     -- only paints whatever _tick decided to open. With an empty prefix
     -- `word_start_col == col`, so the box anchors at the cursor.
-    log.info("completion_menu", "render", {
-        active = self.active,
-        items = #self._items,
-        selected = self._selected,
-        scroll = self._scroll,
-        prefix = ctx.prefix,
-        line = ctx.line,
-        col = ctx.col,
-        word_start_col = ctx.word_start_col,
-    })
+    if profile.enabled then
+        log.info("completion_menu", "render", {
+            active = self.active,
+            items = #self._items,
+            selected = self._selected,
+            scroll = self._scroll,
+            prefix = ctx.prefix,
+            line = ctx.line,
+            col = ctx.col,
+            word_start_col = ctx.word_start_col,
+        })
+    end
     local ov = editor.overlays
     local term = editor.term
     local w = term:width()

@@ -383,6 +383,7 @@ end
 ---@field _whichkey_prefix string|nil formatted chord-so-far (e.g. "C-x") while a chord prefix is active
 ---@field _whichkey_page integer which-key hint popup page index (0-based; reset when the prefix node changes)
 ---@field gutter_sign_fns fun(editor: Editor, view: View, li: integer): {fg: integer, bg: integer?, char: string}?[] per-line gutter sign callbacks; each returns a glyph spec or nil (blank). One fixed column per callback, painted on every sub-row of the line; evaluated once per visible logical line.
+---@field _code_action_lines_by_uri table<string, {lines: table<integer, boolean>, version: integer?}> per-URI cache of line-number sets with available code actions, keyed by URI; each entry carries the buffer version at snapshot time for staleness detection.
 local Editor = {}
 Editor.__index = Editor
 
@@ -444,6 +445,7 @@ function Editor.new(term)
         _whichkey_prefix = nil,
         _whichkey_page = 0,
         gutter_sign_fns = {}, -- overrideable per-line gutter-sign callbacks (see Editor.gutter_sign_fns)
+        _code_action_lines_by_uri = {}, -- per-URI set of line numbers with available code actions
     }, Editor)
     editor.event_system = EventSystem.new(editor)
     editor.overlays = OverlayManager.new(editor)
@@ -2291,11 +2293,13 @@ function Editor:render()
     -- rendering so a stale past-eol position can never produce a broken
     -- caret / modeline. Motions/edits already clamp, but cursor state
     -- can also be set by undo/redo, file reload, or mode activation.
+    local clamp_t0 = profile.now_us()
     for _, v in ipairs(self.views) do
         if v.file_loaded then
             v:_clamp_all_cursors()
         end
     end
+    profile.span("editor", "clamp_all_cursors", clamp_t0, { views = #self.views })
     -- Hoisted early (before the clear + paint helpers) so the focus
     -- backdrop can consult mb.palette at clear time and so the paint
     -- helpers can close over `mb` directly.
@@ -2307,7 +2311,9 @@ function Editor:render()
     -- chrome closures capture) is defined alongside the other paint helpers.
     local view = self:current_view()
     local ov = self.overlays
+    local ov_begin_t0 = profile.now_us()
     ov:begin_frame(view)
+    profile.span("editor", "overlay_begin", ov_begin_t0)
     --- Float-print sink: route chrome (modeline / minibuffer / completions)
     --- through the overlay manager so it composes with extension overlays
     --- in a single z-ordered flush. `fp(x,y,text,fg,bg)` is the screen-space
@@ -2327,7 +2333,9 @@ function Editor:render()
         if mb and mb.palette then
             clear_bg = blend(clear_bg, 0x000000, 195)
         end
+        local clear_t0 = profile.now_us()
         term:clear(ui("default_fg"), clear_bg)
+        profile.span("editor", "term_clear", clear_t0, { w = w, h = h })
     end
     -- The hardware terminal caret is always hidden; the caret is drawn
     -- as a reverse-video cell (toggled on/off by the blink timer)
@@ -2458,7 +2466,9 @@ function Editor:render()
     -- below the modeline — the "move-up" amount the buffer region must
     -- shrink by. The eval result, when shown, also lives in this region
     -- (just below the modeline); count + paint its row separately below.
+    local mbr_t0 = profile.now_us()
     local mb_tail = self.minibuffer:_render(self, w, h, fp)
+    profile.span("editor", "minibuffer_render", mbr_t0, { mb_tail = mb_tail })
     local eval_rows = (not (mb and mb.active) and self._eval_result) and 1 or 0
     local footer_tail = mb_tail + eval_rows
     local max_y = h - footer_tail - 2
@@ -2467,6 +2477,7 @@ function Editor:render()
     -- so the cache stays consistent with the current window size.
     -- `no_wrap` (non-file app buffers, e.g. pickers) keeps wrap_width
     -- nil so View:wrap_rows returns one sub-row per line.
+    local wrap_t0 = profile.now_us()
     local reflowed = false
     if view.no_wrap then
         if view.wrap_width ~= nil then
@@ -2492,6 +2503,7 @@ function Editor:render()
     if reflowed then
         view:scroll_to_cursor(h - footer_rows + 1, true)
     end
+    profile.span("editor", "wrap_setup", wrap_t0, { reflowed = reflowed })
 
     -- Render visible lines (line-anchored, viewport-local)
     -- Notify the highlighter of the visible viewport's byte range so its
@@ -2500,6 +2512,7 @@ function Editor:render()
     -- anchor — O(viewport), no full wrap-cache prefix build — so opening
     -- or jumping anywhere in a big file parses ~viewport-depth of lines.
     local vstart_li, vend_li
+    local vp_t0 = profile.now_us()
     do
         vstart_li = view.scroll_li or 0
         local sub = view.scroll_sub_row or 0
@@ -2519,6 +2532,7 @@ function Editor:render()
         end
         view:_hl_notify_viewport(vstart_byte, vend_byte)
     end
+    profile.span("editor", "hl_viewport_setup", vp_t0, { vstart = vstart_li, vend = vend_li })
 
     local rows_t0 = profile.now_us()
     local t_strip, t_wraprows, t_subruns, t_paint, t_body = 0, 0, 0, 0, 0
@@ -2917,7 +2931,9 @@ function Editor:render()
     -- auto-calculated (alternating ◢/◣) with colors derived from adjacent
     -- segment bg colors; text color is auto-detected from bg luminance.
     local modeline_y = h - footer_tail - 1
+    local ml_t0 = profile.now_us()
     self:render_modeline(view, w, modeline_y, fp)
+    profile.span("editor", "render_modeline", ml_t0)
 
     -- Eval result row, shown when the minibuffer is inactive. (The
     -- inline strip / floating palette chrome was already painted by
@@ -2926,10 +2942,16 @@ function Editor:render()
         fp(0, modeline_y + 1, "=> " .. self._eval_result, ui("status_message"), ui("default_bg"))
     end
 
+    local emit_t0 = profile.now_us()
     ov:emit_render()
+    profile.span("editor", "overlay_emit", emit_t0)
+    local flush_t0 = profile.now_us()
     ov:flush()
+    profile.span("editor", "overlay_flush", flush_t0)
     profile.span("editor", "render_total", render_t0)
+    local present_t0 = profile.now_us()
     term:present()
+    profile.span("editor", "term_present", present_t0)
 end
 
 return Editor
