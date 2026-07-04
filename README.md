@@ -126,9 +126,12 @@ The `build` target runs four steps, each cached so subsequent builds are increme
 ### Run / Develop
 
 ```bash
-just run              # build (release) then run ./build/cursed
-just run-debug        # build (debug) then run
-just run -- some-file # extra args are forwarded to the binary
+just run                    # build (release) then run ./build/cursed
+just run-debug              # build (debug) then run
+just run path/to/file       # open a file (quote paths with spaces)
+just run 'path/with spaces' # spaces are fine inside quotes
+# Multiple files or paths containing single quotes: call the binary directly:
+#   ./build/cursed one two 'three with spaces'
 ```
 
 ### Checks

@@ -206,11 +206,19 @@ compile-binary mode="release":
 
 # ── Run ────────────────────────────────────────────────────────────
 
-run *ARGS: (build "release")
-    {{BINARY}} {{ARGS}}
+# NOTE: the old `*ARGS` + `{{ARGS}}` form flattens variadic args with
+# whitespace and re-emits them UNQUOTED, so a quoted path like
+#   just run '/path/with spaces/file'
+# reached the binary as TWO argv entries (`/path/with` and `spaces/file`),
+# and cursed opened the first one. A single positional `file` arg,
+# manually single-quoted in the body, survives intact. Paths containing
+# a literal single quote aren't supported here — call the binary
+# directly:  ./build/cursed one two 'three with spaces'
+run file="": (build "release")
+    {{BINARY}} {{ if file == "" { "" } else { "'" + file + "'" } }}
 
-run-debug *ARGS: (build "debug")
-    {{BINARY}} {{ARGS}}
+run-debug file="": (build "debug")
+    {{BINARY}} {{ if file == "" { "" } else { "'" + file + "'" } }}
 
 # ── All checks ─────────────────────────────────────────────────────
 
