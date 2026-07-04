@@ -570,6 +570,29 @@ function M.request_definition(client_id, uri, position, callback)
     return id
 end
 
+--- Request hover info at a position. Callback receives the `Hover`
+--- result (`{ range?, contents }`) or nil/error per the generic
+--- response contract (`cb(result, is_error)`). `contents` is
+--- MarkupContent / MarkedString / MarkedString[] — left to the caller
+--- to normalize.
+---@param client_id integer
+---@param uri string
+---@param position table {line, character} (UTF-16)
+---@param callback fun(result: table|nil, is_error: boolean)
+---@return integer|nil id
+function M.request_hover(client_id, uri, position, callback)
+    if not M.is_ready(client_id) then
+        log.info("lsp", "hover request skipped (not ready)", { client_id = client_id, uri = uri })
+        return nil
+    end
+    local id = M.mint_request_id(callback)
+    enqueue_send("textDocument/hover", {
+        textDocument = { uri = uri },
+        position = position,
+    }, id, client_id)
+    return id
+end
+
 ----------------------------------------------------------------------------------------------------
 -- Document synchronization (didOpen / didChange / didClose)
 --

@@ -10,33 +10,31 @@ so the agent can pick up context across sessions.
 
 ## Key Decisions
 
-- I realize the approach is getting overly complex.
-- Concretely the dedent rule is: on Return, if the line's trailing text matches a closer pattern, re-indent that line one *less* unit than its carried indent, then insert the newline at that dedented indent.
-- The structural helper (`_electric_closer_target_indent`) is used in exactly one: the closer-dedent decision on Return.
-- we should probably figure out the amount of indentation to insert directly after an electric opener pattern using the tree sitter based target indentation calculation
 - ---
 - Deadlines are in the future but the loop still iterates ~1540/sec — so `select` returns early every iteration (a ready fd).
 - **`completer_requesting`** `{cid, line, character, prefix, trigger, reason}` — main decided to fire a request (reason = `first`/`trigger`/`pos_changed`/`prefix_grew`).
 - let's create a manual trigger command, bound to M-/; we should also pull in and save the trigger chars from the LSP, and have those trigger completions *immediately*
 - The convention is clear: vendored as committed plain files in `vendor/tree-sitter-<lang>/src/` (markdown split into two dirs).
 - whenever the user moves the cursor, we should keep track of the nearest diagnostic span (bias towards below) and, if the cursor is within that span, display the text of the diagnostic as a popup sort of like the...
+- for the generic path, we should decode the json on the lane side, and pass back a pointer to a heap allocated, shared yyjson json object, which is not freed, but which it is the main thread's responsibility to free after...
+- macOS users can use Ctrl+click as a Cmd+click substitute (or the user can configure their terminal).
+- alright, now let's use mdview for the hover documentation popups from the LSP
+- we should collapse all consecutive blank lines to just one
 
 ## Gotchas & Errors
 
-- Let me do the final smoke launch under a pty to confirm no runtime crash, then mark done:
-- So `alt-e`/`ctrl-e` can't become prefixes without losing `forward_sentence`/`move_line_end`.
-- Found 2 occurrences of edits[2] in /Users/alexispurslane/Development/scratch/cursed/src/cursed/commands.lua. Each oldText must be unique. Please provide more context to make it uni
-- Now let me unit-test the pick/wrap logic (LLS can't catch runtime bugs there) with a standalone harness mirroring `jump_diagnostic` exactly:
-- Now a smoke launch to confirm no runtime crash on module load:
-- getting a crash now when I try to jump to a workspace symbol: double free
-- Traceback (most recent call last):
-- The lua "fail" is just a wrong test expectation — `local function baz() end` IS captured (the label includes the trailing `end` since the node is a one-liner).
+- Could not find the exact text in /Users/alexispurslane/Development/scratch/cursed/src/cursed/commands.lua. The old text must match exactly including all whitespace and newlines.
+- Could not find edits[1] in /Users/alexispurslane/Development/scratch/cursed/src/cursed/editor_listeners.lua. The oldText must match exactly including all whitespace and newlines.
+- Could not find the exact text in src/cursed/mdview.lua. The old text must match exactly including all whitespace and newlines.
+- But tmux can't send Cmd/Ctrl+mouse-clicks easily.
+- Actually tmux `send-keys` can't synthesize SGR mouse events.
+- For the Ctrl+click test, tmux can't easily synthesize SGR mouse events with Ctrl, but I can verify the logic is sound by checking the mouse handler code path once more and confirming the build is...
+- Actually `tmux send-keys -M -t sess` reads a mouse event from the CURRENT terminal's mouse — that won't work non-interactively.
+- Actually, the real LSP hover uses CRLF; since I can't easily get a hover to fire non-interactively, let me at least verify `measure` and `render` agree via a tiny in-editor eval with a CRLF markdown...
 
 ## Heavily Read
 
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/view.lua (5 reads) — Let me check the buffer's line text API and `set_single_cursor`, plus the `curre
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/modes/lua.lua (3 reads) — Now run the outline test through the shim:
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/ts.lua (5 reads) — Let me look at the ts API methods for extracting node text and ranges, plus the 
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/completers.lua (7 reads) — Now let me look at the top of completers.lua for the helpers (`current_doc`, `bu
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/editor.lua (5 reads) — Now the editor.lua refactor. Let me read the full `place_cursor_lsp` context:
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/major_mode.lua (3 reads) — Now run `just fmt` to fix the formatting in commands.lua, then `just check`:
+- src/cursed/mdview.lua (13 reads) — Now I need to fix the `emit("[", base_attr)` block — I introduced a stray indent
+- vendor/termbox2/termbox2.h (6 reads) — Now the struct/forward decl regions. Let me look at 860-920 (the struct + global
+- src/main.lua (3 reads) — Let me see the surrounding context to find the start of the block I need to remo
+- src/cursed/editor_listeners.lua (11 reads) — Now let me look at the LSP hover paint path (around line 946-980):

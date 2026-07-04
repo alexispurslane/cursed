@@ -16,6 +16,7 @@ local lsp = require("cursed.lsp_client")
 local ColorScheme = require("cursed.colorscheme")
 local utf8 = require("cursed.utf8")
 local tb = require("cursed.tb")
+local mdview = require("cursed.mdview")
 local bit = require("bit")
 
 local EditorListeners = {}
@@ -23,6 +24,11 @@ local EditorListeners = {}
 --- Debounce window (microseconds) for full-text didChange: bursts of
 --- keystrokes coalesce into ONE sync after typing pauses.
 local DOCHANGE_DEBOUNCE_US = 150 * 1000 -- 150ms
+
+--- Debounce window (microseconds) before auto-firing a hover request
+--- after the cursor stops moving. Suppresses request storms while
+--- scrolling / typing; matches typical editor hover latency.
+local HOVER_DEBOUNCE_US = 500 * 1000 -- 500ms
 
 --- Build a `file://` URI for a buffer relative to the workspace root.
 --- Uses realpath(3) to resolve the absolute path so the server sees a
@@ -163,6 +169,35 @@ local function wrap_message(text, max_w)
     return lines
 end
 
+--- Normalize a hover `contents` field (MarkupContent / MarkedString /
+--- MarkedString[]) to a single multi-line string. Markdown is rendered
+--- as plain wrapped text (no fenced-code / inline rendering yet).
+---@param contents any
+---@return string
+local function normalize_hover_contents(contents)
+    if type(contents) == "string" then
+        return contents
+    end
+    if type(contents) ~= "table" then
+        return ""
+    end
+    if type(contents.value) == "string" then
+        return contents.value
+    end
+    local parts = {}
+    for _, e in ipairs(contents) do
+        if type(e) == "string" then
+            parts[#parts + 1] = e
+        elseif type(e) == "table" and type(e.value) == "string" then
+            parts[#parts + 1] = e.value
+        end
+    end
+    if #parts == 0 then
+        return ""
+    end
+    return table.concat(parts, "\n\n")
+end
+
 --- Severity 1..4 → colorscheme diagnostic concept name.
 ---@param severity integer
 ---@return string concept
@@ -175,6 +210,105 @@ local function sev_concept(severity)
         return "diagnostic_hint"
     end
     return "diagnostic_info"
+end
+
+--- Paint a bordered floating box anchored at the cursor (`c.line`,
+--- `c.col`), wrapping `lines` (already word-wrapped to fit `max_w - 2`).
+--- Mirrors the diagnostic hover popup: prefers above the cursor, falls
+--- back to below, clamps to the modeline; solid-filled so it occludes
+--- buffer text. Reused by the diagnostic hover and the LSP hover popup.
+--- `border_fg` is the resolved border color (with style bits); text/bg
+--- are derived from the modeline scheme for legibility.
+---@param ov any overlay surface (put_float / file_to_screen)
+---@param ed Editor
+---@param c table primary cursor {line, col}
+---@param lines string[] already-wrapped content rows
+---@param border_fg integer resolved border color + style
+function draw_float_box(ov, ed, c, lines, border_fg)
+    local term = ed.term
+    local term_w = term:width()
+    local term_h = term:height()
+    local box_w = 2 -- borders
+    for _, l in ipairs(lines) do
+        local lw = cell_len(l) + 2
+        if lw > box_w then
+            box_w = lw
+        end
+    end
+    if box_w > term_w then
+        box_w = term_w
+    end
+    local box_h = #lines + 2 -- borders + content
+
+    local csx, csy = ov:file_to_screen(c.line, c.col)
+    if csx == nil or csy == nil then
+        return -- cursor off-screen: nothing to anchor to
+    end
+
+    local modeline_y = term_h - ed:footer_rows()
+    -- Prefer above the cursor; fall back to below if no room.
+    local box_y_top = csy - box_h
+    if box_y_top < 0 then
+        box_y_top = csy + 1
+    end
+    if box_y_top + box_h > modeline_y then
+        box_y_top = modeline_y - box_h
+    end
+    if box_y_top < 0 then
+        return -- terminal too short to fit even once
+    end
+
+    -- Horizontal: start at the cursor's column, shift left to fit.
+    local x = csx
+    if x + box_w > term_w then
+        x = term_w - box_w
+    end
+    if x < 0 then
+        x = 0
+    end
+
+    local bg = ui("modeline_bg")
+    local text_fg = auto_text_color(bg)
+
+    -- Solid fill (so it paints over buffer text cleanly).
+    for r = box_y_top, box_y_top + box_h - 1 do
+        ov:put_float(x, r, string.rep(" ", box_w), text_fg, bg)
+    end
+    -- Borders.
+    ov:put_float(x, box_y_top, "╭" .. string.rep("─", box_w - 2) .. "╮", border_fg, bg)
+    ov:put_float(
+        x,
+        box_y_top + box_h - 1,
+        "╰" .. string.rep("─", box_w - 2) .. "╯",
+        border_fg,
+        bg
+    )
+    -- Content rows (inset by 1).
+    for i, l in ipairs(lines) do
+        local y = box_y_top + i
+        ov:put_float(x + 1, y, l, text_fg, bg)
+    end
+end
+
+--- True when the LSP hover popup should NOT show / arm: another
+--- transient UI is active, or the diagnostic hover is showing (no
+--- stacking). Checked both at arm-time and paint-time.
+---@param ed Editor
+---@return boolean
+local function hover_suppressed(ed)
+    if ed.minibuffer and ed.minibuffer.active then
+        return true
+    end
+    if ed._whichkey_node ~= nil then
+        return true
+    end
+    if ed.completion_menu and ed.completion_menu.active then
+        return true
+    end
+    if ed._diag_hover_visible then
+        return true
+    end
+    return false
 end
 
 --- Does the diagnostic range [start,end) contain the cursor (cline,
@@ -687,30 +821,168 @@ function EditorListeners.setup(editor)
             msg = "[" .. active.source .. "] " .. msg
         end
         local term = ed.term
-        local term_w = term:width()
-        local term_h = term:height()
-        local max_w = math.min(math.max(20, term_w - 4), 64)
+        local max_w = math.min(math.max(20, term:width() - 4), 64)
         local lines = wrap_message(msg, max_w - 2) -- inset by 1 each side
-        local box_w = 2 -- borders
-        for _, l in ipairs(lines) do
-            local lw = cell_len(l) + 2
-            if lw > box_w then
-                box_w = lw
+        local border_fg = bit.bor(ui(sev_concept(active.severity or 0)), tb.bold)
+        draw_float_box(ov, ed, c, lines, border_fg)
+    end)
+
+    -- LSP hover popup (cursor-idle, debounced). After the cursor
+    -- stops moving for HOVER_DEBOUNCE_US, fire `textDocument/hover` and
+    -- show the returned `contents` in the same bordered float as the
+    -- diagnostic hover. This is RENDER-OVERLAY DRIVEN, NOT event-driven:
+    -- every frame we compare the current cursor (view buffer + line +
+    -- col) against the last position we armed a debounce for. On change
+    -- we clear any visible hover, bump `_hover_seq` (rejecting in-flight
+    -- responses whose position no longer matches), cancel the pending
+    -- debounce, and (re)arm one for the new position. That makes hover
+    -- track the cursor regardless of HOW it moved — keyboard commands,
+    -- mouse clicks / drags, wheel scroll — with zero cursor-event
+    -- plumbing (the same trick the diagnostic hover uses). Suppressed
+    -- while the minibuffer / which-key / completion popup is active or
+    -- the diagnostic hover is showing (no stacking).
+    es:on("render_overlay", function(ed)
+        local ov = ed.overlays
+        if ov == nil then
+            return
+        end
+        local view = ed:current_view()
+        local c = view and view.cursors and view.cursors[1]
+
+        -- Cursor-position signature (nil when no hover-eligible cursor).
+        local sig
+        if
+            view ~= nil
+            and view.file_loaded
+            and c ~= nil
+            and view.buffer ~= nil
+            and view.buffer.lsp_uri ~= nil
+        then
+            sig = { view = view, buf = view.buffer, line = c.line, col = c.col }
+        end
+
+        -- Detect movement: re-arm on change.
+        local prev = ed._hover_armed_sig
+        local moved = not (
+            prev ~= nil
+            and sig ~= nil
+            and prev.view == sig.view
+            and prev.buf == sig.buf
+            and prev.line == sig.line
+            and prev.col == sig.col
+        )
+        if moved then
+            ed._hover_armed_sig = sig
+            ed._hover_md = nil -- cursor moved: clear immediately
+            ed._hover_w = nil
+            ed._hover_seq = (ed._hover_seq or 0) + 1 -- reject in-flight responses
+            if ed._hover_task ~= nil then
+                ed:cancel_task(ed._hover_task)
+                ed._hover_task = nil
+            end
+            -- (Re)arm the debounce if the new position is hover-eligible
+            -- and nothing is suppressing hover right now.
+            if sig ~= nil and not hover_suppressed(ed) then
+                local buf = sig.buf
+                local cid = buf.lsp_client_id
+                local uri = buf.lsp_uri
+                if cid ~= nil and uri ~= nil and lsp.is_ready(cid) then
+                    local captured = { seq = 0, buf = buf, cid = cid, uri = uri }
+                    captured.seq = ed._hover_seq
+                    ed._hover_task = ed:schedule_after(HOVER_DEBOUNCE_US, function()
+                        ed._hover_task = nil
+                        -- Re-validate at fire time: buffer/LSP may have
+                        -- changed or a suppressor may have appeared.
+                        if captured.buf ~= sig.buf then -- buffer swapped under us
+                            return true
+                        end
+                        if hover_suppressed(ed) then
+                            return true -- one-shot; re-arms on next movement
+                        end
+                        if not lsp.is_ready(captured.cid) then
+                            return true
+                        end
+                        -- Cursor col may have advanced (it didn't, or this
+                        -- task would've been cancelled) but re-read line
+                        -- text fresh for UTF-16 conversion.
+                        local v = ed:current_view()
+                        if v ~= sig.view then
+                            return true -- active view changed
+                        end
+                        local p = v:p()
+                        local text = captured.buf:line_text(p.line) or ""
+                        local char = utf8.byte_to_utf16_col(text, p.col)
+                        local seq = captured.seq
+                        lsp.request_hover(
+                            captured.cid,
+                            captured.uri,
+                            { line = p.line, character = char },
+                            function(result, is_error)
+                                if seq ~= ed._hover_seq then
+                                    return -- stale: cursor moved since armed
+                                end
+                                if is_error or result == nil then
+                                    ed._hover_md = nil
+                                    ed._hover_w = nil
+                                    return
+                                end
+                                local value = normalize_hover_contents(result.contents)
+                                if value == nil or value == "" then
+                                    ed._hover_md = nil
+                                    ed._hover_w = nil
+                                    return
+                                end
+                                -- Cache the raw markdown + the width it
+                                -- was sized for. The paint path measures
+                                -- + renders it via mdview (markdown
+                                -- formatting, tree-sitter code blocks,
+                                -- inline code, links-as-label+(url)).
+                                local term = ed.term
+                                local max_w = math.min(math.max(20, term:width() - 4), 64)
+                                ed._hover_md = value
+                                ed._hover_w = max_w - 2
+                            end
+                        )
+                        return true -- one-shot
+                    end)
+                end
             end
         end
-        if box_w > term_w then
-            box_w = term_w
-        end
-        local box_h = #lines + 2 -- borders + content
 
-        -- Anchor at the cursor's screen cell.
+        -- Paint if content is available + nothing is suppressing.
+        local md = ed._hover_md
+        local content_w = ed._hover_w
+        if md == nil or content_w == nil then
+            return
+        end
+        if hover_suppressed(ed) then
+            return
+        end
+        if c == nil then
+            return
+        end
+
+        local term = ed.term
+        local term_w = term:width()
+        local term_h = term:height()
+        -- Cap content height so the popup never swallows the screen
+        -- (the same ceiling draw_float_box implies via modeline_y).
+        local modeline_y = term_h - ed:footer_rows()
+        local max_content_h = math.max(1, modeline_y - 2)
+        local content_h = math.min(mdview.measure(md, content_w, max_content_h), max_content_h)
+        if content_h < 1 then
+            return
+        end
+
+        local box_w = content_w + 2 -- 1-cell border on each side
+        local box_h = content_h + 2
+
+        -- Anchor: mirror draw_float_box — prefer above the cursor, fall
+        -- back to below, then clamp into the modeline region.
         local csx, csy = ov:file_to_screen(c.line, c.col)
         if csx == nil or csy == nil then
-            return -- cursor off-screen: nothing to anchor to
+            return
         end
-
-        local modeline_y = term_h - ed:footer_rows()
-        -- Prefer above the cursor; fall back to below if no room.
         local box_y_top = csy - box_h
         if box_y_top < 0 then
             box_y_top = csy + 1
@@ -721,8 +993,6 @@ function EditorListeners.setup(editor)
         if box_y_top < 0 then
             return -- terminal too short to fit even once
         end
-
-        -- Horizontal: start at the cursor's column, shift left to fit.
         local x = csx
         if x + box_w > term_w then
             x = term_w - box_w
@@ -733,25 +1003,24 @@ function EditorListeners.setup(editor)
 
         local bg = ui("modeline_bg")
         local text_fg = auto_text_color(bg)
-        local border_fg = bit.bor(ui(sev_concept(active.severity or 0)), tb.bold)
+        local border_fg = bit.bor(ui("modeline_fg"), tb.bold)
 
-        -- Solid fill (so it paints over buffer text cleanly).
-        for r = box_y_top, box_y_top + box_h - 1 do
-            ov:put_float(x, r, string.rep(" ", box_w), text_fg, bg)
+        -- Solid fill via direct term:print (so the popup occludes
+        -- buffer text), then mdview renders the markdown content on
+        -- top, then the border is queued as floats (paints during
+        -- ov:flush, AFTER mdview.render's direct writes — same layer
+        -- order the mdview demo popup uses).
+        for r = 0, box_h - 1 do
+            term:print(x, box_y_top + r, (" "):rep(box_w), text_fg, bg)
         end
-        -- Borders.
-        ov:put_float(x, box_y_top, "╭" .. string.rep("─", box_w - 2) .. "╮", border_fg, bg)
-        ov:put_float(
-            x,
-            box_y_top + box_h - 1,
-            "╰" .. string.rep("─", box_w - 2) .. "╯",
-            border_fg,
-            bg
-        )
-        -- Content rows (inset by 1).
-        for i, l in ipairs(lines) do
-            local y = box_y_top + i
-            ov:put_float(x + 1, y, l, text_fg, bg)
+        mdview.render(term, x + 1, box_y_top + 1, content_w, md, text_fg, bg, content_h)
+        local top = "╭" .. string.rep("─", box_w - 2) .. "╮"
+        local bot = "╰" .. string.rep("─", box_w - 2) .. "╯"
+        ov:put_float(x, box_y_top, top, border_fg, bg)
+        ov:put_float(x, box_y_top + box_h - 1, bot, border_fg, bg)
+        for r = 1, box_h - 2 do
+            ov:put_float(x, box_y_top + r, "│", border_fg, bg)
+            ov:put_float(x + box_w - 1, box_y_top + r, "│", border_fg, bg)
         end
     end)
 end

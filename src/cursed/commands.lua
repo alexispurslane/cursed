@@ -3711,4 +3711,13 @@ commands.show_diagnostic_hover = function(_view, editor)
     end
 end
 
+--- Toggle the mdview demo popup: a centered, bordered window that
+--- renders a sample markdown document via `cursed.mdview.render`
+--- (headings, bold/italic, inline code, links, and fenced code blocks
+--- syntax-highlighted via the major-mode tree-sitter grammars). Any
+--- keypress dismisses it. Invoke via `M-x mdview-demo`.
+commands.mdview_demo = function(_view, editor)
+    require("cursed.mdview").toggle_demo(editor)
+end
+
 return commands

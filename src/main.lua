@@ -802,6 +802,7 @@ local function main()
     -- ------------------------------------------------------------------
     require("cursed.editor_listeners").setup(editor)
     require("cursed.whichkey").setup(editor)
+    require("cursed.mdview").setup(editor)
 
     -- Announce editor readiness. Fires AFTER init.lua (config.load, run
     -- above) and default listeners are registered, so both user and

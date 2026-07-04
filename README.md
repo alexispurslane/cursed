@@ -59,6 +59,10 @@ Most of the editor concepts --- and keybindings --- are derived from Emacs, but 
 
 ![diagnostics](./diagnostics.png)
 
+### Hover Documentation
+
+![docs](./hover-doc-popup.png)
+
 ## Installing
 
 Cursed doesn't have a system installer (yet). The build produces a single standalone binary at `build/cursed` that you can run in place or drop anywhere on your `$PATH`:
@@ -134,6 +138,7 @@ just clean-vendor # also rebuild vendored LuaJIT / tree-sitter-lib from scratch
 ```
 
 Build artifacts land entirely in `build/`; nothing outside the repo is touched except `~/.config/cursed/` at runtime.
+
 
 
 
