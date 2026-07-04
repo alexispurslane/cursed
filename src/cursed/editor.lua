@@ -2328,8 +2328,16 @@ function Editor:render()
 
     -- Soft wrapping: set wrap_width to the text area width
     -- so the cache stays consistent with the current window size.
+    -- `no_wrap` (non-file app buffers, e.g. pickers) keeps wrap_width
+    -- nil so View:wrap_rows returns one sub-row per line.
     local reflowed = false
-    if view.wrap_width ~= text_width then
+    if view.no_wrap then
+        if view.wrap_width ~= nil then
+            view.wrap_width = nil
+            view:invalidate_wrap_cache()
+            reflowed = true
+        end
+    elseif view.wrap_width ~= text_width then
         view.wrap_width = text_width
         view:invalidate_wrap_cache()
         reflowed = true
@@ -2479,12 +2487,15 @@ function Editor:render()
                 -- EVERY sub-row so multi-row lines stay aligned, then a
                 -- 1-col separator before the text (also covered by the
                 -- pre-fill). Sign slots that returned nil stay blank.
-                if sub_row == 0 then
-                    local line_num = tostring(li + 1)
+                -- Skipped entirely when view.no_gutter (text_geometry
+                -- already returned gutter_width=0). `no_line_numbers`
+                -- blanks the digits while keeping the gutter frame.
+                if not view.no_gutter and sub_row == 0 then
+                    local line_num = view.no_line_numbers and "" or tostring(li + 1)
                     local num_pad = string.rep(" ", line_digits - #line_num)
                     term:print(block_x, row, " " .. num_pad .. line_num, num_fg, row_bg)
                 end
-                if signs then
+                if not view.no_gutter and signs then
                     local sx = block_x + 2 + line_digits -- +1 left margin +1 separator after number
                     for i = 1, #signs do
                         local s = signs[i]
@@ -2655,24 +2666,44 @@ function Editor:render()
                             -- Allow the cursor to sit one cell past the
                             -- last grapheme for end-of-content cursors.
                             if ccol <= row_w then
-                                local ch = " "
-                                -- Find the grapheme run covering c.col.
-                                for _, run in ipairs(runs) do
-                                    if
-                                        c.col + 1 >= run.byte_start
-                                        and c.col + 1 <= run.byte_end
-                                    then
-                                        ch = line_text:sub(run.byte_start, run.byte_end)
-                                        break
+                                if view.whole_line_cursor then
+                                    -- Whole-row highlight (the "selected
+                                    -- row" for list app buffers): fill the
+                                    -- sub-row text area in cursor colors,
+                                    -- then re-emit each grapheme run on
+                                    -- top so the line text stays readable
+                                    -- (reverse-video across the whole row).
+                                    -- Painted as floats so the caret stays
+                                    -- on top of the syntax/selection layer.
+                                    local cfg = ui("cursor_fg")
+                                    local cbg = ui("cursor_bg")
+                                    ov:put_float(text_x, row, string.rep(" ", row_w), cfg, cbg)
+                                    for _, run in ipairs(runs) do
+                                        local chunk = line_text:sub(run.byte_start, run.byte_end)
+                                        if #chunk > 0 then
+                                            ov:put_float(text_x + run.col, row, chunk, cfg, cbg)
+                                        end
                                     end
+                                else
+                                    local ch = " "
+                                    -- Find the grapheme run covering c.col.
+                                    for _, run in ipairs(runs) do
+                                        if
+                                            c.col + 1 >= run.byte_start
+                                            and c.col + 1 <= run.byte_end
+                                        then
+                                            ch = line_text:sub(run.byte_start, run.byte_end)
+                                            break
+                                        end
+                                    end
+                                    ov:put_float(
+                                        text_x + ccol,
+                                        row,
+                                        ch,
+                                        ui("cursor_fg"),
+                                        ui("cursor_bg")
+                                    )
                                 end
-                                ov:put_float(
-                                    text_x + ccol,
-                                    row,
-                                    ch,
-                                    ui("cursor_fg"),
-                                    ui("cursor_bg")
-                                )
                             end
                         end
                     end

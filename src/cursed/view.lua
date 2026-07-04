@@ -158,6 +158,13 @@ function View.new(buffer)
         indent_width = 8,
         wrap_width = nil,
         margin = nil,
+        -- Display toggles resolved from the active major mode in
+        -- set_major_modes (last mode wins). Defaulted here so render
+        -- never sees nil before a mode is activated.
+        no_gutter = false,
+        no_line_numbers = false,
+        no_wrap = false,
+        whole_line_cursor = false,
         _wrap_rows = nil,
         _wrap_cum = nil,
         _wrap_built = nil,
@@ -898,6 +905,10 @@ end
 function View:_emit_mode_event(name, instance)
     if self.editor and self.editor.event_system then
         local es = self.editor.event_system
+        -- Ensure on_enter/on_exit are auto-wired BEFORE the emit so the
+        -- listener catches the very first activation of this template
+        -- on this editor (idempotent; no-op when neither hook is set).
+        instance._base:_ensure_listeners(self.editor)
         es:emit(name, instance, self)
         es:emit(name .. ":" .. instance.name, instance, self)
     end
@@ -921,12 +932,24 @@ function View:set_major_modes(modes)
         -- editor.margin (the global baseline), NOT a hardcoded constant
         -- (unlike tab_width/indent_width, which have no global source).
         self.margin = last.margin ~= nil and last.margin or (self.editor and self.editor.margin)
+        -- Display toggles for non-file-backed "app" buffers (picker,
+        -- dashboard, …). Same last-mode-wins resolution as indent settings;
+        -- nil on the mode → sensible default. All flags default OFF so
+        -- ordinary file-buffer rendering is unchanged.
+        self.no_gutter = last.no_gutter == true
+        self.no_line_numbers = last.no_line_numbers == true or self.no_gutter
+        self.no_wrap = last.no_wrap == true
+        self.whole_line_cursor = last.whole_line_cursor == true
     else
         self.tab_width = 8
         self.expand_tab = false
         self.indent_width = 8
         -- No active mode: restore the global config margin.
         self.margin = self.editor and self.editor.margin
+        self.no_gutter = false
+        self.no_line_numbers = false
+        self.no_wrap = false
+        self.whole_line_cursor = false
     end
     -- Rebuild the syntax highlighter from the highest-precedence mode
     -- that declares a tree-sitter language.
@@ -994,6 +1017,32 @@ function View:has_major_mode(template)
         end
     end
     return false
+end
+
+--- The highest-precedence active major mode instance, or nil. Later
+--- modes win (matches the last-mode-wins resolution in set_major_modes).
+--- Used by process_key to find a per-mode `printable` handler and by
+--- render to read display flags via the view (already resolved).
+---@return MajorModeInstance|nil
+function View:top_mode()
+    local modes = self._major_modes
+    if modes and #modes > 0 then
+        return modes[#modes]
+    end
+    return nil
+end
+
+--- Whether multi-cursor commands may run in this view. False when the
+--- top mode sets `multi_currency = false` (non-file-backed app buffers —
+--- pickers, dashboards — where multiple cursors are nonsensical).
+--- Default true (ordinary text buffers).
+---@return boolean
+function View:multi_currency_enabled()
+    local m = self:top_mode()
+    if m == nil then
+        return true
+    end
+    return m.multi_currency ~= false
 end
 
 --- Activate the matching major modes for a filepath.
@@ -2292,6 +2341,25 @@ end
 ---@param w integer terminal width (columns)
 ---@return integer gutter_width, integer text_x, integer text_width, integer block_x, integer block_w
 function View:text_geometry(w)
+    -- no_gutter: drop the whole gutter (numbers + sign columns +
+    -- separators). text starts at block_x (margin centering still
+    -- applies). All gutter-drawing code in Editor:render is gated on
+    -- `view.no_gutter` and collapses to this geometry.
+    if self.no_gutter then
+        local margin = self.margin
+        local text_width, block_x, block_w
+        if margin and margin > 0 and margin < w then
+            text_width = margin
+            block_w = text_width
+            block_x = math.floor((w - block_w) / 2)
+        else
+            text_width = w
+            block_w = w
+            block_x = 0
+        end
+        local text_x = block_x
+        return 0, text_x, text_width, block_x, block_w
+    end
     local line_count = self.buffer:line_count()
     -- Layout after the number: a 1-col separator, then one column
     -- per gutter-sign callback (editor.gutter_sign_fns), then a

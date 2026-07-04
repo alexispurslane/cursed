@@ -83,7 +83,16 @@ local keybind = require("cursed.keybind")
 ---@field input_hooks table|nil flat list of input-hook specs (build with cursed.input_hook); matched as a suffix of left-of-cursor text and dispatched by View:_run_input_hooks
 ---@field lsp_servers (string|table)[]|nil first-wins list of EITHER bare executable-name strings OR candidate tables `{ bin = "name", args = {"--stdio"}, env = { VAR = "value" } }`, spawned as a language server subprocess when a view activates this mode (managed centrally by the editor)
 ---@field completer function|nil factory `fun(editor): fun(ctx): table` producing this mode's in-buffer completion source (e.g. `completers.lsp`). The editor's `mode_dispatch` resolver instantiates it lazily + caches it; falls back to `buffer_words` when nil.
+---@field printable fun(view, editor, ch): boolean?|nil per-mode printable-char handler; nil → fall back to the global `__printable`. Return truthy to feed the trie (command-letter/vim-style apps); return false/nil when handled (filter/insert apps). Enables non-file-backed "TUI app" buffers whose list items are buffer lines and whose selected row is the cursor's line.
+---@field multi_currency boolean when false, multi-cursor commands (select_next_match, add_cursor, select_all_matches, drop_cursor) and mouse Alt-click no-op in views running this mode. Default true. App/list buffers set false.
+---@field on_enter fun(view, editor, instance)|nil convenience that auto-wires a `mode_enter:<name>` listener (idempotently, per editor) calling `on_enter(view, editor, instance)`. Lets a mode seed its own buffer with lines / attach per-view state. Equivalent to registering the listener by hand in the spec file (the existing pattern) — sugar only.
+---@field on_exit fun(view, editor, instance)|nil convenience that auto-wires a `mode_exit:<name>` listener calling `on_exit(view, editor, instance)`.
+---@field no_gutter boolean|nil drop the whole gutter (line numbers + sign columns + separators) for views in this mode. Display toggle only — the buffer text is still the substrate.
+---@field no_line_numbers boolean|nil keep the gutter frame but blank the line numbers. `no_gutter` implies this.
+---@field no_wrap boolean|nil one sub-row per line: `Editor:render` will not set `view.wrap_width`, so `View:wrap_rows` returns a single sub-row. Display toggle only.
+---@field whole_line_cursor boolean|nil the cursor paints the entire sub-row width in `cursor_bg` instead of a single cell — the "selected row" highlight for list apps. Display toggle only.
 ---@field _trie table? lazily-built keybind trie for this mode's keybindings
+---@field _listener_editors table|nil set of editors this template has already registered on_enter/on_exit listeners against (idempotent per-editor auto-wiring)
 local MajorMode = {}
 MajorMode.__index = MajorMode
 
@@ -104,6 +113,14 @@ MajorMode.__index = MajorMode
 ---@field input_hooks? table
 ---@field lsp_servers? (string|table)[] first-wins list of LSP executables (strings or `{bin,args,env}` tables) to try when this mode activates
 ---@field completer? function factory `fun(editor): fun(ctx): table` for this mode's in-buffer completion source (resolved at runtime by the editor's `mode_dispatch`)
+---@field printable? fun(view, editor, ch): boolean? per-mode printable-char handler (nil → global `__printable`)
+---@field multi_currency? boolean false → multi-currency commands no-op in this mode (default true)
+---@field on_enter? fun(view, editor, instance) auto-wired mode_enter:<name> listener
+---@field on_exit? fun(view, editor, instance) auto-wired mode_exit:<name> listener
+---@field no_gutter? boolean drop the whole gutter
+---@field no_line_numbers? boolean keep gutter frame, blank line numbers
+---@field no_wrap? boolean one sub-row per line
+---@field whole_line_cursor? boolean cursor paints the whole row in cursor_bg
 
 --- Create a major mode template from a config spec table.
 --- Use :instantiate() to create per-view instances.
@@ -128,7 +145,16 @@ function MajorMode.new(spec)
         input_hooks = spec.input_hooks,
         lsp_servers = spec.lsp_servers,
         completer = spec.completer,
+        printable = spec.printable,
+        multi_currency = spec.multi_currency, -- nil defaults to "enabled" via view:multi_currency_enabled()
+        on_enter = spec.on_enter,
+        on_exit = spec.on_exit,
+        no_gutter = spec.no_gutter,
+        no_line_numbers = spec.no_line_numbers,
+        no_wrap = spec.no_wrap,
+        whole_line_cursor = spec.whole_line_cursor,
         _trie = nil,
+        _listener_editors = nil,
     }, MajorMode)
 end
 
@@ -140,6 +166,40 @@ end
 function MajorMode:instantiate()
     ---@type MajorModeInstance
     return setmetatable({ _base = self }, { __index = self })
+end
+
+--- Idempotently register `on_enter` / `on_exit` as `mode_enter:<name>` /
+--- `mode_exit:<name>` listeners on `editor.event_system`, once per editor.
+--- Called from `View:_emit_mode_event` BEFORE the emit so the listener
+--- is in place to catch the very first activation. No-op when the
+--- template declares neither hook.
+---@param editor Editor owning editor (must have an event_system)
+function MajorMode:_ensure_listeners(editor)
+    if self.on_enter == nil and self.on_exit == nil then
+        return
+    end
+    if self._listener_editers == nil then
+        self._listener_editers = {}
+    end
+    if self._listener_editers[editor] then
+        return
+    end
+    self._listener_editers[editor] = true
+    local es = editor.event_system
+    if es == nil then
+        return
+    end
+    local name = self.name
+    if self.on_enter then
+        es:on("mode_enter:" .. name, function(ed, inst, view)
+            inst.on_enter(view, ed, inst)
+        end)
+    end
+    if self.on_exit then
+        es:on("mode_exit:" .. name, function(ed, inst, view)
+            inst.on_exit(view, ed, inst)
+        end)
+    end
 end
 
 --- Get (or lazily build) the keybind trie for this mode's keybindings.
@@ -173,5 +233,13 @@ end
 ---@field input_hooks table|nil (inherited)
 ---@field lsp_servers (string|table)[]|nil (inherited from template)
 ---@field completer function|nil (inherited from template)
+---@field printable fun(view, editor, ch): boolean?|nil (inherited)
+---@field multi_currency boolean|nil (inherited)
+---@field on_enter fun(view, editor, instance)|nil (inherited)
+---@field on_exit fun(view, editor, instance)|nil (inherited)
+---@field no_gutter boolean|nil (inherited)
+---@field no_line_numbers boolean|nil (inherited)
+---@field no_wrap boolean|nil (inherited)
+---@field whole_line_cursor boolean|nil (inherited)
 
 return MajorMode

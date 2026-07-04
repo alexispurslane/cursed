@@ -11,6 +11,7 @@
 local kill_ring = require("cursed.kill_ring")
 local clipboard = require("cursed.clipboard")
 local completers = require("cursed.completers")
+local find_file_mod = require("cursed.find_file")
 local ColorScheme = require("cursed.colorscheme")
 local log = require("cursed.log")
 local utf8 = require("cursed.utf8")
@@ -755,6 +756,47 @@ commands.find_file = function(view, editor)
                 return
             end
             editor:open_file(input)
+        end,
+    })
+end
+
+----------------------------------------------------------------------------------------------------
+-- Load & evaluate a Lua file (Emacs `load-file`).
+--
+-- Prompts for a path in the minibuffer with the SAME file-completion
+-- provider as find_file, then executes the file UNSANDBOXED against the
+-- main-thread globals — exactly like init.lua is loaded: the chunk sees
+-- the global `editor`, `require`, `_G`, and any globals it defines
+-- persist after it returns. Use to live-reload scratch scripts, poke at
+-- editor APIs, or define commands / keybindings / modes without
+-- restarting. Errors are surfaced in the status line + the error log.
+----------------------------------------------------------------------------------------------------
+commands.load_file = function(_view, editor)
+    editor:read_from_minibuffer({
+        prompt = "Load Lua file: ",
+        completion = true,
+        completer = completers.find_file,
+        on_submit = function(input)
+            if #input == 0 then
+                return
+            end
+            local path = find_file_mod.expand_path(input)
+            local chunk, err = loadfile(path)
+            if not chunk then
+                editor.status_message = "load error: " .. tostring(err)
+                return
+            end
+            -- Run fully unsandboxed (default _G env; no setfenv). Globals
+            -- the script defines persist on _G, mirroring init.lua.
+            local ok, runerr = xpcall(chunk, function(e)
+                return debug.traceback(tostring(e), 2)
+            end)
+            if not ok then
+                editor.status_message = "load error: " .. tostring(runerr)
+                log.error("commands", "load_file error", { path = path, error = tostring(runerr) })
+            else
+                editor.status_message = "loaded: " .. path
+            end
         end,
     })
 end
@@ -1550,6 +1592,9 @@ end
 --- Adds a new cursor with an anchor at the match start and head at the
 --- match end. Repeats add successive cursors forward.
 commands.select_next_match = function(view, editor)
+    if not view:multi_currency_enabled() then
+        return
+    end
     local query = primary_selection_text(view)
     if not query or #query == 0 then
         -- No selection ("search inactive"): jump diagnostics instead.
@@ -1829,6 +1874,9 @@ end
 --- Select every occurrence of the current selection's text.
 --- Replaces cursors with one per match (selections active).
 commands.select_all_matches = function(view, _editor)
+    if not view:multi_currency_enabled() then
+        return
+    end
     local query = primary_selection_text(view)
     if not query or #query == 0 then
         return
@@ -1857,6 +1905,9 @@ end
 --- default) promotes all pending drops to live cursors at once so
 --- subsequent motions move every cursor in unison. Escape cancels.
 commands.add_cursor_here = function(view, editor)
+    if not view:multi_currency_enabled() then
+        return
+    end
     local p = view:p()
     view:drop_cursor(p.line, p.col)
     if editor then
@@ -1924,6 +1975,9 @@ end
 --- Implements rectangular column-arrow navigation: cursor is added
 --- (not moved) so the existing cursor stays. Repeat to extend up.
 commands.add_cursor_up = function(view, _editor)
+    if not view:multi_currency_enabled() then
+        return
+    end
     local p = view:p()
     if p.line <= 0 then
         return
@@ -1936,6 +1990,9 @@ end
 
 --- Add a cursor one row below the primary, same column.
 commands.add_cursor_down = function(view, _editor)
+    if not view:multi_currency_enabled() then
+        return
+    end
     local p = view:p()
     if p.line >= view:line_count() - 1 then
         return

@@ -485,7 +485,14 @@ local function process_key(editor, view, trie, key_state, key_node, token, ev, p
             return key_state, key_node, nil
         end
         if printable_fn then
-            local ok, claimed = pcall(printable_fn, view, editor, ch)
+            -- Per-mode printable handler wins over the global __printable
+            -- when the focused view's top mode declares one. This is how
+            -- non-file-backed "app" buffers (pickers, dashboards) intercept
+            -- typing — e.g. append to a filter string and refilter the
+            -- buffer — instead of self-inserting into the buffer.
+            local mode = view and view:top_mode()
+            local pfn = (mode and mode.printable) or printable_fn
+            local ok, claimed = pcall(pfn, view, editor, ch)
             if not ok then
                 log.error("main", "printable error", { error = tostring(claimed) })
                 return key_state, key_node, nil
@@ -1589,8 +1596,12 @@ local function main()
                         elseif mod and bit.band(mod, tb.mod_alt) ~= 0 then
                             -- Alt-click press: add a cursor at the click
                             -- point. (Alt-drag is not specially handled.)
-                            view_cur:add_cursor(line, col)
-                            view_cur:_set_goal_col(view_cur:p().col)
+                            -- No-op in views whose mode disabled
+                            -- multi-currency (non-file app buffers).
+                            if view_cur:multi_currency_enabled() then
+                                view_cur:add_cursor(line, col)
+                                view_cur:_set_goal_col(view_cur:p().col)
+                            end
                         else
                             -- Press (start of a potential drag): place a
                             -- single cursor and drop a mark at the same
