@@ -960,6 +960,34 @@ function View:set_major_modes(modes)
     end
 end
 
+--- Dynamically change display options (no_gutter, no_line_numbers,
+--- no_wrap, whole_line_cursor) on-the-fly, overriding the values
+--- resolved from the active major mode. Accepts a table of keys to
+--- set; omitted keys keep their current value. Cascade rules
+--- (no_gutter → no_line_numbers) are applied automatically.
+---@param opts { no_gutter: boolean?, no_line_numbers: boolean?, no_wrap: boolean?, whole_line_cursor: boolean? }
+function View:change_display_opts(opts)
+    if opts.no_gutter ~= nil then
+        self.no_gutter = opts.no_gutter
+        if self.no_gutter then
+            self.no_line_numbers = true
+        end
+    end
+    if opts.no_line_numbers ~= nil then
+        self.no_line_numbers = opts.no_line_numbers or self.no_gutter
+    end
+    if opts.no_wrap ~= nil then
+        local was_no_wrap = self.no_wrap
+        self.no_wrap = opts.no_wrap
+        if self.no_wrap ~= was_no_wrap then
+            self:invalidate_wrap_cache()
+        end
+    end
+    if opts.whole_line_cursor ~= nil then
+        self.whole_line_cursor = opts.whole_line_cursor
+    end
+end
+
 --- Activate a major mode in this view: create an instance, emit
 --- mode_enter, and add it to the mode list.
 ---@param template MajorMode the mode template (from config.modes)

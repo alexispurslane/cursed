@@ -23,15 +23,17 @@ so the agent can pick up context across sessions.
 
 ## Gotchas & Errors
 
-- Let me clean up — I appended a broken probe.
-- Let me confirm it was already failing before my change:
-- The pre-existing `_diag_hover_visible` lint warning is unrelated and was already failing before this change.
 - (no output)
 - code actions requires generalized gutter system, save for later, but blocked on that.
 - The only lint failure is the pre-existing `_diag_hover_visible` warning, which per project memory is unrelated and pre-existing.
 - ts`, which resolves tree-sitter C symbols at load time — those only exist linked into the real `cursed` binary, so headless `luajit` can't load it.
 - )` — `(stream, bytes)` where stream is `"stdout"`/`"stderr"`, or `(kind, code)` where kind is `"exited"`/`"signaled"`/`"failed"`/`"kill_sent"`.
+- Command aborted
+- === Pane ===
+- usage: cursed [-e EXPR | -l MODULE]... [FILE...]
 
 ## Heavily Read
 
-- src/cursed/proc_lane.lua (3 reads) — Good idea — let me add a `buffer_bytes` option to spawn that accumulates per-str
+- /Users/alexispurslane/Development/scratch/cursed/examples/picker.lua (4 reads) — Now let me verify the file looks correct and run `just check`:
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/view.lua (4 reads) — the first time I type something in the input area, a new line is added between t
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/buffer.lua (3 reads) — now, let's see if we can play with the text nature of the buffer more: how about
