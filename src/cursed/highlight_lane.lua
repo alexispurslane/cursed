@@ -34,6 +34,40 @@ local function now_us()
 end
 
 ----------------------------------------------------------------------------------------------------
+-- CFFI scratch buffer for span construction — zero-copy into the
+-- response message. The buffer is laid out as:
+--   [HlSpansHdr] [HlSpan × span_cap]  → realloc'd for names at send time
+-- The header slot is reserved from the start so spans land directly at
+-- their final offset — no ffi.copy / memmove. At send time we realloc to
+-- append names, fill the header, push the buffer to inbox_hl, and
+-- allocate a fresh scratch for the next query. Main lane frees the old
+-- buffer after installing.
+----------------------------------------------------------------------------------------------------
+local SPAN_INITIAL_CAP = 8192
+local HlSpan_size = ffi.sizeof("struct HlSpan")
+local HlSpansHdr_size = ffi.sizeof("struct HlSpansHdr")
+local HlName_size = ffi.sizeof("struct HlName")
+local span_buf = nil ---@type any char* (full buffer: header + spans + names)
+local span_arr = nil ---@type any struct HlSpan* (points into span_buf after header)
+local span_cap = 0 ---@type integer
+
+local function ensure_span_buf()
+    if span_buf == nil then
+        span_cap = SPAN_INITIAL_CAP
+        span_buf = ffi.C.malloc(HlSpansHdr_size + span_cap * HlSpan_size)
+        span_arr = ffi.cast("struct HlSpan *", ffi.cast("char *", span_buf) + HlSpansHdr_size)
+    end
+end
+
+--- Grow the span portion of the buffer. The header stays at offset 0
+--- and span_arr is adjusted if realloc moved the buffer.
+local function grow_span_buf(new_cap)
+    span_buf = ffi.C.realloc(span_buf, HlSpansHdr_size + new_cap * HlSpan_size)
+    span_arr = ffi.cast("struct HlSpan *", ffi.cast("char *", span_buf) + HlSpansHdr_size)
+    span_cap = new_cap
+end
+
+----------------------------------------------------------------------------------------------------
 -- Two-layer state cache: per_lang[language] = {parser, query, cursor, docs}
 ----------------------------------------------------------------------------------------------------
 
@@ -256,7 +290,7 @@ local BUCKET_BYTES = 8192
 ---@param bucket_hi integer one past the last bucket (exclusive)
 ---@param injection_caps table[]|nil sorted injected captures
 ---@param get_text_fn function(int,int)->string
----@return {start_byte:integer, end_byte:integer, cap_index:integer}[] spans
+---@return integer span_count
 ---@return string[] names capture-name table (index 1..n)
 local function build_range_spans(state, root, bucket_lo, bucket_hi, injection_caps, get_text_fn)
     local cursor = state.cursor
@@ -277,7 +311,9 @@ local function build_range_spans(state, root, bucket_lo, bucket_hi, injection_ca
         return idx - 1
     end
 
-    local spans = {} ---@type {start_byte:integer, end_byte:integer, cap_index:integer}[]
+    -- Ensure the persistent scratch buffer has at least initial capacity.
+    ensure_span_buf()
+    local span_count = 0
 
     for b = bucket_lo, bucket_hi - 1 do
         local bucket_start = b * BUCKET_BYTES
@@ -308,6 +344,8 @@ local function build_range_spans(state, root, bucket_lo, bucket_hi, injection_ca
         --- Emit [pos, up_to] under the current top's color, clamped to the
         --- bucket range. Captures starting before the bucket still go on
         --- the stack so their color resumes correctly inside the bucket.
+        --- Writes directly into the persistent CFFI span_buf; reallocs
+        --- if capacity is exceeded (rare: 8192 initial covers most files).
         local function emit(up_to)
             if up_to > bucket_end then
                 up_to = bucket_end
@@ -317,7 +355,13 @@ local function build_range_spans(state, root, bucket_lo, bucket_hi, injection_ca
             end
             local idx = current_cap_index()
             if idx ~= nil then
-                spans[#spans + 1] = { start_byte = pos, end_byte = up_to, cap_index = idx }
+                if span_count >= span_cap then
+                    grow_span_buf(span_cap * 2)
+                end
+                span_arr[span_count].start_byte = pos
+                span_arr[span_count].end_byte = up_to
+                span_arr[span_count].cap_index = idx
+                span_count = span_count + 1
             end
             pos = up_to
         end
@@ -350,7 +394,7 @@ local function build_range_spans(state, root, bucket_lo, bucket_hi, injection_ca
         end
     end
 
-    return spans, names
+    return span_count, names
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -358,16 +402,12 @@ end
 -- Main lane frees the buffer after installing into its cache.
 ----------------------------------------------------------------------------------------------------
 
-local HlSpansHdr_t = ffi.typeof("struct HlSpansHdr")
-local HlSpan_t = ffi.typeof("struct HlSpan")
-local HlName_t = ffi.typeof("struct HlName")
-
 --- Pack and enqueue an empty response (lane error / unknown language).
 ---@param gen integer
 ---@param bucket_start integer
 ---@param bucket_end integer
 local function send_empty_spans(gen, bucket_start, bucket_end)
-    local hdr = ffi.cast("struct HlSpansHdr *", ffi.C.calloc(1, ffi.sizeof(HlSpansHdr_t)))
+    local hdr = ffi.cast("struct HlSpansHdr *", ffi.C.calloc(1, HlSpansHdr_size))
     hdr.gen = gen
     hdr.bucket_start = bucket_start
     hdr.bucket_end = bucket_end
@@ -375,50 +415,54 @@ local function send_empty_spans(gen, bucket_start, bucket_end)
     hdr.name_count = 0
     ss:push(ss._ptr.inbox_hl, { type = constants.MSG_HL_SPANS, ptr = hdr })
 end
---- Pack spans + names into one allocation and push onto inbox_hl.
---- `buf_text` is the malloc'd text buffer the main lane sent us; the
---- lane retains it as old_text backing (tree-sitter nodes reference
---- the parser's retained input), so we keep ownership here, NOT freed.
+--- Zero-copy send: the scratch buffer (span_buf) already has spans at
+--- their final offset (right after the reserved HlSpansHdr slot). We
+--- realloc to append name space at the end, fill the header, write
+--- names, push the buffer to inbox_hl, and allocate a fresh scratch
+--- for the next query. Main lane frees the old buffer after installing.
 ---@param gen integer
 ---@param bucket_start integer first bucket this response covers (inclusive)
 ---@param bucket_end integer one past the last bucket (exclusive)
----@param spans {start_byte:integer, end_byte:integer, cap_index:integer}[]
+---@param span_count integer number of spans in span_arr
 ---@param names string[]
-local function send_spans(gen, bucket_start, bucket_end, spans, names)
-    local total = ffi.sizeof(HlSpansHdr_t)
-        + #spans * ffi.sizeof(HlSpan_t)
-        + #names * ffi.sizeof(HlName_t)
-    local buf = ffi.C.calloc(1, total)
-    if buf == nil then
-        log.error("highlight_lane", "calloc failed", { total = total })
-        ss:push(ss._ptr.inbox_hl, { type = constants.MSG_HL_SPANS, ptr = nil })
-        return
-    end
-    local hdr = ffi.cast("struct HlSpansHdr *", buf)
+local function send_spans(gen, bucket_start, bucket_end, span_count, names)
+    local name_count = #names
+    -- Realloc the scratch buffer to exactly fit header + spans + names.
+    span_buf = ffi.C.realloc(
+        span_buf,
+        HlSpansHdr_size + span_count * HlSpan_size + name_count * HlName_size
+    )
+    -- Recompute span_arr (realloc may have moved the buffer).
+    span_arr = ffi.cast("struct HlSpan *", ffi.cast("char *", span_buf) + HlSpansHdr_size)
+
+    -- Fill the header at offset 0 (reserved slot since allocation).
+    local hdr = ffi.cast("struct HlSpansHdr *", span_buf)
     hdr.gen = gen
     hdr.bucket_start = bucket_start
     hdr.bucket_end = bucket_end
-    hdr.count = #spans
-    hdr.name_count = #names
+    hdr.count = span_count
+    hdr.name_count = name_count
 
-    local span_arr = ffi.cast("struct HlSpan *", ffi.cast("char *", buf) + ffi.sizeof(HlSpansHdr_t))
-    for i, s in ipairs(spans) do
-        span_arr[i - 1].start_byte = s.start_byte
-        span_arr[i - 1].end_byte = s.end_byte
-        span_arr[i - 1].cap_index = s.cap_index
+    -- Write names after the span array (the buffer already has space).
+    if name_count > 0 then
+        local name_arr = ffi.cast(
+            "struct HlName *",
+            ffi.cast("char *", span_buf) + HlSpansHdr_size + span_count * HlSpan_size
+        )
+        for i, n in ipairs(names) do
+            local field = name_arr[i - 1].name
+            ffi.fill(field, 32, 0)
+            ffi.copy(field, n, math.min(#n, 31))
+        end
     end
 
-    local name_arr = ffi.cast(
-        "struct HlName *",
-        ffi.cast("char *", buf) + ffi.sizeof(HlSpansHdr_t) + #spans * ffi.sizeof(HlSpan_t)
-    )
-    for i, n in ipairs(names) do
-        local field = name_arr[i - 1].name
-        ffi.fill(field, 32, 0)
-        ffi.copy(field, n, math.min(#n, 31))
-    end
-
-    ss:push(ss._ptr.inbox_hl, { type = constants.MSG_HL_SPANS, ptr = buf })
+    -- Transfer ownership to main lane. The buffer we pushed is the
+    -- scratch buffer itself — main will free it. We nil out our
+    -- references so ensure_span_buf allocates a fresh one next time.
+    ss:push(ss._ptr.inbox_hl, { type = constants.MSG_HL_SPANS, ptr = span_buf })
+    span_buf = nil
+    span_arr = nil
+    span_cap = 0
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -755,7 +799,7 @@ local function handle_query(msg)
         if bucket_start > total_buckets then
             bucket_start = total_buckets
         end
-        local spans, names = build_range_spans(
+        local span_count, names = build_range_spans(
             state,
             tree:root(),
             bucket_start,
@@ -764,7 +808,7 @@ local function handle_query(msg)
             get_text_fn
         )
         local t3 = now_us()
-        send_spans(gen, bucket_start, bucket_end, spans, names)
+        send_spans(gen, bucket_start, bucket_end, span_count, names)
         local t4 = now_us()
         log.info("highlight_lane", "hl_stage", {
             gen = gen,
@@ -774,7 +818,7 @@ local function handle_query(msg)
             injection_count = injection_count,
             text_len = text_len,
             buckets = bucket_end - bucket_start,
-            span_count = #spans,
+            span_count = span_count,
             parse_us = t2 - t0,
             build_us = t3 - t2,
             send_us = t4 - t3,
