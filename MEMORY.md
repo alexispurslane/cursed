@@ -31,3 +31,8 @@ so the agent can pick up context across sessions.
 - The "indented split" failure was my test's wrong cursor column (I passed 11 instead of 10).
 - A fixed-string block opener can't express `</tag>` where the tag name varies.
 - Let me add a debug log inside the render loop to inspect `total_sub` and the cached cursor state right before the broken render:
+
+## Heavily Read
+
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/view.lua (18 reads) — Let me find the specific scrolling code in view.lua, focusing on scroll-up, scro
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/editor.lua (4 reads) — Let me read the key files related to viewport rendering and scrolling.
