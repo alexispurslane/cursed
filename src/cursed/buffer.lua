@@ -1839,7 +1839,7 @@ function Buffer:search_forward(query, start, plain)
     return function()
         while cur_line < line_count do
             local text = getter(cur_line)
-            local search_start = cur_offset + 1 + 1
+            local search_start = cur_offset + 1
 
             local s, e = text:find(query, search_start, plain)
             if s then

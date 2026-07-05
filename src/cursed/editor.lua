@@ -341,6 +341,7 @@ end
 ---@field _isearch_origin_col integer|nil saved cursor col before isearch
 ---@field _isearch_direction integer 1=forward, -1=backward
 ---@field _isearch_regex boolean|nil true when active isearch is a regex search
+---@field _isearch_match table|nil current match highlight range {line, offset, end_line, end_offset}
 ---@field _eval_result string|nil pretty-printed eval result to show in minibuffer area
 ---@field _quit_requested boolean set by M-x to signal quit from async callback
 ---@field _wake_main function? callback to wake the main select() loop from async context
@@ -406,6 +407,7 @@ function Editor.new(term)
         _isearch_origin_col = nil,
         _isearch_direction = 1,
         _isearch_regex = nil,
+        _isearch_match = nil,
         _eval_result = nil,
         _quit_requested = false,
         _background_tasks = {},
@@ -1670,21 +1672,48 @@ function Editor:start_isearch(direction, initial_query, opts)
         prompt = direction > 0 and "Search: " or "Search backward: "
     end
 
-    -- When replaying a kmacro, use 'value' to auto-submit the query
-    -- instead of opening an interactive minibuffer.
     local mb_opts = {
         prompt = prompt,
         completion = true,
         on_change = function(query)
             self:_isearch_update(query)
         end,
-        on_submit = function(_query)
-            -- Keep cursor at match, mark stays for C-x C-x jump-back
+        on_submit = function(query)
+            -- Clear the typing-phase overlay highlight.
+            self._isearch_match = nil
             self._isearch_origin_line = nil
             self._isearch_origin_col = nil
+            self._isearch_regex = nil
+            if #query == 0 then
+                return
+            end
+            -- Populate pending cursors with every match in the buffer.
+            local mv = self:current_view()
+            if not mv or not mv.file_loaded then
+                return
+            end
+            local buf = mv.buffer
+            mv.pending_cursors = {}
+            local iter, err = self:_isearch_iter(buf, query, { line = 0, offset = 0 }, 1)
+            if iter then
+                local count = 0
+                for match in iter do
+                    mv:drop_cursor(match.line, match.offset)
+                    count = count + 1
+                end
+                if count > 0 then
+                    self.status_message = count
+                        .. " matches — alt-m to commit, C-x C-n/p to navigate, C-g to cancel"
+                else
+                    self.status_message = "no matches"
+                end
+            else
+                self.status_message = "invalid regexp: " .. tostring(err)
+            end
         end,
         on_cancel = function()
-            -- Restore original point
+            -- Clean up overlay and restore original point.
+            self._isearch_match = nil
             local mv = self:current_view()
             if mv and self._isearch_origin_line then
                 mv:p().line = self._isearch_origin_line
@@ -1730,6 +1759,19 @@ function Editor:_isearch_iter(buf, query, start, direction)
     end
 end
 
+--- Highlight a match as the typing-phase overlay and jump the cursor
+--- to its start (not setting a selection).
+---@param mv View
+---@param match table {line, offset, end_line, end_offset}
+function Editor:_isearch_show_match(mv, match)
+    self._isearch_match = match
+    mv:p().line = match.line
+    mv:p().col = match.offset
+    mv:_set_goal_col(mv:p().col)
+    mv:unset_mark()
+    self.status_message = nil
+end
+
 --- Jump to the next isearch match (C-s while in isearch).
 function Editor:isearch_next()
     local main_view = self:current_view()
@@ -1742,8 +1784,13 @@ function Editor:isearch_next()
     end
 
     local buf = main_view.buffer
-    -- Search forward from end of current match
-    local start = { line = main_view:p().line, offset = main_view:p().col }
+    -- Search forward from end of current match (or cursor if no match).
+    local start
+    if self._isearch_match then
+        start = { line = self._isearch_match.end_line, offset = self._isearch_match.end_offset }
+    else
+        start = { line = main_view:p().line, offset = main_view:p().col }
+    end
     local iter, err = self:_isearch_iter(buf, query, start, 1)
     if not iter then
         self.status_message = "invalid regexp: " .. tostring(err)
@@ -1751,12 +1798,7 @@ function Editor:isearch_next()
     end
     local match = iter()
     if match then
-        main_view:p().anchor_line = match.line
-        main_view:p().anchor_col = match.offset
-        main_view:p().line = match.end_line
-        main_view:p().col = match.end_offset
-        main_view:_set_goal_col(main_view:p().col)
-        self.status_message = nil
+        self:_isearch_show_match(main_view, match)
     else
         self.status_message = "failing search"
     end
@@ -1777,10 +1819,10 @@ function Editor:isearch_prev()
     end
 
     local buf = main_view.buffer
-    -- Search backward from start of current match
+    -- Search backward from start of current match (or cursor if no match).
     local start
-    if main_view:p().anchor_line then
-        start = { line = main_view:p().anchor_line, offset = main_view:p().anchor_col }
+    if self._isearch_match then
+        start = { line = self._isearch_match.line, offset = self._isearch_match.offset }
     else
         start = { line = main_view:p().line, offset = main_view:p().col }
     end
@@ -1791,12 +1833,7 @@ function Editor:isearch_prev()
     end
     local match = iter()
     if match then
-        main_view:p().anchor_line = match.line
-        main_view:p().anchor_col = match.offset
-        main_view:p().line = match.end_line
-        main_view:p().col = match.end_offset
-        main_view:_set_goal_col(main_view:p().col)
-        self.status_message = nil
+        self:_isearch_show_match(main_view, match)
     else
         self.status_message = "failing search"
     end
@@ -1807,9 +1844,11 @@ function Editor:isearch_prev()
 end
 
 --- Internal: run isearch from the saved origin for the given query.
+--- Highlights the first match as an overlay; does not set a selection.
 ---@param query string
 function Editor:_isearch_update(query)
     if #query == 0 then
+        self._isearch_match = nil
         return
     end
     local main_view = self:current_view()
@@ -1825,12 +1864,60 @@ function Editor:_isearch_update(query)
     end
     local match = iter()
     if match then
-        main_view:p().anchor_line = match.line
-        main_view:p().anchor_col = match.offset
-        main_view:p().line = match.end_line
-        main_view:p().col = match.end_offset
-        main_view:_set_goal_col(main_view:p().col)
-        self.status_message = nil
+        self:_isearch_show_match(main_view, match)
+    else
+        self._isearch_match = nil
+    end
+end
+
+--- Navigate the primary cursor through pending cursor candidates.
+--- Called by select_next_match / select_prev_match when candidates exist.
+---@param dir integer 1=next (forward), -1=prev (backward)
+function Editor:_nav_candidate(dir)
+    local mv = self:current_view()
+    if not mv or #mv.pending_cursors == 0 then
+        return
+    end
+    local cursors = mv.pending_cursors
+    local pline = mv:p().line
+    local pcol = mv:p().col
+
+    if dir > 0 then
+        -- Find the first candidate strictly after the primary cursor.
+        for i = 1, #cursors do
+            local c = cursors[i]
+            if c.line > pline or (c.line == pline and c.col > pcol) then
+                mv:p().line = c.line
+                mv:p().col = c.col
+                mv:_set_goal_col(c.col)
+                return
+            end
+        end
+        -- Wrap to first candidate.
+        local c = cursors[1]
+        if c then
+            mv:p().line = c.line
+            mv:p().col = c.col
+            mv:_set_goal_col(c.col)
+        end
+    else
+        -- Find the first candidate strictly before the primary cursor.
+        for i = #cursors, 1, -1 do
+            local c = cursors[i]
+            if c.line < pline or (c.line == pline and c.col < pcol) then
+                mv:p().line = c.line
+                mv:p().col = c.col
+                mv:_set_goal_col(c.col)
+                return
+            end
+        end
+        -- Wrap to last candidate.
+        local c = cursors[#cursors]
+        if c then
+            mv:p().line = c.line
+            mv:p().col = c.col
+            mv:_set_goal_col(c.col)
+        end
     end
 end
 
@@ -2933,6 +3020,43 @@ function Editor:render()
                     end
                 end
 
+                -- Isearch match overlay (typing-phase match highlight).
+                -- Highlights the full byte range of the current match
+                -- using search_match_bg without touching the selection.
+                local im = self._isearch_match
+                if im then
+                    local s_col, e_col
+                    if im.line == li and im.end_line == li then
+                        s_col = im.offset
+                        e_col = im.end_offset
+                    elseif im.line == li then
+                        s_col = im.offset
+                        e_col = content_len
+                    elseif im.end_line == li then
+                        s_col = 0
+                        e_col = im.end_offset
+                    elseif li > im.line and li < im.end_line then
+                        s_col = 0
+                        e_col = content_len
+                    end
+                    if s_col and e_col and e_col > s_col then
+                        local m_fg = ui("default_fg")
+                        local m_bg = ui("search_match_bg")
+                        for _, run in ipairs(runs) do
+                            local rb = run.byte_start - 1 -- 0-based
+                            local re = run.byte_end -- 0-based past-end
+                            if rb < e_col and re > s_col then
+                                local mcol = view:byte_to_col(li, rb)
+                                    - view:byte_to_col(li, chunk_start)
+                                if mcol >= 0 and mcol <= row_w then
+                                    local ch = line_text:sub(run.byte_start, run.byte_end)
+                                    ov:put_float(text_x + mcol, row, ch, m_fg, m_bg)
+                                end
+                            end
+                        end
+                    end
+                end
+
                 -- Pending-drop markers (drop mode staged by
                 -- add_cursor_here before commit_pending_cursors).
                 -- Painted with a yellow BACKGROUND so the user can see
@@ -2940,6 +3064,18 @@ function Editor:render()
                 -- mapping as the active-cursor overlay above.
                 for _, c in ipairs(view.pending_cursors) do
                     if c.line == li then
+                        -- Skip if an active cursor already sits here (so
+                        -- the cursor overlay isn't hidden by the drop marker).
+                        local occluded = false
+                        for _, ac in ipairs(view.cursors) do
+                            if ac.line == c.line and ac.col == c.col then
+                                occluded = true
+                                break
+                            end
+                        end
+                        if occluded then
+                            goto continue
+                        end
                         local ws_t0 = profile.now_us()
                         local csub_row = select(1, view:wrap_sub_position(li, c.col))
                         t_wsub = t_wsub + (profile.now_us() - ws_t0)
@@ -2964,6 +3100,7 @@ function Editor:render()
                             end
                         end
                     end
+                    ::continue::
                 end
                 t_cur = t_cur + (profile.now_us() - cur_t0)
             end)

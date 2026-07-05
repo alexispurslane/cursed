@@ -114,6 +114,7 @@ local CONCEPT_SLOTS = {
     selection_bg = 0x02, -- base02: selection / highlight background
     selection_fg = 0x06, -- base06: bright text over the dark selection bg (legible)
     drop_bg = 0x0A, -- base0A: yellow bg for staged drop markers
+    search_match_bg = 0x0A, -- base0A: yellow bg for incremental search match highlights
     status_message = 0x0B, -- base0B: green informational messages
     status_error = 0x08, -- base08: red error messages
     -- Diagnostics (squiggly underlines): red errors, orange warnings,

@@ -1609,6 +1609,10 @@ end
 --- Adds a new cursor with an anchor at the match start and head at the
 --- match end. Repeats add successive cursors forward.
 commands.select_next_match = function(view, editor)
+    -- If search candidates exist (from isearch submit), navigate through them.
+    if view:has_pending_cursors() then
+        return editor:_nav_candidate(1)
+    end
     if not view:multi_currency_enabled() then
         return
     end
@@ -1641,6 +1645,10 @@ end
 
 --- Select the previous occurrence of the current selection's text.
 commands.select_prev_match = function(view, editor)
+    -- If search candidates exist (from isearch submit), navigate through them.
+    if view:has_pending_cursors() then
+        return editor:_nav_candidate(-1)
+    end
     local query = primary_selection_text(view)
     if not query or #query == 0 then
         return commands.prev_diagnostic(view, editor)
@@ -2309,7 +2317,7 @@ commands.select_all_matches = function(view, _editor)
     local u = tonumber(view.buffer._ptr.undo.count)
     local r = tonumber(view.buffer._ptr.redo.count)
     local new_cursors = {}
-    local iter = view.buffer:search_forward(query, { line = 0, offset = -1 }, true)
+    local iter = view.buffer:search_forward(query, { line = 0, offset = 0 }, true)
     for m in iter do
         local c = view:make_cursor(m.end_line, m.end_offset)
         c.anchor_line = m.line
