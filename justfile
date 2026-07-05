@@ -22,7 +22,7 @@ LUAJIT_BIN  := LUAJIT_SRC + "/luajit"
 TS_INC := "-I" + VENDOR_DIR + "/tree-sitter-lib/lib/include -I" + VENDOR_DIR + "/tree-sitter-lib/lib/src"
 
 # Bundled parser list
-PARSERS := "bash c go json lua markdown_block markdown_inline python rust toml tsx typescript yaml"
+PARSERS := "bash c go html json lua markdown_block markdown_inline python rust toml tsx typescript yaml"
 
 # macOS deployment target (needed by LuaJIT build and our own compile)
 # Must be consistent across all object files.

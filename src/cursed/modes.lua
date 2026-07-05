@@ -41,6 +41,7 @@ local SPECS = {
     "cursed.modes.json",
     "cursed.modes.toml",
     "cursed.modes.yaml",
+    "cursed.modes.html",
     "cursed.modes.makefile",
     "cursed.modes.markdown",
     "cursed.modes.zig",

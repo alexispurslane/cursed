@@ -13,6 +13,7 @@
 const TSLanguage *tree_sitter_bash(void);
 const TSLanguage *tree_sitter_c(void);
 const TSLanguage *tree_sitter_go(void);
+const TSLanguage *tree_sitter_html(void);
 const TSLanguage *tree_sitter_json(void);
 const TSLanguage *tree_sitter_lua(void);
 const TSLanguage *tree_sitter_python(void);

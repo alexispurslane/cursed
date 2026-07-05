@@ -88,6 +88,7 @@ local lang = {
     bash = c_api.tree_sitter_bash,
     c = c_api.tree_sitter_c,
     go = c_api.tree_sitter_go,
+    html = c_api.tree_sitter_html,
     json = c_api.tree_sitter_json,
     lua = c_api.tree_sitter_lua,
     markdown = c_api.tree_sitter_markdown,

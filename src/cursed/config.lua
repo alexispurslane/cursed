@@ -81,6 +81,7 @@ local DEFAULT_FILE_PATTERNS = {
     { "%.hpp$", "c" },
     { "%.cc$", "c" },
     { "%.go$", "go" },
+    { "%.html?$", "html" },
     { "%.lua$", "lua" },
     { "Makefile$", "makefile" },
     { "%.md$", "markdown" },

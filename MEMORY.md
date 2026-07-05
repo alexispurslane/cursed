@@ -23,7 +23,6 @@ so the agent can pick up context across sessions.
 
 ## Gotchas & Errors
 
-- ts`, which resolves tree-sitter C symbols at load time — those only exist linked into the real `cursed` binary, so headless `luajit` can't load it.
 - )` — `(stream, bytes)` where stream is `"stdout"`/`"stderr"`, or `(kind, code)` where kind is `"exited"`/`"signaled"`/`"failed"`/`"kill_sent"`.
 - Command aborted
 - === Pane ===
@@ -31,9 +30,13 @@ so the agent can pick up context across sessions.
 - The listener surfaces the spawn settle as a status message: `"language server ready (X)"` / `"not on PATH (X)"` / `"failed to start (X)"` / `"stopped (X)"`.
 - stylua --check src — Fix: The new one is `_code_action_lines_by_uri` — I need to add a field annotation.
 - stylua --check src
+- vendor/luajit/src/luajit: /tmp/vp_test.lua:33: attempt to call method 'line_count' (a nil value)
 
 ## Heavily Read
 
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/editor_listeners.lua (4 reads) — Now let me register the gutter sign. I'll add it right after the diagnostic gutt
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/commands.lua (7 reads) — Now let me read more of the context around the gutter sign registration and the 
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/editor.lua (5 reads) — Now let me read more of the context around the gutter sign registration and the
+- src/main.lua (3 reads) — Let me find the main loop itself.
+- src/cursed/editor.lua (10 reads) — Let me look at `tick_background_tasks`, `next_task_deadline`, `minibuffer_notify
+- src/cursed/editor_listeners.lua (7 reads) — Let me look at the editor_listeners `post_command_hook` and `ring_buffer_message
+- src/cursed/completion_menu.lua (6 reads) — Let me see the full `close()`, `_on_post_command`, `handle_key`, and `_tick` to 
+- src/cursed/overlay.lua (4 reads) — The diagnostic squiggle painter queues `put_underline` for every diagnostic rang
+- src/cursed/view.lua (10 reads) — The mechanism is clear:

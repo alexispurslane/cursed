@@ -280,6 +280,65 @@ local function make_block_opener_fn(closer)
     end
 end
 
+--- Dynamic-closer variant of the block opener. The closer isn't known
+--- up front (so it can't be baked into the pattern); instead a
+--- `closer_fn(left) -> string|nil` is called per cursor to derive it
+--- from the text left of the cursor. Returns nil to DECLINE that cursor
+--- (no-op insert). Used by HTML tag completion on Return: the closer is
+--- `</tag>` where `tag` is the tag name just typed, which a fixed-string
+--- block opener can't express.
+---
+--- SPLIT MODE: when the closer is ALREADY present immediately after the
+--- cursor (e.g. an earlier printable-trigger hook pre-placed `</div>`
+--- inline as `<div>|</div>`), the block text omits the closer (inserts
+--- only `\n<body_ind>\n<opener_ind>`) and the existing closer ends up on
+--- the third line. Without this, pressing Return after the inline
+--- closer would insert a SECOND `</div>`. Detection: peek at the text
+--- right of the cursor; if itPREFIXES with the closer, split.
+---
+--- Computes everything INSIDE the batch_edit callback (not precomputed)
+--- so multi-cursor edits on the same line see the post-prior-edit line
+--- text + translated cursor — `block_text`'s design, just with the
+--- per-cursor closer + split-peek layered on.
+local function make_dynamic_block_opener_fn(closer_fn)
+    return function(view, cursors)
+        if #cursors == 0 then
+            return {}
+        end
+        local buf = view.buffer
+        local block_body = {}
+        local handled = {}
+        view:batch_edit(false, function(c)
+            local line = buf:line_text(c.line)
+            local left = line:sub(1, c.col):gsub("%s+$", "")
+            local closer = closer_fn(left)
+            if closer == nil then
+                -- Declined (void/self-closing/closing tag, or the
+                -- line text no longer matches after a prior cursor's
+                -- same-line edit). No-op insert: K=0, rc=col → the
+                -- translator returns nil and this cursor is untouched.
+                local sl, sc = c.line, c.col
+                return sl, sc, sl, sc, "insert"
+            end
+            handled[#handled + 1] = c
+            local body_ind, _ind, text = block_text(view, c, closer)
+            -- Split mode: if the closer is already sitting right after
+            -- the cursor, drop the closer from the block text so we
+            -- don't double it. The existing closer becomes line 3.
+            local right = line:sub(c.col + 1)
+            if right:sub(1, #closer) == closer then
+                text = "\n" .. body_ind .. "\n" .. _ind
+            end
+            block_body[c] = body_ind
+            local sl, sc = c.line, c.col
+            local rl, rc = buf:insert_char(c.line, c.col, text)
+            return sl, sc, rl, rc, "insert_relocate", c.line + 1, #body_ind
+        end)
+        fixup_body_indent(view, block_body)
+        return handled
+    end
+end
+
 --- Insert `closer` right after the cursor; cursor stays between (`(|)`).
 --- The shared `fn` of a non-block (bracket) opener hook. Only ever
 --- attached to the `printable` trigger.
@@ -425,6 +484,32 @@ function M.opener(pattern, closer, opts)
         word = opts.word,
         trigger = "printable",
         fn = fn,
+    }
+end
+
+--- Dynamic block opener. Like `opener(pattern, closer, {block=true})`
+--- but the closer is computed per cursor by `closer_fn(left) -> string|nil`
+--- (nil = decline). Only fires on the RETURN trigger (not printable),
+--- because the typical use is a language where a SEPARATE printable
+--- hook already inline-inserts the closer (e.g. HTML's `>`-trigger
+--- `</tag>` insertion) and the Return hook needs to SPLIT that inline
+--- closer onto its own line rather than insert a second one — see
+--- `make_dynamic_block_opener_fn`'s SPLIT MODE.
+---
+--- `opts.word=true` enforces a leading word boundary on the suffix
+--- match (rarely needed for tag-shaped patterns, which are anchored by
+--- `<`/`>` punctuation anyway).
+---@param pattern string suffix pattern matched on left-of-cursor text
+---@param closer_fn function fun(left: string): string|nil
+---@param opts table? { word?: boolean }
+---@return table hook a single return-trigger hook entry
+function M.dynamic_block_opener(pattern, closer_fn, opts)
+    opts = opts or {}
+    return {
+        pattern = pattern,
+        word = opts.word,
+        trigger = "return",
+        fn = make_dynamic_block_opener_fn(closer_fn),
     }
 end
 
