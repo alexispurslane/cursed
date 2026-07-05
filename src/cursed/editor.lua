@@ -2379,6 +2379,16 @@ function Editor:render()
     --- row_bg: background to paint text-region cells with, so the
     --- active-line highlight carries through syntax spans.
     local t_hlseg, t_termprint = 0, 0
+    -- Shared cursor into the per-logical-line `line_segs` list. `runs`
+    -- (grapheme runs of a sub-row) and `line_segs` (sorted syntax spans)
+    -- both advance monotonically in byte order, AND the sub-rows of a
+    -- single logical line visit byte offsets in strictly increasing
+    -- order. So instead of walking `line_segs` from index 1 on every
+    -- `paint_run` call (O(runs × |line_segs|) per sub-row, brutal on a
+    -- single 192 KB line where |line_segs| is huge and the visible
+    -- sub-rows sit near the end of the line), we advance one cursor
+    -- across the whole logical line. Reset to 1 once per line below.
+    local seg_idx = 1
     local function paint_run(view, li, row, text_x, line_text, run, row_bg, line_segs)
         local chunk_start = run.byte_start - 1
         local chunk_end = run.byte_end
@@ -2397,29 +2407,50 @@ function Editor:render()
             return
         end
         local painted = 0 -- byte offset within chunk already painted
-        for _, s in ipairs(line_segs) do
-            -- s.cs/s.ce are line-relative bytes (0-based, [start, end)).
-            -- Filter to this run's [chunk_start, chunk_end] and translate
-            -- to run-relative offsets.
-            if s.ce > chunk_start and s.cs < chunk_end then
-                local cs = math.max(s.cs, chunk_start) - chunk_start
-                local ce = math.min(s.ce, chunk_end) - chunk_start
-                if cs > painted then
-                    tp(x, row, chunk:sub(painted + 1, cs), dfg, dbg)
-                end
-                if ce > cs then
-                    local seg_fg = focus_dim(s.fg, dbg)
-                    tp(x, row, chunk:sub(cs + 1, ce), seg_fg, dbg)
-                end
-                if ce > painted then
-                    painted = ce
-                end
-            end
-            -- segs are pre-sorted by start byte, so once we're past
-            -- the chunk, we can stop early.
+        local n = #line_segs
+        -- Skip spans that end at or before this run's chunk_start. Spans
+        -- are sorted by cs; once seg_idx passes the run, the cursor stays
+        -- parked for the *next* paint_run call (which targets a strictly
+        -- later byte range — same sub-row or next sub-row of this line).
+        while seg_idx <= n and line_segs[seg_idx].ce <= chunk_start do
+            seg_idx = seg_idx + 1
+        end
+        -- Walk intersecting spans from the cursor forward. The cursor is
+        -- advanced in-step, so each span contributes constant work across
+        -- the whole logical line.
+        while seg_idx <= n do
+            local s = line_segs[seg_idx]
+            -- spans are pre-sorted by cs; stop once we're past this run.
             if s.cs >= chunk_end then
                 break
             end
+            -- s.ce > chunk_start holds here (the skip loop above drained
+            -- every span ending at/before chunk_start).
+            local cs = math.max(s.cs, chunk_start) - chunk_start
+            local ce = math.min(s.ce, chunk_end) - chunk_start
+            if cs > painted then
+                tp(x, row, chunk:sub(painted + 1, cs), dfg, dbg)
+            end
+            if ce > cs then
+                local seg_fg = focus_dim(s.fg, dbg)
+                tp(x, row, chunk:sub(cs + 1, ce), seg_fg, dbg)
+            end
+            if ce > painted then
+                painted = ce
+            end
+            -- A span that extends past chunk_end straddles the boundary
+            -- into the next run (chunk_end_k == chunk_start_{k+1} for
+            -- contiguous graphemes — within a sub-row, and across sub-rows
+            -- of the same logical line). The skip-loop above will NOT drain
+            -- it on the next call (its s.ce > chunk_end_k = chunk_start_{k+1}),
+            -- so by PARKING the cursor here, the next paint_run invocation
+            -- hits the same span and paints its remaining bytes. Without
+            -- this park step, every multi-byte highlight span would be
+            -- painted only on the FIRST grapheme it overlaps — broken.
+            if s.ce > chunk_end then
+                break
+            end
+            seg_idx = seg_idx + 1
         end
         if painted < #chunk then
             tp(x, row, chunk:sub(painted + 1), dfg, dbg)
@@ -2536,6 +2567,7 @@ function Editor:render()
 
     local rows_t0 = profile.now_us()
     local t_strip, t_wraprows, t_subruns, t_paint, t_body = 0, 0, 0, 0, 0
+    local t_wsub, t_sel, t_cur, t_search = 0, 0, 0, 0
     local sub_count = 0
     -- Always redraw the whole viewport: start at the scroll anchor and
     -- paint every sub-row down to the bottom.
@@ -2551,14 +2583,27 @@ function Editor:render()
 
         local content_len = #display_text
 
-        -- Resolve syntax-highlight segments ONCE per logical line
-        -- (line-relative byte ranges), then have each grapheme run
-        -- filter that single list. The old path called
-        -- highlight_segments per-run (~95 calls/row on long Rust
-        -- lines → ~4.6k calls/frame, the dominant render cost).
-        local hs_t0 = profile.now_us()
-        local line_segs = view:highlight_segments(li, 0, content_len)
-        t_hlseg = t_hlseg + (profile.now_us() - hs_t0)
+        -- Resolve syntax-highlight segments ONCE per logical line,
+        -- CLIPPED to the actually-visible byte range within the line.
+        -- Deferred to the first iteration of the per-sub-row loop
+        -- below so it can use the first visible sub-row's real byte
+        -- offset (`runs[1].byte_start`) as the clip lower bound —
+        -- NOT the line's start byte (which on a 192 KB single-line
+        -- buffer with the viewport at the end after Ctrl-E would
+        -- force buckets 0–22 to be walked every render). On the test
+        -- case this skips ~22 of ~24 buckets in highlight_segments'
+        -- bucket iteration, leaving ~2–3 (~3 KB) to walk & sort.
+        -- Visible-end estimate: chunk_start + visible_rows × wrap_w × 4
+        -- (×4 for 4-byte UTF-8 worst case; clamped to content_len);
+        -- for ASCII text this is ~4× the visible bytes — still ~50×
+        -- narrower than content_len on a 192 KB line. Returned
+        -- cs/ce are relative to chunk_start; translate back to line-
+        -- relative so paint_run's run.byte_start comparisons (line-
+        -- relative 0-based) resolve cleanly.
+        local line_segs = nil
+        local line_seg_vstart = 0
+        -- Reset the shared `line_segs` cursor for this logical line.
+        seg_idx = 1
         local b = profile.now_us()
         local total_sub = view:wrap_rows(li)
         t_wraprows = t_wraprows + (profile.now_us() - b)
@@ -2674,12 +2719,36 @@ function Editor:render()
                     chunk_start = 0
                     chunk_end = 0
                 end
+                if line_segs == nil and chunk_end > chunk_start then
+                    -- Lazy clip: compute highlight segments for the
+                    -- visible byte range within this line. See the
+                    -- comment block above the per-sub-row loop.
+                    local hs_t0 = profile.now_us()
+                    local visible_rows = (max_y or 0) + 2
+                    local wrap_w = view.wrap_width or content_len
+                    local vstart = chunk_start
+                    local vend_est = vstart + visible_rows * wrap_w * 4
+                    if vend_est > content_len then
+                        vend_est = content_len
+                    end
+                    line_seg_vstart = vstart
+                    local raw_segs = view:highlight_segments(li, vstart, vend_est)
+                    if raw_segs and vstart > 0 then
+                        for i = 1, #raw_segs do
+                            raw_segs[i].cs = raw_segs[i].cs + vstart
+                            raw_segs[i].ce = raw_segs[i].ce + vstart
+                        end
+                    end
+                    line_segs = raw_segs
+                    t_hlseg = t_hlseg + (profile.now_us() - hs_t0)
+                end
                 if #runs > 0 then
                     -- Selection rendering: build the union of selected
                     -- byte ranges for THIS sub-row across ALL cursors
                     -- (multi-cursor selections render together).
                     -- sel_runs: list of {cs, ce} clamped to this sub-row,
                     -- then merged for overlapping spans.
+                    local sel_t0 = profile.now_us()
                     local sel_runs = {}
                     for rsl, rsc, rel, rec in view:selection_ranges() do
                         ---@cast rsl integer
@@ -2776,6 +2845,7 @@ function Editor:render()
                             end
                         end
                     end
+                    t_sel = t_sel + (profile.now_us() - sel_t0)
                 end
 
                 -- Indent guides: faint │ at tab-stop boundaries inside
@@ -2805,9 +2875,12 @@ function Editor:render()
                 -- renders. c.col is a byte offset; translate to the
                 -- sub-row's display column via byte_to_col so the
                 -- caret lands on the correct cell for wide glyphs.
+                local cur_t0 = profile.now_us()
                 for _, c in ipairs(view.cursors) do
                     if self._blink_on and c.line == li then
+                        local ws_t0 = profile.now_us()
                         local csub_row = select(1, view:wrap_sub_position(li, c.col))
+                        t_wsub = t_wsub + (profile.now_us() - ws_t0)
                         if csub_row == sub_row then
                             local ccol = view:byte_to_col(li, c.col)
                                 - view:byte_to_col(li, chunk_start)
@@ -2867,7 +2940,9 @@ function Editor:render()
                 -- mapping as the active-cursor overlay above.
                 for _, c in ipairs(view.pending_cursors) do
                     if c.line == li then
+                        local ws_t0 = profile.now_us()
                         local csub_row = select(1, view:wrap_sub_position(li, c.col))
+                        t_wsub = t_wsub + (profile.now_us() - ws_t0)
                         if csub_row == sub_row then
                             local ccol = view:byte_to_col(li, c.col)
                                 - view:byte_to_col(li, chunk_start)
@@ -2890,6 +2965,7 @@ function Editor:render()
                         end
                     end
                 end
+                t_cur = t_cur + (profile.now_us() - cur_t0)
             end)
             t_body = t_body + (profile.now_us() - body_t0)
             if not ok then
@@ -2915,6 +2991,10 @@ function Editor:render()
     profile.report("editor", "row_hlseg", t_hlseg)
     profile.report("editor", "row_termprint", t_termprint)
     profile.report("editor", "row_body", t_body)
+    profile.report("editor", "row_wsub", t_wsub)
+    profile.report("editor", "row_sel", t_sel)
+    profile.report("editor", "row_cur", t_cur)
+    profile.report("editor", "row_search", t_search)
     profile.span("editor", "row_loop", rows_t0)
 
     -- Cursor (only in main view when minibuffer is inactive)

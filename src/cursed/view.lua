@@ -80,6 +80,10 @@ local IH = require("cursed.input_hook")
 ---@field _graph_cache table[]|nil cache: _graph_cache[li+1] = {byte_starts, widths, prefix, line_len} (parsed grapheme skeleton, stripped-of-newline text)
 ---@field _graph_line_text string[]|nil cache: _graph_cache's source text (line w/o trailing newline) for slice-on-boundary rendering; nil if LRU-evicted while skeleton retained
 ---@field _graph_gen integer|nil cache generation counter for the grapheme cache (mirrors _wrap_gen)
+---@field _subrow_cursor table|nil cache {li, gen, wrap_width, i, row, col}: shared cursor across sequential `sub_row_runs` calls for the same logical line, so multiple consecutive queries on the SAME wrap of a long line (render loop, scrolling through a 192 KB single-line buffer) only walk the widths array ONCE per render rather than once per call.
+---@field _wrap_graph_cache table[]|nil cache: _wrap_graph_cache[li+1] = {sub_rows, sub_cols, total_rows} — per-grapheme-index (parallel to byte_starts) sub_row/sub_col at each grapheme's start, so wrap_sub_position(li, byte_offset) is O(log N) (binary search byte_starts → array lookup) instead of O(gi) (linear walk widths[1..gi]). Keyed on _graph_gen + wrap_width; invalidated on edits or resize.
+---@field _wrap_graph_gen integer|nil generation counter the _wrap_graph_cache was built against (mirrors _graph_gen)
+---@field _wrap_graph_width integer|nil wrap_width the _wrap_graph_cache was built against
 ---@field _vp_row_cache table|nil viewport-relative screen-row cache: li -> row of (li, 0) rel. to the current scroll anchor; nil = stale. The cache is scoped to a single anchor (scroll_li/scroll_sub_row) + wrap generation + wrap_width (captured in _vp_row_sig), so it is rebuilt lazily after any scroll / edit / reflow. Within a stable frame it shares one forward walk across all callers (render + overlays) instead of re-walking from the anchor per call -- O(farthest query) total, not O(N x distance).
 ---@field _vp_row_sig string|nil signature (_wrap_gen|wrap_width|scroll_li|scroll_sub_row) the _vp_row_cache was built against
 ---@field _vp_row_filled_to integer|nil highest li >= anchor covered by _vp_row_cache (forward extent)
@@ -179,6 +183,10 @@ function View.new(buffer)
         _graph_cache = nil,
         _graph_line_text = nil,
         _graph_gen = nil,
+        _subrow_cursor = nil,
+        _wrap_graph_cache = nil,
+        _wrap_graph_gen = nil,
+        _wrap_graph_width = nil,
         _vp_row_cache = nil,
         _vp_row_sig = nil,
         _vp_row_filled_to = nil,
@@ -2288,15 +2296,31 @@ function View:highlight_segments(li, chunk_start, chunk_end)
     local chunk_abs_start = line_start_byte + chunk_start
     local chunk_abs_end = math.min(line_start_byte + chunk_end, line_end_byte)
 
-    -- Union every cached bucket intersecting this line's byte range.
+    -- Union every cached bucket intersecting the CHUNK's byte range
+    -- (± a safety margin), NOT the whole line. When a long single-line
+    -- buffer is rendered with the viewport sitting at, say, byte 189K of
+    -- a 192K line, the visible window is only ~3K; iterating every
+    -- bucket covering the full line wastes work on ~30K spans that the
+    -- chunk filter would drop anyway. The margin catches spans whose
+    -- start_byte sits one bucket earlier but extends forward into the
+    -- visible window (rare in HTML/Rust — tree-sitter captures are
+    -- per-token, typically < a few hundred bytes).
+    local line_first_b = bucket_of(line_start_byte)
+    local line_last_b = bucket_of(math.max(line_end_byte - 1, line_start_byte))
+    local first_b = bucket_of(math.max(chunk_abs_start, line_start_byte)) - HL_MARGIN_BUCKETS
+    local last_b = bucket_of(math.max(chunk_abs_end - 1, line_start_byte)) + HL_MARGIN_BUCKETS
+    if first_b < line_first_b then
+        first_b = line_first_b
+    end
+    if last_b > line_last_b then
+        last_b = line_last_b
+    end
     -- Buckets come in two shapes: native cdata entries from install
     -- ({ptr,spans,fgs,lo,hi} — iterate spans[lo..hi) + fgs[i+1], zero
     -- per-span Lua allocations) and Lua-table entries from translate
     -- ({{sb,eb,fg},...} — expected to be transient off-screen bridges;
     -- the edited bucket gets re-queried, so they're short-lived). The
     -- `{}` empty-queried marker has no spans and falls through.
-    local first_b = bucket_of(line_start_byte)
-    local last_b = bucket_of(math.max(line_end_byte - 1, line_start_byte))
     local spans = {} ---@type {start_byte:integer, end_byte:integer, fg:integer}[]
     for b = first_b, last_b do
         local bucket = cache[b]
@@ -2527,6 +2551,9 @@ function View:invalidate_wrap_cache()
     self._graph_cache = nil
     self._graph_line_text = nil
     self._graph_gen = nil
+    self._wrap_graph_cache = nil
+    self._wrap_graph_gen = nil
+    self._wrap_graph_width = nil
     -- The viewport-relative screen-row cache depends on wrap_rows, so a
     -- wrap reflow (resize / edit) invalidates it. (The lookup also
     -- self-invalidates via its signature, but clearing here keeps the
@@ -2557,6 +2584,9 @@ function View:invalidate_graph_cache()
     self._graph_cache = nil
     self._graph_line_text = nil
     self._graph_gen = nil
+    self._wrap_graph_cache = nil
+    self._wrap_graph_gen = nil
+    self._wrap_graph_width = nil
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -2577,6 +2607,8 @@ local function ensure_graph_gen(view)
     if view._graph_gen ~= gen then
         view._graph_cache = nil
         view._graph_line_text = nil
+        view._wrap_graph_cache = nil
+        view._wrap_graph_gen = nil
         view._graph_gen = gen
     end
 end
@@ -2619,6 +2651,98 @@ function View:_graph(li)
     end
     tc[li + 1] = text
     return bs, w, p, entry.line_len
+end
+
+--- Get (or build lazily) the per-grapheme wrap skeleton for logical line
+--- `li`. Returns three values (all 1-indexed, parallel to `byte_starts`):
+---   sub_rows[i] = 0-based sub-row index of grapheme i's start
+---   sub_cols[i] = 0-based display column within that sub-row at gi's start
+---   total_rows = total number of sub-rows in this line (>= 1)
+--- Built by walking `widths` once per (gen, wrap_width, li) using the SAME
+--- wrapping logic as `wrap_rows`/`sub_row_runs`/`wrap_sub_position`'s old
+--- linear walk (grapheme i starts a fresh sub-row when `col + gw > w` and
+--- `col > 0`, or when `gw > w` — over-wide — the prior row terminates and
+--- the over-wide grapheme starts its own row, with the NEXT grapheme
+--- advancing to yet another fresh row). Cached; invalidated on edits or
+--- `wrap_width` change alongside the rest of the grapheme cache.
+---
+--- Once built, `wrap_sub_position(li, byte_offset)` becomes O(log N)
+--- (binary search `byte_starts` → array lookup). Critical for the cursor
+--- overlay: on a 192 KB single-line buffer with the cursor at end-of-line,
+--- the cursor overlay re-queries the SAME (li, byte_offset) per visible
+--- sub-row (just to check `csub_row == sub_row`); the old path re-walked
+--- ~192 K graphemes per call × ~25 visible sub-rows = ~4 ms/render.
+---@param li integer 0-based line index
+---@return integer[] sub_rows
+---@return integer[] sub_cols
+---@return integer total_rows
+function View:_wrap_graph(li)
+    ensure_graph_gen(self)
+    local ww = self.wrap_width or 0
+    local cache = self._wrap_graph_cache
+    if cache == nil or self._wrap_graph_gen ~= self._graph_gen or self._wrap_graph_width ~= ww then
+        cache = {}
+        self._wrap_graph_cache = cache
+        self._wrap_graph_gen = self._graph_gen
+        self._wrap_graph_width = ww
+    end
+    local entry = cache[li + 1]
+    if entry ~= nil then
+        return entry.sub_rows, entry.sub_cols, entry.total_rows
+    end
+    local _, widths, _, _ = self:_graph(li)
+    local ng = #widths
+    local sub_rows, sub_cols = {}, {}
+    if ng == 0 then
+        entry = { sub_rows = sub_rows, sub_cols = sub_cols, total_rows = 1 }
+        cache[li + 1] = entry
+        return entry.sub_rows, entry.sub_cols, entry.total_rows
+    end
+    -- No wrap_width: everything on sub_row 0; sub_col = the grapheme's
+    -- display column (= prefix[i], which byte_to_col already returns
+    -- for this case). Build pass-through arrays so wrap_sub_position's
+    -- call path is uniform regardless of wrap_width.
+    if ww <= 0 then
+        local _, _, prefix, _ = self:_graph(li)
+        for i = 1, ng do
+            sub_rows[i] = 0
+            sub_cols[i] = prefix[i]
+        end
+        entry = { sub_rows = sub_rows, sub_cols = sub_cols, total_rows = 1 }
+        cache[li + 1] = entry
+        return entry.sub_rows, entry.sub_cols, entry.total_rows
+    end
+    local row, col = 0, 0
+    for i = 1, ng do
+        local gw = widths[i]
+        local over_wide = gw > ww
+        if col + gw > ww and col > 0 then
+            row = row + 1
+            col = 0
+        end
+        sub_rows[i] = row
+        sub_cols[i] = col
+        if over_wide then
+            -- Over-wide grapheme occupies its own row; the NEXT grapheme
+            -- starts a fresh row. (Mirrors sub_row_runs / wrap_rows.)
+            row = row + 1
+            col = 0
+        else
+            col = col + gw
+        end
+    end
+    -- `row` is the LAST sub-row that contains a grapheme start (or, if
+    -- the last grapheme was over-wide, the empty row after it). The
+    -- total sub-row count is (last_grapheme's sub_row) + 1 — unless the
+    -- trailing over-wide case advanced past it (then the last actual
+    -- content sub-row is `row - 1`, so total = row). Both collapse to:
+    -- `row + 1` if the last `i==ng` iteration ended in `col = col + gw`
+    -- (i.e., row was not advanced past ng); or `row` if it was advanced.
+    -- Simpler: take `sub_rows[ng] + 1` (sub_row of the last grapheme + 1).
+    local total = sub_rows[ng] + 1
+    entry = { sub_rows = sub_rows, sub_cols = sub_cols, total_rows = total }
+    cache[li + 1] = entry
+    return entry.sub_rows, entry.sub_cols, entry.total_rows
 end
 
 --- Get the cached stripped line text (without trailing newline). This is
@@ -3287,11 +3411,21 @@ function View:wrap_sub_position(li, byte_offset)
         return 0, self:byte_to_col(li, byte_offset)
     end
     local bs, widths, _, _ = self:_graph(li)
-    local w = self.wrap_width
     local ng = #bs
     if ng == 0 then
         return 0, 0
     end
+    -- Pre-computed per-grapheme-index arrays (parallel to `bs`):
+    -- sub_rows[gi] = 0-based sub-row containing grapheme gi's start;
+    -- sub_cols[gi] = 0-based column within that sub-row at gi's start.
+    -- Built once per (gen, wrap_width, li) — the dominant caller
+    -- (cursor overlay) re-queries the SAME (li, byte_offset) once per
+    -- visible sub-row in a single render; pre-computing turns each call
+    -- into O(log N) binary search + O(1) lookup instead of O(gi)
+    -- linear walk over widths[1..gi]. On a 192 KB single-line buffer
+    -- with the cursor at end-of-line, this drops per-render cursor
+    -- overlay time from ~4 ms to sub-millisecond.
+    local sub_rows, sub_cols, _ = self:_wrap_graph(li)
     -- Locate the grapheme that contains `byte_offset`: the last grapheme
     -- whose 1-based start byte <= target (target = byte_offset + 1).
     local target = byte_offset + 1
@@ -3305,42 +3439,7 @@ function View:wrap_sub_position(li, byte_offset)
             hi = mid - 1
         end
     end
-    -- Walk to that grapheme, tracking sub-row and sub-col.
-    local row, col = 0, 0
-    for i = 1, gi do
-        local gw = widths[i]
-        local over_wide = gw > w
-        if col + gw > w and col > 0 then
-            row = row + 1
-            col = 0
-        end
-        if i == gi then
-            return row, col
-        end
-        if over_wide then
-            row = row + 1
-            col = 0
-        else
-            col = col + gw
-        end
-    end
-    -- byte_offset is past the last grapheme: report the tail of the
-    -- final row (the column just past the line's last grapheme).
-    row, col = 0, 0
-    for i = 1, ng do
-        local gw = widths[i]
-        if col + gw > w and col > 0 then
-            row = row + 1
-            col = 0
-        end
-        if gw > w then
-            row = row + 1
-            col = 0
-        else
-            col = col + gw
-        end
-    end
-    return row, col
+    return sub_rows[gi], sub_cols[gi]
 end
 
 --- Enumerate the grapheme runs that make up a single screen sub-row.
@@ -3363,9 +3462,27 @@ function View:sub_row_runs(li, sub_row)
         return runs, 0
     end
     local w = self.wrap_width or ll
-    local row, col = 0, 0
+    local n = #widths
+    local bs_n = #bs
+    -- Shared cursor across consecutive calls: as long as the line,
+    -- buffer generation, and wrap_width are unchanged AND the cursor
+    -- hasn't advanced past the requested sub_row, we resume the walk
+    -- from where the previous call broke. The render loop queries
+    -- sub_rows in strictly increasing order (sub_row = scroll_sub_row,
+    -- +1, +2, …), so a single O(N+visible) walk replaces O(visible × N)
+    -- work. If the caller asks for an earlier sub_row (rare: a non-render
+    -- caller iterating out of order, or a scroll/resize changed the
+    -- starting row), the cursor's invariant (c.row <= sub_row) fails
+    -- and we fall back to a full restart walk.
+    local c = self._subrow_cursor
+    local i, row, col
+    if c and c.li == li and c.gen == self._graph_gen and c.wrap_width == w and c.row <= sub_row then
+        i, row, col = c.i, c.row, c.col
+    else
+        i, row, col = 1, 0, 0
+    end
     local row_w = 0
-    for i = 1, #widths do
+    while i <= n do
         local gw = widths[i]
         local over_wide = gw > w
         if col + gw > w and col > 0 then
@@ -3374,7 +3491,7 @@ function View:sub_row_runs(li, sub_row)
         end
         if row == sub_row then
             local bstart = bs[i]
-            local bend = (i + 1 <= #bs) and (bs[i + 1] - 1) or ll
+            local bend = (i + 1 <= bs_n) and (bs[i + 1] - 1) or ll
             runs[#runs + 1] = {
                 byte_start = bstart,
                 byte_end = bend,
@@ -3391,6 +3508,29 @@ function View:sub_row_runs(li, sub_row)
         else
             col = col + gw
         end
+        i = i + 1
+    end
+    -- Persist cursor state for the next call ONLY when we broke out
+    -- via `row > sub_row` (the normal monotonically-ascending case).
+    -- If instead the while-loop exited because `i > n` (line exhausted
+    -- without finding a row greater than `sub_row` — happens when the
+    -- requested sub_row is the LAST in this line), the parked state is
+    -- useless to the next caller: `c.row == sub_row` would pass our
+    -- resume check, but starting from i=n+1 immediately short-circuits
+    -- to an empty runs list (the blank-screen bug after Ctrl-E jumps to
+    -- end-of-line). Drop the cache so the next call restarts from i=1
+    -- and re-derives the runs for this sub_row.
+    if row > sub_row then
+        self._subrow_cursor = {
+            li = li,
+            gen = self._graph_gen,
+            wrap_width = w,
+            i = i,
+            row = row,
+            col = col,
+        }
+    else
+        self._subrow_cursor = nil
     end
     return runs, row_w
 end
