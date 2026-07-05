@@ -6,6 +6,14 @@
 
 This is a simple, vibe-coded (but architected in-detail, with huge attention to performance, coherent architecture, maintainability, and extensibility) attempt to build my personal vision of an Emacs 2.0 using LuaJIT+CFFI. Use at your own risk.
 
+## Headline Performance Numbers
+
+All single-threaded editor work happens on the main thread, off a single core, with the reported framerates sustained under continuous, non-stop interaction:
+
+- **192,000-character single line of HTML, fully tree-sitter highlighted**: scrolling at **200 fps**.
+- **40,000-line Rust file**: scrolling, navigating, jumping, `expand-region`ing, and running LSP completions + diagnostics at **600 fps**.
+- **35 MB plain-text file**: editing with multiple cursors at **600 fps**.
+
 Most of the editor concepts --- and keybindings --- are derived from Emacs, but have been generalized and updated. For instance:
 
 - The core UI concept (used as the backing for view surfaces --- usually of files --- and the minibuffer prompt) is also a buffer, but buffers are now line-wise piece tables

@@ -34,5 +34,6 @@ so the agent can pick up context across sessions.
 
 ## Heavily Read
 
-- src/cursed/editor.lua (10 reads) — Now I understand the data flow. Key facts I'll use:
-- src/cursed/view.lua (19 reads) — Confirmed — the file is a single 192,162-character line. Now let me confirm the
+- src/cursed/editor.lua (25 reads) — Let me look at all the consumers of `line_segs` and how they expect callsites to
+- src/cursed/view.lua (27 reads) — Let me look at the wrap-related helpers to find the best way to compute the visi
+- src/cursed/utf8.lua (3 reads) — I was wrong in my prior message — `byte_to_col` is already binary-search-based.
