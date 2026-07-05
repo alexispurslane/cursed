@@ -3081,16 +3081,20 @@ function View:viewport_line_at_row(rel_row)
     local li = self.scroll_li or 0
     local sub = self.scroll_sub_row or 0
     local remaining = rel_row
-    while remaining > 0 and li < n - 1 do
+    while remaining > 0 do
         local rows = self:wrap_rows(li) or 1
         local avail = rows - 1 - sub
         if remaining <= avail then
             sub = sub + remaining
             remaining = 0
-        else
+        elseif li < n - 1 then
             remaining = remaining - avail - 1
             li = li + 1
             sub = 0
+        else
+            -- Last sub-row of the last line; can't advance further.
+            sub = rows - 1
+            remaining = 0
         end
     end
     return li, sub
@@ -3118,22 +3122,19 @@ function View:walk_sub_rows(li, sub, delta)
     end
     if delta > 0 then
         local remaining = delta
-        while remaining > 0 and li < n - 1 do
+        while remaining > 0 do
             local rows = self:wrap_rows(li) or 1
             local avail = rows - 1 - sub
             if remaining <= avail then
                 sub = sub + remaining
                 remaining = 0
-            else
+            elseif li < n - 1 then
                 remaining = remaining - avail - 1
                 li = li + 1
                 sub = 0
-            end
-        end
-        if li >= n - 1 then
-            local last_rows = self:wrap_rows(n - 1) or 1
-            if remaining > 0 and sub >= last_rows - 1 then
-                sub = last_rows - 1
+            else
+                -- Last sub-row of the last line; can't advance further.
+                sub = rows - 1
                 return li, sub, "end"
             end
         end
@@ -3258,16 +3259,20 @@ function View:scroll_anchor(delta)
     local sub = self.scroll_sub_row or 0
     if delta > 0 then
         local remaining = delta
-        while remaining > 0 and li < n - 1 do
+        while remaining > 0 do
             local rows = self:wrap_rows(li) or 1
             local avail = rows - 1 - sub
             if remaining <= avail then
                 sub = sub + remaining
                 remaining = 0
-            else
+            elseif li < n - 1 then
                 remaining = remaining - avail - 1
                 li = li + 1
                 sub = 0
+            else
+                -- Last sub-row of the last line; can't advance further.
+                sub = rows - 1
+                remaining = 0
             end
         end
     else

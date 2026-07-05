@@ -31,9 +31,3 @@ so the agent can pick up context across sessions.
 - The "indented split" failure was my test's wrong cursor column (I passed 11 instead of 10).
 - A fixed-string block opener can't express `</tag>` where the tag name varies.
 - Let me add a debug log inside the render loop to inspect `total_sub` and the cached cursor state right before the broken render:
-
-## Heavily Read
-
-- src/cursed/editor.lua (25 reads) — Let me look at all the consumers of `line_segs` and how they expect callsites to
-- src/cursed/view.lua (27 reads) — Let me look at the wrap-related helpers to find the best way to compute the visi
-- src/cursed/utf8.lua (3 reads) — I was wrong in my prior message — `byte_to_col` is already binary-search-based.
