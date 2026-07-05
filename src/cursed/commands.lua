@@ -760,6 +760,24 @@ commands.find_file = function(view, editor)
     })
 end
 
+--- Fuzzy find-file: project-wide recursive search with fzy scoring.
+--- Uses fts(3) to walk the workspace tree and ranks files by how well
+--- they match the query. The file index is TTL-cached (5s default) and
+--- rebuilds lazily on cache expiry.
+commands.fuzzy_find_file = function(view, editor)
+    editor:read_from_minibuffer({
+        prompt = "Fuzzy find file: ",
+        completion = true,
+        completer = completers.fuzzy_find_file(editor),
+        on_submit = function(input)
+            if #input == 0 then
+                return
+            end
+            editor:open_file(input)
+        end,
+    })
+end
+
 ----------------------------------------------------------------------------------------------------
 -- Load & evaluate a Lua file (Emacs `load-file`).
 --

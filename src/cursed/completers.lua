@@ -113,12 +113,24 @@ function completers.commands(names_fn, chord_fn)
 end
 
 ----------------------------------------------------------------------------------------------------
--- Find-file completion
+-- Find-file completion (substring, single-directory)
 ----------------------------------------------------------------------------------------------------
 
 --- File path completer — subword-matches against directory entries.
 --- Re-exports find_file.find_file_completer for a single import point.
 completers.find_file = find_file.find_file_completer
+
+----------------------------------------------------------------------------------------------------
+-- Fuzzy find-file completion (fzy scoring, project-wide recursive)
+----------------------------------------------------------------------------------------------------
+
+--- Project-wide fuzzy file finder with fzy scoring.
+--- Takes the editor to capture workspace_dir for the file index.
+---@param editor Editor
+---@return fun(text: string): string[]
+function completers.fuzzy_find_file(editor)
+    return find_file.fuzzy_find_file_completer(editor)
+end
 
 ----------------------------------------------------------------------------------------------------
 -- Theme completion (M-x load-theme)

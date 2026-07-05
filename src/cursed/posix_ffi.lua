@@ -86,6 +86,53 @@ int closedir(DIR *dirp);
 ]])
 
 ----------------------------------------------------------------------------------------------------
+-- fts(3) — BSD/macOS hierarchical directory walker
+----------------------------------------------------------------------------------------------------
+ffi.cdef([[
+typedef struct _ftsent {
+    struct _ftsent *fts_cycle;
+    struct _ftsent *fts_parent;
+    struct _ftsent *fts_link;
+    long            fts_number;
+    void           *fts_pointer;
+    char           *fts_accpath;
+    char           *fts_path;
+    int             fts_errno;
+    int             fts_symfd;
+    unsigned short  fts_pathlen;
+    unsigned short  fts_namelen;
+    unsigned long long fts_ino;   /* ino_t = uint64_t */
+    unsigned int    fts_dev;      /* dev_t = int32_t  */
+    unsigned short  fts_nlink;    /* nlink_t = uint16_t */
+    short           fts_level;
+    unsigned short  fts_info;
+    unsigned short  fts_flags;
+    unsigned short  fts_instr;
+    void           *fts_statp;    /* struct stat * */
+    char            fts_name[1];
+} FTSENT;
+
+typedef struct {
+    struct _ftsent *fts_cur;
+    struct _ftsent *fts_child;
+    struct _ftsent **fts_array;
+    unsigned int    fts_dev;      /* dev_t = int32_t */
+    char           *fts_path;
+    int             fts_rfd;
+    int             fts_pathlen;
+    int             fts_nitems;
+    int           (*fts_compar)(const FTSENT **, const FTSENT **);
+    int             fts_options;
+} FTS;
+
+FTS *fts_open(const char **path_argv, int options,
+              int (*compar)(const FTSENT **, const FTSENT **));
+FTSENT *fts_read(FTS *ftsp);
+int fts_close(FTS *ftsp);
+int fts_set(FTS *ftsp, FTSENT *f, int options);
+]])
+
+----------------------------------------------------------------------------------------------------
 -- Constants
 ----------------------------------------------------------------------------------------------------
 
@@ -105,6 +152,21 @@ local POLLHUP = 0x0010
 local POLLNVAL = 0x0020
 local DT_DIR = 4
 local DT_REG = 8
+
+-- fts_open(3) options (macOS <fts.h>)
+local FTS_PHYSICAL = 0x010 -- don't follow symlinks
+local FTS_NOCHDIR = 0x004 -- don't chdir into directories
+
+-- fts_info values (macOS <fts.h>)
+local FTS_D = 1 -- pre-order directory
+local FTS_DNR = 4 -- unreadable directory
+local FTS_DP = 6 -- post-order directory
+local FTS_ERR = 7 -- error; errno set
+local FTS_F = 8 -- regular file
+local FTS_NS = 10 -- stat(2) failed
+local FTS_NSOK = 11 -- no stat(2) requested
+local FTS_SL = 12 -- symbolic link
+local FTS_SLNONE = 13 -- symbolic link without target
 
 ----------------------------------------------------------------------------------------------------
 -- select(2) helpers
@@ -161,6 +223,16 @@ return {
     O_NONBLOCK = O_NONBLOCK,
     DT_DIR = DT_DIR,
     DT_REG = DT_REG,
+    FTS_PHYSICAL = FTS_PHYSICAL,
+    FTS_NOCHDIR = FTS_NOCHDIR,
+    FTS_D = FTS_D,
+    FTS_DNR = FTS_DNR,
+    FTS_DP = FTS_DP,
+    FTS_ERR = FTS_ERR,
+    FTS_F = FTS_F,
+    FTS_NS = FTS_NS,
+    FTS_SL = FTS_SL,
+    FTS_SLNONE = FTS_SLNONE,
     O_WRONLY = O_WRONLY,
     O_CREAT = O_CREAT,
     O_TRUNC = O_TRUNC,

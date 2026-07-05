@@ -260,11 +260,74 @@ local function find_file_completer(text)
 end
 
 ----------------------------------------------------------------------------------------------------
+-- Fuzzy find-file: project-wide recursive matching with fzy scoring
+----------------------------------------------------------------------------------------------------
+
+local fzy = require("cursed.fzy")
+local FileIndex = require("cursed.file_index")
+
+--- Maximum number of fuzzy matches to return (avoids overwhelming the
+--- completion menu on large projects).
+local FUZZY_MAX_RESULTS = 50
+
+--- Project-wide fuzzy file finder using fts(3) + fzy scoring.
+--- Returns a completer closure that captures the editor's workspace dir.
+---@param editor Editor
+---@return fun(text: string): string[]
+local function fuzzy_find_file_completer(editor)
+    local workspace = editor.workspace_dir or "."
+    local idx = FileIndex.for_dir(workspace)
+
+    return function(text)
+        local query = text:match("^%s*(.-)%s*$") -- trim
+
+        local files = idx:get_files()
+        if #files == 0 then
+            return {}
+        end
+
+        -- No query: return first N files alphabetically as a preview.
+        if #query == 0 then
+            local limit = math.min(#files, FUZZY_MAX_RESULTS)
+            local r = {}
+            for i = 1, limit do
+                r[i] = files[i]
+            end
+            return r
+        end
+
+        -- Score every file against the query.
+        local scored = {}
+        for _, path in ipairs(files) do
+            local s = fzy.score(query, path)
+            if s ~= nil then
+                scored[#scored + 1] = { path = path, score = s }
+            end
+        end
+
+        -- Sort by score descending (higher is better).
+        table.sort(scored, function(a, b)
+            return a.score > b.score
+        end)
+
+        -- Return top N.
+        local limit = math.min(#scored, FUZZY_MAX_RESULTS)
+        local results = {}
+        for i = 1, limit do
+            results[i] = scored[i].path
+        end
+
+        return results
+    end
+end
+
+----------------------------------------------------------------------------------------------------
 -- Module export
 ----------------------------------------------------------------------------------------------------
 
 return {
     find_file_completer = find_file_completer,
+    fuzzy_find_file_completer = fuzzy_find_file_completer,
     is_directory = is_directory,
     expand_path = expand_path,
 }
