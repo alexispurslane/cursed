@@ -342,6 +342,7 @@ end
 ---@field _isearch_direction integer 1=forward, -1=backward
 ---@field _isearch_regex boolean|nil true when active isearch is a regex search
 ---@field _isearch_match table|nil current match highlight range {line, offset, end_line, end_offset}
+---@field _query_ranges table|nil parallel array of {end_line, end_offset} for pending cursors in replace mode
 ---@field _eval_result string|nil pretty-printed eval result to show in minibuffer area
 ---@field _quit_requested boolean set by M-x to signal quit from async callback
 ---@field _wake_main function? callback to wake the main select() loop from async context
@@ -408,6 +409,7 @@ function Editor.new(term)
         _isearch_direction = 1,
         _isearch_regex = nil,
         _isearch_match = nil,
+        _query_ranges = nil,
         _eval_result = nil,
         _quit_requested = false,
         _background_tasks = {},
@@ -1921,14 +1923,84 @@ function Editor:_nav_candidate(dir)
     end
 end
 
+--- Promote the pending cursor at the primary cursor's position to a real
+--- cursor. If _query_ranges is set (replace mode), applies the match range
+--- as a full selection. Removes the promoted candidate from both arrays.
+---@return boolean true if a candidate was promoted
+function Editor:_promote_candidate_at_primary()
+    local mv = self:current_view()
+    if not mv then
+        return false
+    end
+    local p = mv:p()
+    local pending = mv.pending_cursors
+    local ranges = self._query_ranges
+
+    for i = 1, #pending do
+        local c = pending[i]
+        if c.line == p.line and c.col == p.col then
+            local nc = mv:make_cursor(p.line, p.col)
+            if ranges and ranges[i] then
+                nc.anchor_line = nc.line
+                nc.anchor_col = nc.col
+                nc.line = ranges[i].end_line
+                nc.col = ranges[i].end_offset
+                nc.anchor_transient = nil
+            end
+            table.insert(mv.cursors, nc)
+            table.remove(pending, i)
+            if ranges then
+                table.remove(ranges, i)
+            end
+            return true
+        end
+    end
+    return false
+end
+
+--- Handle a printable key during query-replace candidate mode.
+--- y = promote current candidate + advance to next.
+--- n = skip current candidate + advance to next.
+--- Returns true if the key was consumed.
+---@param ch string single printable character
+---@return boolean
+function Editor:_handle_query_candidate_key(ch)
+    if not self._query_ranges then
+        return false
+    end
+    local mv = self:current_view()
+    if not mv or #mv.pending_cursors == 0 then
+        self._query_ranges = nil
+        return false
+    end
+    if ch == "y" then
+        self:_promote_candidate_at_primary()
+        if #mv.pending_cursors > 0 then
+            self:_nav_candidate(1)
+        else
+            self._query_ranges = nil
+            self.status_message = "all candidates promoted — type to replace"
+        end
+        return true
+    elseif ch == "n" then
+        if #mv.pending_cursors > 0 then
+            self:_nav_candidate(1)
+        else
+            self._query_ranges = nil
+        end
+        return true
+    end
+    return false
+end
+
 ----------------------------------------------------------------------------------------------------
 -- Query replace
 ----------------------------------------------------------------------------------------------------
 
 --- Start an incremental query-replace session.
---- Step 1: minibuffer for search string (incremental highlight like isearch)
---- Step 2: minibuffer for replacement string
---- Step 3: auto-accept minibuffer with yes/no/all to walk matches
+--- Same candidate-cursor model as isearch: typing previews with overlay,
+--- Enter populates candidates with match ranges. alt-m promotes + sets
+--- selections; typing then replaces all selections at once (multi-cursor).
 ---@param initial_query string? optional pre-fill from selection
 function Editor:start_query_replace(initial_query)
     local main_view = self:current_view()
@@ -1947,249 +2019,76 @@ function Editor:start_query_replace(initial_query)
         end
     end
 
-    -- Save point for C-g cancel
-    local origin_line = main_view:p().line
-    local origin_col = main_view:p().col
+    -- Save original point for C-g cancel. Reuse isearch overlay machinery.
+    self._isearch_origin_line = main_view:p().line
+    self._isearch_origin_col = main_view:p().col
+    self._isearch_direction = 1 -- always forward for query-replace
+    self._isearch_regex = false -- plain substring match
 
-    self:read_from_minibuffer({
+    local mb_opts = {
         prompt = "Query replace: ",
-        initial = initial_query,
+        completion = true,
         on_change = function(query)
+            self:_isearch_update(query)
+        end,
+        on_submit = function(query)
+            -- Clear the typing-phase overlay highlight.
+            self._isearch_match = nil
+            self._isearch_origin_line = nil
+            self._isearch_origin_col = nil
             if #query == 0 then
                 return
             end
+            -- Populate pending cursors AND query ranges with every match.
             local mv = self:current_view()
-            if not mv then
+            if not mv or not mv.file_loaded then
                 return
             end
             local buf = mv.buffer
-            local start = { line = mv:p().line, offset = mv:p().col }
-            local iter = buf:search_forward(query, start, true)
-            local match = iter()
-            if match then
-                mv:p().anchor_line = match.line
-                mv:p().anchor_col = match.offset
-                mv:p().line = match.end_line
-                mv:p().col = match.end_offset
+            mv.pending_cursors = {}
+            self._query_ranges = {}
+            local iter, err = self:_isearch_iter(buf, query, { line = 0, offset = 0 }, 1)
+            if iter then
+                local count = 0
+                for match in iter do
+                    mv:drop_cursor(match.line, match.offset)
+                    self._query_ranges[#self._query_ranges + 1] = {
+                        end_line = match.end_line,
+                        end_offset = match.end_offset,
+                    }
+                    count = count + 1
+                end
+                if count > 0 then
+                    self.status_message = count
+                        .. " matches — alt-m to commit (with selections), C-x C-n/p to navigate, C-g to cancel"
+                else
+                    self.status_message = "no matches"
+                    self._query_ranges = nil
+                end
+            else
+                self.status_message = "invalid regexp: " .. tostring(err)
+                self._query_ranges = nil
+            end
+        end,
+        on_cancel = function()
+            -- Clean up overlay and restore original point.
+            self._isearch_match = nil
+            self._query_ranges = nil
+            local mv = self:current_view()
+            if mv and self._isearch_origin_line then
+                mv:p().line = self._isearch_origin_line
+                mv:p().col = self._isearch_origin_col
                 mv:_set_goal_col(mv:p().col)
-            end
-        end,
-        on_submit = function(query)
-            if #query == 0 then
-                return
-            end
-            self:_query_replace_step2(query, origin_line, origin_col)
-        end,
-        on_cancel = function()
-            local mv = self:current_view()
-            if mv then
-                mv:p().line = origin_line
-                mv:p().col = origin_col
-                mv:_set_goal_col(origin_col)
                 mv:unset_mark()
             end
+            self._isearch_origin_line = nil
+            self._isearch_origin_col = nil
         end,
-    })
-end
+    }
 
---- Step 2 of query-replace: ask for the replacement string.
----@param query string the search string
----@param origin_line integer cursor line before the whole operation
----@param origin_col integer cursor col before the whole operation
-function Editor:_query_replace_step2(query, origin_line, origin_col)
-    self:read_from_minibuffer({
-        prompt = "Query replace " .. query .. " with: ",
-        on_submit = function(replacement)
-            self:_query_replace_step3(query, replacement, origin_line, origin_col)
-        end,
-        on_cancel = function()
-            local mv = self:current_view()
-            if mv then
-                mv:p().line = origin_line
-                mv:p().col = origin_col
-                mv:_set_goal_col(origin_col)
-                mv:unset_mark()
-            end
-        end,
-    })
-end
+    mb_opts.initial = initial_query
 
---- Step 3 of query-replace: walk matches with yes/no/all auto-accept.
----@param query string
----@param replacement string
----@param origin_line integer
----@param origin_col integer
-function Editor:_query_replace_step3(query, replacement, origin_line, origin_col)
-    local main_view = self:current_view()
-    if not main_view then
-        return
-    end
-
-    -- Start search from the saved origin (before step 1 highlighting moved the cursor)
-    main_view:p().line = origin_line
-    main_view:p().col = origin_col
-    main_view:unset_mark()
-
-    -- Find the first match
-    local buf = main_view.buffer
-    local start = { line = origin_line, offset = origin_col }
-    local iter = buf:search_forward(query, start, true)
-    local match = iter()
-
-    if not match then
-        self.status_message = "no matches"
-        -- Restore origin
-        main_view:p().line = origin_line
-        main_view:p().col = origin_col
-        main_view:_set_goal_col(origin_col)
-        return
-    end
-
-    -- Highlight the first match
-    main_view:p().anchor_line = match.line
-    main_view:p().anchor_col = match.offset
-    main_view:p().line = match.end_line
-    main_view:p().col = match.end_offset
-    main_view:_set_goal_col(main_view:p().col)
-
-    self:_query_replace_prompt(query, replacement)
-end
-
---- Show the yes/no/all auto-accept prompt for the current match.
----@param query string
----@param replacement string
-function Editor:_query_replace_prompt(query, replacement)
-    self:read_from_minibuffer({
-        prompt = "Replace? ",
-        completion = true,
-        auto_accept = true,
-        completer = completers.yes_no_all(),
-        on_submit = function(answer)
-            log.info("replace", "on_submit", { answer = answer })
-            answer = answer:lower()
-            if answer == "y" then
-                if self:_query_replace_one(query, replacement) then
-                    if self:_query_replace_find_next(query) then
-                        self:_query_replace_prompt(query, replacement)
-                    end
-                end
-            elseif answer == "a" then
-                self:_query_replace_all(query, replacement)
-            else -- "n"
-                if self:_query_replace_find_next(query) then
-                    self:_query_replace_prompt(query, replacement)
-                end
-            end
-        end,
-        on_cancel = function()
-            local mv = self:current_view()
-            if mv then
-                mv:unset_mark()
-            end
-        end,
-    })
-end
-
---- Replace the currently-highlighted match and return true if successful.
----@param query string
----@param replacement string
----@return boolean
-function Editor:_query_replace_one(query, replacement)
-    local main_view = self:current_view()
-    if not main_view then
-        return false
-    end
-    local buf = main_view.buffer
-
-    if not main_view:p().anchor_line then
-        return false
-    end
-
-    local sl, sc, el, ec = main_view:selection_range()
-    if not sl then
-        return false
-    end
-    ---@cast sc integer
-    ---@cast el integer
-    ---@cast ec integer
-
-    local n = main_view:chars_between(sl, sc, el, ec)
-    if n > 0 then
-        buf:begin_edit()
-        buf:delete_char(sl, sc, n)
-        local rl, rc = buf:insert_char(sl, sc, replacement)
-        buf:end_edit()
-        main_view:p().line = rl
-        main_view:p().col = rc
-        main_view:_set_goal_col(rc)
-    else
-        main_view:p().line = sl
-        main_view:p().col = sc
-        main_view:_set_goal_col(sc)
-    end
-    main_view:unset_mark()
-    return true
-end
-
---- Find the next match and highlight it. Returns false if no more matches.
----@param query string
----@return boolean
-function Editor:_query_replace_find_next(query)
-    local main_view = self:current_view()
-    if not main_view then
-        return false
-    end
-    local buf = main_view.buffer
-    local start = { line = main_view:p().line, offset = main_view:p().col }
-    local iter = buf:search_forward(query, start, true)
-    local match = iter()
-
-    if not match then
-        self.status_message = "no more matches"
-        return false
-    end
-
-    main_view:p().anchor_line = match.line
-    main_view:p().anchor_col = match.offset
-    main_view:p().line = match.end_line
-    main_view:p().col = match.end_offset
-    main_view:_set_goal_col(main_view:p().col)
-    return true
-end
-
---- Replace all remaining matches by chaining through the minibuffer.
---- Each replacement yields back to the event loop, avoiding
---- long synchronous mutation chains that corrupt piece table state.
----@param query string
----@param replacement string
-function Editor:_query_replace_all(query, replacement)
-    local main_view = self:current_view()
-    if not main_view then
-        return
-    end
-    local buf = main_view.buffer
-
-    -- Single edit group: one undo step for the entire replace-all.
-    -- The group spans multiple main-loop iterations (funky but fine).
-    buf:begin_edit()
-    local count = 0
-    self:push_background_task(function()
-        if not self:_query_replace_one(query, replacement) then
-            buf:end_edit()
-            self.status_message = "replaced " .. count .. " occurrences"
-            return true -- done
-        end
-        count = count + 1
-        if count % 100 == 0 then
-            log.info("replace", "progress", { count = count })
-        end
-        if not self:_query_replace_find_next(query) then
-            buf:end_edit()
-            self.status_message = "replaced " .. count .. " occurrences"
-            return true -- done
-        end
-        return false -- more work
-    end)
+    self:read_from_minibuffer(mb_opts)
 end
 
 ----------------------------------------------------------------------------------------------------

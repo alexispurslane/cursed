@@ -456,6 +456,14 @@ local function process_key(editor, view, trie, key_state, key_node, token, ev, p
         end
     end
 
+    -- Query-replace candidate intercept: y/n single-char keys promote
+    -- or skip the current candidate during a replace session.
+    if editor._query_ranges and is_printable and ch then
+        if editor:_handle_query_candidate_key(ch) then
+            return key_state, key_node, nil
+        end
+    end
+
     -- M-digit / M-- prefix argument interception.
     -- alt-0..alt-9 accumulate digits; alt-- sets negative.
     -- These are intercepted before the trie so they don't conflict

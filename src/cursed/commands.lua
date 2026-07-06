@@ -1082,6 +1082,35 @@ commands.query_replace = function(view, editor)
     editor:start_query_replace(query and tostring(query))
 end
 
+--- Promote the candidate at the primary cursor to a real cursor (with
+--- selection if in replace mode), then advance to the next candidate.
+--- Used as the "y" action during query-replace candidate navigation.
+commands.replace_promote_and_next = function(view, editor)
+    if not view:has_pending_cursors() then
+        return
+    end
+    editor:_promote_candidate_at_primary()
+    if #view.pending_cursors == 0 then
+        editor._query_ranges = nil
+        editor.status_message = "all candidates promoted — type to replace"
+    else
+        editor:_nav_candidate(1)
+    end
+end
+
+--- Skip the candidate at the primary cursor and advance to the next.
+--- Used as the "n" action during query-replace candidate navigation.
+commands.replace_skip_and_next = function(view, editor)
+    if not view:has_pending_cursors() then
+        return
+    end
+    if #view.pending_cursors > 0 then
+        editor:_nav_candidate(1)
+    else
+        editor._query_ranges = nil
+    end
+end
+
 ----------------------------------------------------------------------------------------------------
 -- Eval command
 ---------------------------------------------------------------------------------------------------
@@ -2361,7 +2390,32 @@ commands.commit_pending_cursors = function(view, editor)
         return
     end
     local n = #view.pending_cursors
+    local old_count = #view.cursors
     view:commit_pending_cursors()
+
+    -- If this is a query-replace commit, apply match ranges as selections
+    -- on the newly promoted cursors. Each range is parallel to the pending
+    -- cursor list and carries the match's end position.
+    if editor and editor._query_ranges then
+        local ranges = editor._query_ranges
+        for i = 1, n do
+            local c = view.cursors[old_count + i]
+            local r = ranges[i]
+            if c and r then
+                c.anchor_line = c.line
+                c.anchor_col = c.col
+                c.line = r.end_line
+                c.col = r.end_offset
+                c.anchor_transient = nil
+            end
+        end
+        editor._query_ranges = nil
+        if editor then
+            editor.status_message = (n .. " selections active — type to replace")
+        end
+        return
+    end
+
     if editor then
         editor.status_message = (#view.cursors .. " cursors active")
     end
