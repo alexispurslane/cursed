@@ -159,7 +159,9 @@ return {
     ["ctrl-l"] = "recenter",
 
     -- Search (C-s/C-r isearch unchanged; alt-% query-replace; regex
-    -- isearch available via M-x isearch-forward-regexp / backward)
+    -- isearch available via M-x isearch-forward-regexp / backward).
+    -- query-replace-regexp is reachable via M-x (the C-M-% chord is not
+    -- encodable on most terminals).
     ["ctrl-s"] = "isearch_forward",
     ["ctrl-r"] = "isearch_backward",
     ["alt-%"] = "query_replace",
@@ -207,6 +209,7 @@ return {
     ["ctrl-x a"] = "select_all_matches",
     ["ctrl-x S"] = "split_selection_into_lines",
     ["alt-;"] = "add_cursor_here",
+    ["alt-,"] = "add_cursor_at_candidate",
     ["alt-m"] = "commit_pending_cursors",
     ["alt-up"] = "add_cursor_up",
     ["alt-down"] = "add_cursor_down",

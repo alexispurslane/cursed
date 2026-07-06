@@ -343,6 +343,13 @@ end
 ---@field _isearch_regex boolean|nil true when active isearch is a regex search
 ---@field _isearch_match table|nil current match highlight range {line, offset, end_line, end_offset}
 ---@field _query_ranges table|nil parallel array of {end_line, end_offset} for pending cursors in replace mode
+---@field _replace_regexp_active boolean|nil true while in a query-replace-regexp y/n batch walk
+---@field _query_replace_template string|nil replacement template (\&, \1..\9) for the active regexp-replace
+---@field _query_captures table|nil parallel to pending_cursors: {end_line, end_offset, caps} per match
+---@field _query_replacements table|nil stashed accepted replacements {line, offset, end_line, end_offset, text}
+---@field _replace_regexp_origin_line integer|nil saved primary cursor line for C-g cancel
+---@field _replace_regexp_origin_col integer|nil saved primary cursor col for C-g cancel
+---@field _diag_hover_visible boolean|nil true while a diagnostic hover popup is currently visible
 ---@field _eval_result string|nil pretty-printed eval result to show in minibuffer area
 ---@field _quit_requested boolean set by M-x to signal quit from async callback
 ---@field _wake_main function? callback to wake the main select() loop from async context
@@ -410,6 +417,12 @@ function Editor.new(term)
         _isearch_regex = nil,
         _isearch_match = nil,
         _query_ranges = nil,
+        _replace_regexp_active = nil,
+        _query_replace_template = nil,
+        _query_captures = nil,
+        _query_replacements = nil,
+        _replace_regexp_origin_line = nil,
+        _replace_regexp_origin_col = nil,
         _eval_result = nil,
         _quit_requested = false,
         _background_tasks = {},
@@ -1923,10 +1936,41 @@ function Editor:_nav_candidate(dir)
     end
 end
 
---- Promote the pending cursor at the primary cursor's position to a real
---- cursor. If _query_ranges is set (replace mode), applies the match range
---- as a full selection. Removes the promoted candidate from both arrays.
+--- Promote the pending candidate at the given index to a live cursor.
+--- If _query_ranges is set (replace mode), applies the match range
+--- as a full selection. Removes the promoted entry from both arrays.
+---@param i integer 1-based index into mv.pending_cursors
 ---@return boolean true if a candidate was promoted
+function Editor:_promote_candidate_at_index(i)
+    local mv = self:current_view()
+    if not mv then
+        return false
+    end
+    local pending = mv.pending_cursors
+    local ranges = self._query_ranges
+    local c = pending[i]
+    if not c then
+        return false
+    end
+    local nc = mv:make_cursor(c.line, c.col)
+    if ranges and ranges[i] then
+        nc.anchor_line = nc.line
+        nc.anchor_col = nc.col
+        nc.line = ranges[i].end_line
+        nc.col = ranges[i].end_offset
+        nc.anchor_transient = nil
+    end
+    table.insert(mv.cursors, nc)
+    table.remove(pending, i)
+    if ranges then
+        table.remove(ranges, i)
+    end
+    return true
+end
+
+--- Promote the pending candidate at the primary cursor's exact position
+--- to a live cursor (delegates to _promote_candidate_at_index). Returns
+--- false if no candidate sits exactly under the primary.
 function Editor:_promote_candidate_at_primary()
     local mv = self:current_view()
     if not mv then
@@ -1934,28 +1978,86 @@ function Editor:_promote_candidate_at_primary()
     end
     local p = mv:p()
     local pending = mv.pending_cursors
-    local ranges = self._query_ranges
-
     for i = 1, #pending do
         local c = pending[i]
         if c.line == p.line and c.col == p.col then
-            local nc = mv:make_cursor(p.line, p.col)
-            if ranges and ranges[i] then
-                nc.anchor_line = nc.line
-                nc.anchor_col = nc.col
-                nc.line = ranges[i].end_line
-                nc.col = ranges[i].end_offset
-                nc.anchor_transient = nil
-            end
-            table.insert(mv.cursors, nc)
-            table.remove(pending, i)
-            if ranges then
-                table.remove(ranges, i)
-            end
-            return true
+            return self:_promote_candidate_at_index(i)
         end
     end
     return false
+end
+
+--- Find the closest pending candidate to the primary cursor, breaking
+--- ties toward the past (the candidate at or before the primary in
+--- document order). Used by add_cursor_at_candidate when no region is
+--- active — generalizes _promote_candidate_at_primary so the primary
+--- need not sit exactly on a candidate.
+---@return integer|nil 1-based index, or nil if no candidates
+function Editor:_find_nearest_candidate_past_biased()
+    local mv = self:current_view()
+    if not mv or #mv.pending_cursors == 0 then
+        return nil
+    end
+    local p = mv:p()
+    local pending = mv.pending_cursors
+    local best_i, best_abs, best_past = nil, nil, false
+    for i = 1, #pending do
+        local c = pending[i]
+        -- Flatten to a single document-ordered key for distance. Columns
+        -- are bounded by a line's length, so a large per-line multiplier
+        -- keeps cross-line ordering faithful to (line, col) tuples.
+        local diff
+        if c.line == p.line then
+            diff = c.col - p.col
+        else
+            diff = (c.line - p.line) * 0x100000 + (c.col - p.col)
+        end
+        local adiff = math.abs(diff)
+        local past = diff <= 0
+        if best_i == nil or adiff < best_abs or (adiff == best_abs and past and not best_past) then
+            best_i, best_abs, best_past = i, adiff, past
+        end
+    end
+    return best_i
+end
+
+--- Promote every pending candidate whose position falls within the
+--- primary cursor's active selection region. Entries are removed from
+--- both pending_cursors and _query_ranges (in reverse so removals keep
+--- lower indices valid). Clears the region's mark on success.
+---@return integer count of promoted candidates
+function Editor:_promote_candidates_in_region()
+    local mv = self:current_view()
+    if not mv then
+        return 0
+    end
+    local p = mv:p()
+    if not p.anchor_line then
+        return 0
+    end
+    local sl, sc, el, ec = mv:selection_ranges_one(p)
+    if sl == nil then
+        return 0
+    end
+    ---@cast sl integer
+    ---@cast sc integer
+    ---@cast el integer
+    ---@cast ec integer
+    local pending = mv.pending_cursors
+    local count = 0
+    for i = #pending, 1, -1 do
+        local c = pending[i]
+        local after_start = c.line > sl or (c.line == sl and c.col >= sc)
+        local before_end = c.line < el or (c.line == el and c.col <= ec)
+        if after_start and before_end then
+            self:_promote_candidate_at_index(i)
+            count = count + 1
+        end
+    end
+    if count > 0 then
+        mv:unset_mark()
+    end
+    return count
 end
 
 --- Handle a printable key during query-replace candidate mode.
@@ -2089,6 +2191,409 @@ function Editor:start_query_replace(initial_query)
     mb_opts.initial = initial_query
 
     self:read_from_minibuffer(mb_opts)
+end
+
+----------------------------------------------------------------------------------------------------
+-- Query replace regexp (with capture-group support)
+----------------------------------------------------------------------------------------------------
+
+--- Expand a replacement template using capture substrings.
+--- `\&` = whole match, `\1`..`\9` = groups, `\\` = literal backslash,
+--- `\x` (any other) = literal x. Emacs-style.
+---@param template string
+---@param caps string[] caps[1]=whole match, caps[2..10]=groups 1..9
+---@return string
+local function expand_replacement(template, caps)
+    return (
+        template:gsub("\\(.)", function(c)
+            if c == "&" then
+                return caps[1] or ""
+            elseif c == "\\" then
+                return "\\"
+            elseif c >= "0" and c <= "9" then
+                local n = tonumber(c)
+                ---@cast n integer
+                return caps[n + 1] or ""
+            end
+            return c
+        end)
+    )
+end
+Editor._expand_replacement = expand_replacement -- exposed for tests
+
+--- Start an incremental query-replace-regexp session.
+--- Step 1: minibuffer for regexp (incremental overlay like isearch).
+---          On submit, EVERY match becomes a pending cursor (visible
+---          as drop markers, C-x C-n/p navigable) with its capture
+---          groups stashed in parallel.
+--- Step 2: minibuffer for replacement template (supports \&, \1..\9).
+--- Step 3: y/n walk — y stashes this match's expanded replacement
+---          (no buffer mutation), n skips, ! stashes all remaining +
+---          commits. Commit applies stashed replacements in REVERSE
+---          document order (one undo group) so stored positions stay
+---          valid (each edit only shifts positions after it).
+---@param initial_query string? optional pre-fill
+function Editor:start_query_replace_regexp(initial_query)
+    local main_view = self:current_view()
+    if not main_view or not main_view.file_loaded then
+        return
+    end
+
+    if not initial_query and main_view:p().anchor_line then
+        local sl, sc, el, ec = main_view:selection_range()
+        if sl then
+            ---@cast sc integer
+            ---@cast el integer
+            ---@cast ec integer
+            initial_query = main_view:text_between(sl, sc, el, ec)
+        end
+    end
+
+    self._isearch_origin_line = main_view:p().line
+    self._isearch_origin_col = main_view:p().col
+    self._isearch_direction = 1
+    self._isearch_regex = true
+    -- Preserve the true origin across step 1's overlay moves, since
+    -- _isearch_origin_* are clobbered/restored during step 1.
+    local saved_origin_line = self._isearch_origin_line
+    local saved_origin_col = self._isearch_origin_col
+    ---@cast saved_origin_line integer
+    ---@cast saved_origin_col integer
+
+    local mb_opts = {
+        prompt = "Query replace regexp: ",
+        completion = true,
+        on_change = function(query)
+            self:_isearch_update(query)
+        end,
+        on_submit = function(query)
+            self._isearch_match = nil
+            self._isearch_regex = nil
+            self._isearch_origin_line = nil
+            self._isearch_origin_col = nil
+            if #query == 0 then
+                return
+            end
+            -- Populate pending cursors + capture groups for EVERY
+            -- match across the buffer. They show as drop markers
+            -- and are navigable with C-x C-n/p.
+            local mv = self:current_view()
+            if not mv or not mv.file_loaded then
+                return
+            end
+            mv.pending_cursors = {}
+            self._query_captures = {}
+            -- search_regex via _isearch_iter (regex-armed) so capture
+            -- groups are populated; step 1 cleared _isearch_regex,
+            -- so re-arm briefly.
+            self._isearch_regex = true
+            local iter, err = self:_isearch_iter(mv.buffer, query, { line = 0, offset = 0 }, 1)
+            if not iter then
+                self._isearch_regex = nil
+                self.status_message = "invalid regexp: " .. tostring(err)
+                return
+            end
+            local count = 0
+            for match in iter do
+                mv:drop_cursor(match.line, match.offset)
+                self._query_captures[#self._query_captures + 1] = {
+                    end_line = match.end_line,
+                    end_offset = match.end_offset,
+                    caps = match.captures or { "" },
+                }
+                count = count + 1
+            end
+            if count == 0 then
+                self.status_message = "no matches"
+                self._query_captures = nil
+                return
+            end
+            -- Step 2: prompt for the replacement template.
+            self:read_from_minibuffer({
+                prompt = "Replace regexp " .. query .. " with: ",
+                on_submit = function(template)
+                    self:_begin_replace_regexp_batch(
+                        template,
+                        saved_origin_line,
+                        saved_origin_col,
+                        count
+                    )
+                end,
+                on_cancel = function()
+                    self:_cancel_replace_regexp()
+                end,
+            })
+        end,
+        on_cancel = function()
+            self._isearch_match = nil
+            self._isearch_regex = nil
+            local mv = self:current_view()
+            if mv and self._isearch_origin_line then
+                mv:p().line = self._isearch_origin_line
+                mv:p().col = self._isearch_origin_col
+                mv:_set_goal_col(mv:p().col)
+                mv:unset_mark()
+            end
+            self._isearch_origin_line = nil
+            self._isearch_origin_col = nil
+        end,
+    }
+
+    mb_opts.initial = initial_query
+    self:read_from_minibuffer(mb_opts)
+end
+
+--- Enter the y/n batch walk after both prompts are submitted.
+---@param template string replacement template (\&, \1..\9)
+---@param origin_line integer saved primary cursor line
+---@param origin_col integer saved primary cursor col
+---@param count integer total candidate count (for the prompt)
+function Editor:_begin_replace_regexp_batch(template, origin_line, origin_col, count)
+    local mv = self:current_view()
+    if not mv or not mv.file_loaded or not mv:has_pending_cursors() then
+        return
+    end
+    self._query_replace_template = template
+    self._query_replacements = {}
+    self._replace_regexp_origin_line = origin_line
+    self._replace_regexp_origin_col = origin_col
+    -- Jump the primary cursor to the first candidate so y/n act on a
+    -- real candidate (without this, promote/skip at primary fails
+    -- silently — the primary may sit where no candidate lives).
+    local first = mv.pending_cursors[1]
+    if first then
+        mv:p().line = first.line
+        mv:p().col = first.col
+        mv:_set_goal_col(first.col)
+    end
+    mv:unset_mark()
+    self._replace_regexp_active = true
+    self.status_message = count
+        .. " matches — y replace, n skip, ! all, RET commit, C-g cancel (C-x C-n/p to navigate)"
+end
+
+--- Find the index of the pending cursor sitting at the primary
+--- cursor's position.
+---@return integer|nil
+function Editor:_replace_regexp_candidate_index()
+    local mv = self:current_view()
+    if not mv then
+        return nil
+    end
+    local p = mv:p()
+    local pending = mv.pending_cursors
+    for i = 1, #pending do
+        local c = pending[i]
+        if c.line == p.line and c.col == p.col then
+            return i
+        end
+    end
+    return nil
+end
+
+--- Stash the candidate at the primary cursor as an accepted
+--- replacement (expanded template + its match range), then remove it
+--- from the pending/captures arrays. Returns true if a candidate was
+--- stashed. Does NOT mutate the buffer (edits are deferred to commit).
+---@return boolean
+function Editor:_stash_candidate_at_primary()
+    local mv = self:current_view()
+    if not mv then
+        return false
+    end
+    local i = self:_replace_regexp_candidate_index()
+    if not i then
+        return false
+    end
+    local caps_entry = self._query_captures and self._query_captures[i]
+    if not caps_entry then
+        return false
+    end
+    local c = mv.pending_cursors[i]
+    local text = expand_replacement(self._query_replace_template, caps_entry.caps or { "" })
+    self._query_replacements = self._query_replacements or {}
+    self._query_replacements[#self._query_replacements + 1] = {
+        line = c.line,
+        offset = c.col,
+        end_line = caps_entry.end_line,
+        end_offset = caps_entry.end_offset,
+        text = text,
+    }
+    table.remove(mv.pending_cursors, i)
+    if self._query_captures then
+        table.remove(self._query_captures, i)
+    end
+    return true
+end
+
+--- Drop the candidate at the primary cursor (skip without replacing).
+---@return boolean
+function Editor:_skip_candidate_at_primary()
+    local mv = self:current_view()
+    if not mv then
+        return false
+    end
+    local i = self:_replace_regexp_candidate_index()
+    if not i then
+        return false
+    end
+    table.remove(mv.pending_cursors, i)
+    if self._query_captures then
+        table.remove(self._query_captures, i)
+    end
+    return true
+end
+
+--- Stash every remaining pending candidate, then commit all stashed
+--- replacements in reverse document order (one undo group).
+function Editor:_replace_regexp_replace_all()
+    local mv = self:current_view()
+    if not mv then
+        return
+    end
+    while mv:has_pending_cursors() do
+        -- Stash from the front each iteration; _stash_candidate_at_primary
+        -- operates on whichever candidate is at the primary cursor, so
+        -- jump the primary to the first pending cursor first.
+        local first = mv.pending_cursors[1]
+        if not first then
+            break
+        end
+        mv:p().line = first.line
+        mv:p().col = first.col
+        if not self:_stash_candidate_at_primary() then
+            break
+        end
+    end
+    self:_commit_replace_regexp()
+end
+
+--- Handle a single printable key during the regexp-replace walk.
+--- y = stash + advance, n = skip + advance, ! = stash all + commit.
+---@param ch string single character
+---@return boolean true if consumed
+function Editor:_handle_replace_regexp_key(ch)
+    if not self._replace_regexp_active then
+        return false
+    end
+    if ch == "y" then
+        self:_stash_candidate_at_primary()
+        self:_advance_replace_regexp()
+        return true
+    elseif ch == "n" then
+        self:_skip_candidate_at_primary()
+        self:_advance_replace_regexp()
+        return true
+    elseif ch == "!" then
+        self:_replace_regexp_replace_all()
+        return true
+    end
+    return false
+end
+
+--- Advance to the next candidate, or commit if none remain.
+function Editor:_advance_replace_regexp()
+    local mv = self:current_view()
+    if not mv then
+        return
+    end
+    if not mv:has_pending_cursors() then
+        self:_commit_replace_regexp()
+        return
+    end
+    self:_nav_candidate(1)
+end
+
+--- Apply every stashed replacement in reverse document order within a
+--- single undo group. Reverse order keeps stored positions valid:
+--- each delete+insert only shifts positions AFTER it, and we've
+--- already processed those.
+function Editor:_commit_replace_regexp()
+    local mv = self:current_view()
+    self._replace_regexp_active = nil
+    local reps = self._query_replacements or {}
+    local template_ok = self._query_replace_template ~= nil
+    -- Capture origin before _clear_replace_regexp_state nils it.
+    local origin_line = self._replace_regexp_origin_line
+    local origin_col = self._replace_regexp_origin_col
+    -- Clear walk state up front (after the walk, before edits).
+    self:_clear_replace_regexp_state()
+    if not mv then
+        return
+    end
+    if #reps == 0 then
+        if template_ok then
+            self.status_message = "no replacements made"
+        end
+        return
+    end
+    -- Reverse-document order: descending by (line, offset).
+    table.sort(reps, function(a, b)
+        if a.line ~= b.line then
+            return a.line > b.line
+        end
+        return a.offset > b.offset
+    end)
+    local buf = mv.buffer
+    buf:close_edit()
+    buf:begin_edit()
+    for i = 1, #reps do
+        local r = reps[i]
+        local n = mv:chars_between(r.line, r.offset, r.end_line, r.end_offset)
+        ---@cast n integer
+        local rl, rc = r.line, r.offset
+        if n > 0 then
+            rl, rc = buf:delete_char(r.line, r.offset, n)
+        end
+        if #r.text > 0 then
+            rl, rc = buf:insert_char(rl, rc, r.text)
+        end
+    end
+    buf:end_edit()
+    -- Restore point to the saved origin (predictable, matches C-g).
+    if origin_line then
+        ---@cast origin_line integer
+        ---@cast origin_col integer
+        mv:p().line = origin_line
+        mv:p().col = origin_col
+        mv:_set_goal_col(origin_col)
+        mv:unset_mark()
+    end
+    self.status_message = "replaced " .. #reps .. (#reps == 1 and " occurrence" or " occurrences")
+end
+
+--- Clear all regexp-replace walk state (does not touch the buffer).
+function Editor:_clear_replace_regexp_state()
+    local mv = self:current_view()
+    if mv then
+        mv.pending_cursors = {}
+    end
+    self._query_captures = nil
+    self._query_replacements = nil
+    self._query_replace_template = nil
+    self._replace_regexp_active = nil
+    self._replace_regexp_origin_line = nil
+    self._replace_regexp_origin_col = nil
+    self._isearch_match = nil
+    self._isearch_regex = nil
+end
+
+--- Cancel the walk and restore the original point (no edits applied).
+function Editor:_cancel_replace_regexp()
+    -- Capture origin before _clear_replace_regexp_state nils it.
+    local origin_line = self._replace_regexp_origin_line
+    local origin_col = self._replace_regexp_origin_col
+    self:_clear_replace_regexp_state()
+    local mv = self:current_view()
+    if mv and origin_line then
+        ---@cast origin_line integer
+        ---@cast origin_col integer
+        mv:p().line = origin_line
+        mv:p().col = origin_col
+        mv:_set_goal_col(origin_col)
+        mv:unset_mark()
+    end
+    self.status_message = "Quit"
 end
 
 ----------------------------------------------------------------------------------------------------

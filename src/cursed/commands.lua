@@ -645,6 +645,10 @@ commands.keyboard_quit = function(view, editor)
     if editor._digit_active then
         editor:cancel_digit_arg()
     end
+    if editor._replace_regexp_active then
+        editor:_cancel_replace_regexp()
+        return
+    end
     if editor.minibuffer and editor.minibuffer.active then
         editor:minibuffer_cancel()
         return
@@ -1080,6 +1084,17 @@ commands.query_replace = function(view, editor)
         return
     end
     editor:start_query_replace(query and tostring(query))
+end
+
+--- Incremental query-replace-regexp with capture-group support.
+--- Emacs `query-replace-regexp` (C-M-%). Replacement template may
+--- contain \& (whole match) and \1..\9 (capture groups).
+commands.query_replace_regexp = function(view, editor)
+    local query = editor.universal_args and editor.universal_args[2]
+    if not view or not view.file_loaded then
+        return
+    end
+    editor:start_query_replace_regexp(query and tostring(query))
 end
 
 --- Promote the candidate at the primary cursor to a real cursor (with
@@ -2378,6 +2393,60 @@ commands.add_cursor_here = function(view, editor)
             n
             .. (n == 1 and " drop" or " drops")
             .. " staged (alt-ret to commit, esc to cancel)"
+        )
+    end
+end
+
+--- Generalized candidate promotion. Promotes an existing pending
+--- candidate (e.g. an isearch/query-replace match) to a live cursor
+--- — generalizing `y` (replace_promote_and_next) so the primary need
+--- not sit exactly on a candidate.
+---\n--- If the primary has an active selection, EVERY candidate whose
+--- position falls within that region is promoted in bulk (and the
+--- region's mark cleared). Otherwise the single CLOSEST candidate to
+--- the primary is promoted, with ties broken toward the past
+--- (document-earlier / at-or-before the primary).
+---\n--- In replace mode (query ranges active) the promoted cursor carries
+--- the match range as its selection, exactly like `y`. After
+--- promoting, the primary advances to the next remaining candidate.
+commands.add_cursor_at_candidate = function(view, editor)
+    if not view:has_pending_cursors() then
+        return
+    end
+    local promoted
+    if view:p().anchor_line then
+        promoted = editor:_promote_candidates_in_region()
+    else
+        local i = editor:_find_nearest_candidate_past_biased()
+        if i then
+            editor:_promote_candidate_at_index(i)
+            promoted = 1
+        else
+            promoted = 0
+        end
+    end
+    -- "Advance to next" is a query-replace-candidate-walk concept: the
+    -- primary steps to the next pending match so successive y/n/grab
+    -- gestures traverse the full match set. It only applies when match
+    -- ranges are active (_query_ranges). In plain drop mode (alt-;
+    -- staged drops, no ranges) there is no walk, so advancing would park
+    -- the primary caret ON an un-selected candidate — placing a live
+    -- caret there that reads as "the outside one got promoted". Leave
+    -- the primary where it is instead.
+    if editor._query_ranges then
+        if view:has_pending_cursors() then
+            editor:_nav_candidate(1)
+        else
+            editor._query_ranges = nil
+            if promoted and promoted > 0 then
+                editor.status_message = "all candidates promoted — type to replace"
+            end
+        end
+    end
+    if editor and promoted and promoted > 0 and not editor.status_message then
+        editor.status_message = ("promoted %d cursor%s"):format(
+            promoted,
+            promoted == 1 and "" or "s"
         )
     end
 end

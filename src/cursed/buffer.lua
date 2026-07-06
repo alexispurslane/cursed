@@ -1953,7 +1953,9 @@ function Buffer:search_regex(pattern, start, icase)
     end
 
     local line_count = self:line_count()
-    local match = ffi.new(tre_ffi.regmatch_type)
+    -- Capture up to 9 groups: pmatch[0]=whole, pmatch[1..9]=subgroups.
+    local match = ffi.new("regmatch_t_eds[10]")
+    local nmatch = 10
 
     local cur_line = (start and start.line) or 0
     local cur_offset = (start and start.offset) or 0
@@ -1970,7 +1972,7 @@ function Buffer:search_regex(pattern, start, icase)
                     regex,
                     ffi.cast("const char *", text) + cur_offset,
                     remaining,
-                    1,
+                    nmatch,
                     match,
                     0
                 )
@@ -1986,13 +1988,32 @@ function Buffer:search_regex(pattern, start, icase)
                 if so >= 0 then
                     local offset = so + cur_offset
                     local end_offset = eo + cur_offset
+                    -- rm_so/eo for groups are relative to the slice
+                    -- start (cur_offset BEFORE advancing), so capture
+                    -- the base now and use it for group extraction.
+                    local base = cur_offset
                     cur_offset = cur_offset + eo
+
+                    -- Extract capture substrings (bytes) from the line
+                    -- text. caps[1] is the whole match, caps[2..10]
+                    -- are groups 1..9 ("" when not present).
+                    local caps = { text:sub(offset + 1, end_offset) }
+                    for i = 1, 9 do
+                        local gso = tonumber(match[i].rm_so)
+                        local geo = tonumber(match[i].rm_eo)
+                        if gso and gso >= 0 and geo and geo >= gso then
+                            caps[i + 1] = text:sub(base + gso + 1, base + geo)
+                        else
+                            caps[i + 1] = ""
+                        end
+                    end
 
                     return {
                         line = cur_line,
                         offset = offset,
                         end_line = cur_line,
                         end_offset = end_offset,
+                        captures = caps,
                     }
                 end
 

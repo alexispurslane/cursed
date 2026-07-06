@@ -464,6 +464,20 @@ local function process_key(editor, view, trie, key_state, key_node, token, ev, p
         end
     end
 
+    -- Query-replace-regexp batch walk intercept: y/n/! single-char
+    -- keys stash-or-skip the current candidate (all matches are
+    -- already marked as pending cursors). Enter commits the stashed
+    -- selections so far and exits (drops remaining candidates).
+    if editor._replace_regexp_active then
+        if is_printable and ch and editor:_handle_replace_regexp_key(ch) then
+            return key_state, key_node, nil
+        end
+        if token == "enter" then
+            editor:_commit_replace_regexp()
+            return key_state, key_node, nil
+        end
+    end
+
     -- M-digit / M-- prefix argument interception.
     -- alt-0..alt-9 accumulate digits; alt-- sets negative.
     -- These are intercepted before the trie so they don't conflict
@@ -834,6 +848,33 @@ local function run_headless(parsed)
     return 0
 end
 
+--- Build a minimal live editor for headless -e/-l mode: the same
+--- Editor/View/Buffer/commands/keybindings surface as the TUI path, but
+--- no terminal takeover and no event loop. Exposes _G.editor / _G.view so
+--- a `-e` chunk can drive the real APIs (cursor/buffer/command logic)
+--- against a live editor without a TTY. Rendering-only term calls are
+--- stubbed (height/width return sane dims; everything else is a no-op).
+local function build_headless_editor()
+    local stub_term = setmetatable({ height = 24, width = 80 }, {
+        __index = function(_, _)
+            return function() end
+        end,
+    })
+    local editor = Editor.new(stub_term)
+    _G.editor = editor
+    local ok, empty_buf = pcall(Buffer.new)
+    if not ok then
+        io.stderr:write(("cursed: headless buffer init failed: %s\n"):format(tostring(empty_buf)))
+        return editor
+    end
+    local view = View.new(empty_buf)
+    editor:add_view(view)
+    _G.view = view
+    prime_default_keybindings(editor)
+    log.info("main", "headless editor ready", { views = #editor.views })
+    return editor
+end
+
 local function main()
     -- Configure logging
     log.configure({ level = "info", output = "/tmp/cursed.log" })
@@ -871,6 +912,11 @@ local function main()
                 arg[i] = nil
             end
         end
+        -- Build a minimal live editor (no TUI) so -e/-l chunks can drive
+        -- the same Editor/View/Buffer/command APIs as the TUI path
+        -- without taking over the terminal. Exposed as _G.editor / _G.view
+        -- (a bare `editor` in the eval chunk resolves to _G.editor).
+        build_headless_editor()
         local rc = run_headless(parsed)
         -- Signal the worker lanes to stop. ss:stop() sets running=false
         -- AND pushes MSG_SHUTDOWN to each lane's outbox (ring_push
