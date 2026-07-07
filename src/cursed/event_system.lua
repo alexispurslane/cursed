@@ -22,6 +22,7 @@ local log = require("cursed.log")
 ---@class EventSystem
 ---@field _editor table owning editor; passed as the first argument to every handler
 ---@field _handlers table<string, function[]> event_name → ordered handler list
+---@field _emitting table<string, boolean> reentrancy guard: event → currently-emitting flag
 local EventSystem = {}
 EventSystem.__index = EventSystem
 
@@ -34,6 +35,7 @@ function EventSystem.new(editor)
     return setmetatable({
         _editor = editor,
         _handlers = {},
+        _emitting = {},
     }, EventSystem)
 end
 
@@ -78,6 +80,11 @@ function EventSystem:emit(name, ...)
     if fns == nil then
         return
     end
+    if self._emitting[name] then
+        log.warn("event_system", "reentrant emit blocked", { event = name })
+        return
+    end
+    self._emitting[name] = true
     local editor = self._editor
     for i = 1, #fns do
         local ok, err = pcall(fns[i], editor, ...)
@@ -88,6 +95,7 @@ function EventSystem:emit(name, ...)
             })
         end
     end
+    self._emitting[name] = nil
 end
 
 return EventSystem

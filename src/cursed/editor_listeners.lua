@@ -481,15 +481,6 @@ function EditorListeners.setup(editor)
             log.warn("event", "lsp spawn skipped: no workspace_dir", { mode = instance.name })
             return
         end
-        local on_message = function(msg)
-            log.debug("event", "lsp message", {
-                mode = instance.name,
-                method = msg and (msg.method or msg.id) or nil,
-            })
-        end
-        local on_exit = function(code)
-            log.info("event", "lsp exited", { mode = instance.name, code = code })
-        end
         -- Bind mode → client_id (dedups by exe set across modes that
         -- declare the same server binary; the lane owns the process).
         local cid = lsp.spawn_for_mode(instance.name, exe_names, ed.workspace_dir)
@@ -792,6 +783,15 @@ function EditorListeners.setup(editor)
         ov:put_underline(line, lo - 1, hi, rgb)
     end)
 
+    ---@param cached_version integer|nil
+    ---@param buf Buffer
+    ---@return boolean
+    local function version_stale(cached_version, buf)
+        return cached_version ~= nil
+            and buf.lsp_version ~= nil
+            and cached_version ~= buf.lsp_version
+    end
+
     -- LSP diagnostics: query the latest publishDiagnostics for the
     -- current view's buffer uri and squiggle each Diagnostic range.
     -- Diagnostics carry 0-based UTF-16 `character` offsets (LSP default
@@ -821,7 +821,7 @@ function EditorListeners.setup(editor)
         -- Stale check: if the server reported a concrete doc version and
         -- the buffer has since advanced, the offsets no longer align —
         -- skip until the next publishDiagnostics for the new version.
-        if entry.version ~= nil and buf.lsp_version ~= nil and entry.version ~= buf.lsp_version then
+        if version_stale(entry.version, buf) then
             return
         end
         local scheme = ColorScheme.active
@@ -921,7 +921,7 @@ function EditorListeners.setup(editor)
         if entry == nil then
             return nil
         end
-        if entry.version ~= nil and buf.lsp_version ~= nil and entry.version ~= buf.lsp_version then
+        if version_stale(entry.version, buf) then
             return nil
         end
         local line_count = view:line_count()
@@ -970,11 +970,7 @@ function EditorListeners.setup(editor)
         end
         -- Version check: if the buffer has been modified since the cache
         -- was populated, the cached lines are stale — don't show them.
-        if
-            cached.version ~= nil
-            and buf.lsp_version ~= nil
-            and cached.version ~= buf.lsp_version
-        then
+        if version_stale(cached.version, buf) then
             return nil
         end
         if cached.lines[li] then

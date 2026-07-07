@@ -290,29 +290,44 @@ end
 --- so the squiggle tracks the glyph it sits under as you scroll.
 ---
 --- Two paths: a fast path (production) with zero instrumentation, and a
---- profiled path that accumulates per-flush stats (cell count + where the
---- time goes: wrap_sub_position / viewport_row_for_line / squiggle_cell)
---- into self._un_stats for the `flush_underline` span. Selected by
---- `profile.enabled` so the hot per-cell loop is untouched in production.
+--- Paint one underline entry. When profiling is enabled (self._un_stats ~= nil),
+--- accumulates per-phase timing and cell-count stats.
 ---@param u table {line, s_col, e_col, rgb}
 function OverlayManager:_paint_underline(u)
-    if self._un_stats ~= nil then
-        return self:_paint_underline_profiled(u)
+    local stats = self._un_stats
+    if stats then
+        stats.entries = stats.entries + 1
     end
     local view = self:_v()
     if not view then
+        if stats then
+            stats.skipped = stats.skipped + 1
+        end
         return
     end
     local g = self:_geom()
     if not g then
+        if stats then
+            stats.skipped = stats.skipped + 1
+        end
         return
     end
     local line = u.line
     if line < 0 or line >= view:line_count() then
+        if stats then
+            stats.skipped = stats.skipped + 1
+        end
         return
+    end
+    local tw
+    if stats then
+        tw = profile.now_us()
     end
     local s_sub, s_scol = view:wrap_sub_position(line, u.s_col)
     local e_sub, e_scol = view:wrap_sub_position(line, u.e_col)
+    if stats then
+        stats.t_wrap = stats.t_wrap + (profile.now_us() - tw)
+    end
     -- Wrap width per sub-row; in no-wrap mode the whole line is one sub-row
     -- so any value works as the upper column bound.
     local row_w = view.wrap_width or g.w
@@ -321,67 +336,31 @@ function OverlayManager:_paint_underline(u)
         local col_lo = (sub == s_sub) and s_scol or 0
         local col_hi = (sub == e_sub) and e_scol or row_w
         if col_hi > col_lo then
-            local sy = view:viewport_row_for_line(line, sub)
-            if sy >= 0 and sy <= g.max_y then
-                for col = col_lo, col_hi - 1 do
-                    local sx = g.text_x + col
-                    if sx >= 0 and sx < g.w then
-                        term:squiggle_cell(sx, sy, u.rgb)
-                    end
-                end
+            local tvp
+            if stats then
+                tvp = profile.now_us()
             end
-        end
-    end
-end
-
---- Profiled counterpart of `_paint_underline`. Identical logic, plus
---- timing of each sub-phase accumulated into self._un_stats. Only called
---- when profiling is enabled (self._un_stats ~= nil).
----@param u table {line, s_col, e_col, rgb}
-function OverlayManager:_paint_underline_profiled(u)
-    local stats = self._un_stats
-    if stats == nil then
-        return
-    end
-    stats.entries = stats.entries + 1
-    local view = self:_v()
-    if not view then
-        stats.skipped = stats.skipped + 1
-        return
-    end
-    local g = self:_geom()
-    if not g then
-        stats.skipped = stats.skipped + 1
-        return
-    end
-    local line = u.line
-    if line < 0 or line >= view:line_count() then
-        stats.skipped = stats.skipped + 1
-        return
-    end
-    local tw = profile.now_us()
-    local s_sub, s_scol = view:wrap_sub_position(line, u.s_col)
-    local e_sub, e_scol = view:wrap_sub_position(line, u.e_col)
-    stats.t_wrap = stats.t_wrap + (profile.now_us() - tw)
-    local row_w = view.wrap_width or g.w
-    local term = self._term
-    for sub = s_sub, e_sub do
-        local col_lo = (sub == s_sub) and s_scol or 0
-        local col_hi = (sub == e_sub) and e_scol or row_w
-        if col_hi > col_lo then
-            local tvp = profile.now_us()
             local sy = view:viewport_row_for_line(line, sub)
-            stats.t_vp = stats.t_vp + (profile.now_us() - tvp)
+            if stats then
+                stats.t_vp = stats.t_vp + (profile.now_us() - tvp)
+            end
             if sy >= 0 and sy <= g.max_y then
-                local tsq = profile.now_us()
+                local tsq
+                if stats then
+                    tsq = profile.now_us()
+                end
                 for col = col_lo, col_hi - 1 do
                     local sx = g.text_x + col
                     if sx >= 0 and sx < g.w then
                         term:squiggle_cell(sx, sy, u.rgb)
-                        stats.cells = stats.cells + 1
+                        if stats then
+                            stats.cells = stats.cells + 1
+                        end
                     end
                 end
-                stats.t_sq = stats.t_sq + (profile.now_us() - tsq)
+                if stats then
+                    stats.t_sq = stats.t_sq + (profile.now_us() - tsq)
+                end
             end
         end
     end

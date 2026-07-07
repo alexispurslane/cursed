@@ -78,6 +78,7 @@ end
 ---@field _files string[]|nil cached file paths (sorted)
 ---@field _mtime_us integer monotonic timestamp (us) of last rebuild
 ---@field _ttl_us integer cache time-to-live in microseconds
+---@field _sorted boolean whether _files is currently sorted
 local FileIndex = {}
 FileIndex.__index = FileIndex
 
@@ -93,6 +94,7 @@ function FileIndex.new(workspace_dir, opts)
     return setmetatable({
         _dir = workspace_dir,
         _files = nil,
+        _sorted = false,
         _mtime_us = 0,
         _ttl_us = ttl_sec * 1000000,
     }, FileIndex)
@@ -154,8 +156,8 @@ local function walk_with_fts(root)
 
     c.fts_close(ftsp)
 
-    -- Sort for consistent ordering and bsearch-friendly prefix lookups.
-    table.sort(paths)
+    -- Return unsorted; sorting is deferred to get_files() so that
+    -- callers who immediately re-sort by score don't waste a sort.
     return paths
 end
 
@@ -164,6 +166,10 @@ end
 function FileIndex:get_files()
     if self._files == nil or (now_us() - self._mtime_us) > self._ttl_us then
         self:_rebuild()
+    end
+    if not self._sorted then
+        table.sort(self._files)
+        self._sorted = true
     end
     return self._files
 end
@@ -177,6 +183,7 @@ end
 --- Rebuild the cached file list by walking the workspace root with fts.
 function FileIndex:_rebuild()
     self._files = walk_with_fts(self._dir)
+    self._sorted = false
     self._mtime_us = now_us()
 end
 

@@ -265,19 +265,34 @@ function completers.buffer_words(editor, opts)
             end
             return false
         end
-        -- Scan the active buffer first (most relevant), then the others.
-        local active = ctx.buf
         local function scan_buf(buf)
-            local n = buf:line_count()
-            for li = 0, n - 1 do
-                local text = buf:line_text(li)
-                for tok in text:gmatch("[%w_]+") do
+            local gen = buf._words_gen or 0
+            local cache = buf._words_cache
+            if cache and cache.gen == gen then
+                -- Use cached token set; no line scanning needed.
+                for tok in pairs(cache.tokens) do
                     if consider(tok) then
                         return
                     end
                 end
+            else
+                -- Scan all lines and rebuild the cache.
+                local tokens = {}
+                local n = buf:line_count()
+                for li = 0, n - 1 do
+                    local text = buf:line_text(li)
+                    for tok in text:gmatch("[%w_]+") do
+                        tokens[tok] = true
+                        if consider(tok) then
+                            return
+                        end
+                    end
+                end
+                buf._words_cache = { tokens = tokens, gen = gen }
             end
         end
+        -- Scan the active buffer first (most relevant), then the others.
+        local active = ctx.buf
         if active then
             scan_buf(active)
         end

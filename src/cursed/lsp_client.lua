@@ -267,8 +267,7 @@ end
 
 --- Get-or-spawn an LSP client for a mode and bind mode_name → client_id.
 --- Dedups by exe name set (two modes with the same lsp_servers share one
---- process). The matching legacy entry point `spawn_or_get` delegates
---- here. No fork happens on the main thread; this enqueues to the lane.
+--- process). No fork happens on the main thread; this enqueues to the lane.
 --- @param mode_name string the major-mode instance name (binding key)
 --- @param servers string[]|table[] first-wins list of executions (mixed)
 --- @param workspace_dir string workspace root directory
@@ -318,32 +317,6 @@ function M.spawn_for_mode(mode_name, servers, workspace_dir)
     end
 
     return client_id
-end
-
---- Legacy entry point preserved for editor_listeners / editor.lua: takes
---- a (now-unused) kqueue + callbacks and returns a placeholder so the old
---- "client == nil ⇒ not found" branch keeps its semantics. Delegates to
---- spawn_for_mode with a mode key derived from the first candidate's bin.
---- @param _main_kqueue any unused — lane owns its kq
---- @param servers (string|table)[] first-wins list of executables (strings or `{bin,args,env}` tables)
---- @param workspace_dir string
---- @param _on_message any unused — inbound is via inbox_lsp
---- @param _on_exit any unused — lane relays handshakes
---- @return LSPClient|nil placeholder; nil if no ss wired
-function M.spawn_or_get(_main_kqueue, servers, workspace_dir, _on_message, _on_exit)
-    if M._ss == nil then
-        return nil
-    end
-    local first_bin = M.normalize(servers)[1]
-    if first_bin == nil then
-        return nil
-    end
-    local mode_key = first_bin.bin
-    local id = M.spawn_for_mode(mode_key, servers, workspace_dir)
-    if id == 0 then
-        return nil
-    end
-    return { _placeholder = true, client_id = id }
 end
 
 --- The client_id bound to a mode (which server serves this mode?), or nil.
@@ -905,6 +878,9 @@ function M.sync_open(client_id, uri, language_id, get_text)
     end
     if M.is_ready(client_id) then
         local ptr, len = get_text()
+        if ptr == nil then
+            return
+        end
         enqueue_doc_sync(client_id, constants.LSP_DOC_OPEN, uri, language_id, 0, ptr, len)
         M._open_docs[client_id] = M._open_docs[client_id] or {}
         M._open_docs[client_id][uri] = { language_id = language_id, version = 0 }
@@ -927,9 +903,11 @@ function M.flush_pending_opens(client_id)
     for uri, info in pairs(pending) do
         local ptr, len = info.get_text()
         info.get_text = nil -- drop closure reference so the buffer can GC
-        enqueue_doc_sync(client_id, constants.LSP_DOC_OPEN, uri, info.language_id, 0, ptr, len)
-        M._open_docs[client_id] = M._open_docs[client_id] or {}
-        M._open_docs[client_id][uri] = { language_id = info.language_id, version = 0 }
+        if ptr ~= nil then
+            enqueue_doc_sync(client_id, constants.LSP_DOC_OPEN, uri, info.language_id, 0, ptr, len)
+            M._open_docs[client_id] = M._open_docs[client_id] or {}
+            M._open_docs[client_id][uri] = { language_id = info.language_id, version = 0 }
+        end
     end
 end
 
@@ -954,6 +932,9 @@ function M.sync_change(client_id, uri, version, get_text)
         return -- not open yet; didOpen will carry latest text
     end
     local ptr, len = get_text()
+    if ptr == nil then
+        return
+    end
     -- language_id unused for CHANGE (doc already open); pass empty.
     enqueue_doc_sync(client_id, constants.LSP_DOC_CHANGE, uri, "", version, ptr, len)
     open[uri].version = version
@@ -1351,8 +1332,7 @@ function M.store_diagnostics(params, cid)
     if #items == 0 then
         M._diagnostics_by_uri[uri] = nil
     else
-        M._diagnostics_by_uri[uri] =
-            { client_id = cid, version = (ver ~= 0 and ver or nil), items = items }
+        M._diagnostics_by_uri[uri] = { client_id = cid, version = ver, items = items }
     end
     log.info("lsp", "diagnostics_stored", { uri = uri, count = #items })
 end

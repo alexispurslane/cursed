@@ -54,6 +54,7 @@ int select(int nfds, void *readfds, void *writefds, void *exceptfds, struct time
 
 void _exit(int status);
 int fork(void);
+int getpid(void);
 int waitpid(int pid, int *status, int options);
 int kill(int pid, int sig);
 

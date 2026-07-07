@@ -7,7 +7,4 @@
 ---@return MajorModeSpec
 return {
     name = "base",
-    tab_width = 4,
-    expand_tab = true,
-    indent_width = 4,
 }

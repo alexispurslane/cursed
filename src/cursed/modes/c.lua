@@ -118,9 +118,6 @@ return {
     name = "c",
     language = "c",
     highlight_query = C_HIGHLIGHT_QUERY,
-    tab_width = 4,
-    expand_tab = true,
-    indent_width = 4,
     -- Tree-sitter document outline (goto_symbol fallback when no LSP is
     -- bound to the buffer).
     symbol_queries = [[

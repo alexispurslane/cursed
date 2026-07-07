@@ -187,9 +187,6 @@ return {
     -- editor's mode_dispatch resolves this lazily + caches the closure.
     completer = completers.lsp,
     highlight_query = LUA_HIGHLIGHT_QUERY,
-    tab_width = 4,
-    expand_tab = true,
-    indent_width = 4,
     textobjects = {
         -- Lua word boundary: treat - as a word separator
         word = "[^%w_]",

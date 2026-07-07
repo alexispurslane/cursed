@@ -70,8 +70,8 @@ local keybind = require("cursed.keybind")
 ---@field name string human-readable name (e.g. "lua", "python")
 ---@field keybindings table<string, string|function> chord → command name or function
 ---@field textobjects table<string, string> object name → boundary pattern
----@field tab_width integer visual width of a tab stop (default 8)
----@field expand_tab boolean if true, Tab key inserts spaces instead of \t (default false)
+---@field tab_width integer visual width of a tab stop (default 4)
+---@field expand_tab boolean if true, Tab key inserts spaces instead of \t (default true)
 ---@field indent_width integer number of columns for auto-indent (default = tab_width)
 ---@field margin integer|nil max text render width; overrides the global config margin when set (centers the gutter+text column when the window is wider)
 ---@field language string|nil bundled tree-sitter grammar name (enables highlighting)
@@ -127,13 +127,13 @@ MajorMode.__index = MajorMode
 ---@param spec MajorModeSpec
 ---@return MajorMode
 function MajorMode.new(spec)
-    local tw = spec.tab_width or 8
+    local tw = spec.tab_width or 4
     return setmetatable({
         name = spec.name,
         keybindings = spec.keybindings or {},
         textobjects = spec.textobjects or {},
         tab_width = tw,
-        expand_tab = spec.expand_tab or false,
+        expand_tab = spec.expand_tab ~= false, -- true by default
         indent_width = spec.indent_width or tw,
         margin = spec.margin,
         language = spec.language,

@@ -24,6 +24,7 @@ local gc = require("cursed.gc")
 ---@field lsp_uri string|nil file:// URI relayed to the server via didOpen/didChange/didClose
 ---@field lsp_language_id string|nil LSP languageId (e.g. "lua") sent on didOpen
 ---@field lsp_version integer monotonically-incrementing doc version, bumped on every mutation (insert/delete/undo/redo)
+---@field _words_gen integer generation counter bumped on every mutation (invalidates buffer_words cache)
 ---@field _lsp_debounce_task table|nil pending didChange debounce handle (cancellable)
 local Buffer = {}
 Buffer.__index = Buffer
@@ -1250,6 +1251,7 @@ function Buffer:delete_char(line, col, n)
         return line, col
     end
     self.lsp_version = (self.lsp_version or 0) + 1
+    self._words_gen = (self._words_gen or 0) + 1
     return self:_delete_char_impl(line, col, n)
 end
 
@@ -1660,6 +1662,7 @@ function Buffer:apply_lsp_edits(edits)
         applied = applied + 1
     end
     self:end_edit()
+    self._words_gen = (self._words_gen or 0) + 1
     return applied
 end
 
@@ -1720,6 +1723,7 @@ function Buffer:undo()
     log_apply_last(b, b.undo)
     log_pop(b.undo)
     self.lsp_version = (self.lsp_version or 0) + 1
+    self._words_gen = (self._words_gen or 0) + 1
     return true
 end
 
@@ -1742,6 +1746,7 @@ function Buffer:redo()
     log_apply_last(b, b.redo)
     log_pop(b.redo)
     self.lsp_version = (self.lsp_version or 0) + 1
+    self._words_gen = (self._words_gen or 0) + 1
 
     return true
 end

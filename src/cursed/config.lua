@@ -250,15 +250,16 @@ end
 --- Load the user configuration from ~/.config/cursed/init.lua.
 --- Returns a config backed by built-in modes + default file_patterns
 --- if init.lua is missing or errors.
+---@param editor Editor the global editor instance (needed for mode init)
 ---@return Config
-function Config.load()
+function Config.load(editor)
     -- Built-in modes are always present. `require("cursed.modes")` is
     -- deferred to here (NOT at module top) so the per-language spec
     -- files in src/cursed/modes/*.lua run their top level AFTER the
-    -- global `editor` exists — that top level is where a mode file
+    -- editor exists — that top level is where a mode file
     -- registers its per-mode event handlers
     -- (`editor.event_system:on("mode_enter:<name>", ...)`). Requiring
-    -- at module-load time (before `_G.editor` is set in main.lua)
+    -- at module-load time (before the editor is ready)
     -- would sandbox them.
     local builtin = require("cursed.modes")
     local modes = {} ---@type table<string, MajorMode>

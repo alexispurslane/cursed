@@ -296,10 +296,13 @@ local function fuzzy_find_file_completer(editor)
             return r
         end
 
+        -- Precompute lowercase needle bytes once for all candidates.
+        local lneedle = fzy.lower_needle(query)
+
         -- Score every file against the query.
         local scored = {}
         for _, path in ipairs(files) do
-            local s = fzy.score(query, path)
+            local s = fzy.score(query, path, nil, lneedle)
             if s ~= nil then
                 scored[#scored + 1] = { path = path, score = s }
             end

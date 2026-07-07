@@ -379,7 +379,7 @@ The client supports `workspace/executeCommand` via `request_execute_command`, bu
 
 ---
 
-### M24 [MEDIUM] `debug.getinfo` called on every keystroke
+### M24 [MEDIUM] `debug.getinfo` called on every keystroke — **FIXED**
 **File:** `editor.lua:~855`
 
 ```lua
@@ -392,7 +392,7 @@ Called on EVERY command dispatch in the per-keystroke hot path to check if the a
 
 ---
 
-### M25 [MEDIUM] `advice.__call` creates N new closures per invocation — no cache
+### M25 [MEDIUM] `advice.__call` creates N new closures per invocation — no cache — **FIXED**
 **File:** `advice.lua:85-89`
 
 ```lua
@@ -411,7 +411,7 @@ Every advised call creates N closures (one per fold step), calls them, discards 
 
 ---
 
-### M26 [MEDIUM] `utf8.lua` Extended_Pictographic: linear 25-clause `or` chain
+### M26 [MEDIUM] `utf8.lua` Extended_Pictographic: linear 25-clause `or` chain — **FIXED**
 **File:** `utf8.lua:295-318`
 
 ```lua
@@ -493,7 +493,7 @@ This range is Hangul Jamo Extended-A, which are **L** (leading jamo) types, not 
 
 ---
 
-### M32 [MEDIUM] ~16 mode files duplicate `tab_width=4, expand_tab=true, indent_width=4`
+### M32 [MEDIUM] ~16 mode files duplicate `tab_width=4, expand_tab=true, indent_width=4` — **FIXED**
 **Files:** `modes/c.lua`, `go.lua`, `html.lua`, `json.lua`, `makefile.lua`, `python.lua`, `toml.lua`, `tsx.lua`, `typescript.lua`, `yaml.lua`, `zig.lua`
 
 11 files each repeat:
@@ -587,7 +587,7 @@ For lines with many pieces (e.g., after heavy editing), this is O(pieces). Calle
 
 ---
 
-### M40 [MEDIUM] `string.rep(" ", w)` for background fills — allocates per sub-row per frame
+### M40 [MEDIUM] `string.rep(" ", w)` for background fills — allocates per sub-row per frame — **FIXED**
 **File:** `editor.lua` (render path)
 
 ```lua
@@ -612,7 +612,7 @@ A 55-line profiled clone of a 45-line function. The profiled version adds timing
 
 ---
 
-### M42 [MEDIUM] `completers.buffer_words` O(total_buffer_chars) per debounce
+### M42 [MEDIUM] `completers.buffer_words` O(total_buffer_chars) per debounce — **FIXED**
 **File:** `completers.lua`
 
 On every keystroke (debounced 120ms), re-scans ALL buffers for `%w_+` tokens. For many large open files, causes periodic latency spikes.
@@ -621,7 +621,7 @@ On every keystroke (debounced 120ms), re-scans ALL buffers for `%w_+` tokens. Fo
 
 ---
 
-### M43 [MEDIUM] `fzy.lua:score()` builds per-call lowercase arrays — O(2n) per candidate
+### M43 [MEDIUM] `fzy.lua:score()` builds per-call lowercase arrays — O(2n) per candidate — **FIXED**
 **File:** `fzy.lua`
 
 For every candidate, constructs `lneedle` and `lhaystack` tables via loop, and runs `has_match` as a pre-filter (another full iteration). For a 50k-file project, every keystroke creates 50k lowercase byte arrays, each iterated twice.
@@ -630,7 +630,7 @@ For every candidate, constructs `lneedle` and `lhaystack` tables via loop, and r
 
 ---
 
-### M44 [MEDIUM] `file_index.lua:walk_with_fts()` O(n log n) sort after each walk
+### M44 [MEDIUM] `file_index.lua:walk_with_fts()` O(n log n) sort after each walk — **FIXED**
 **File:** `file_index.lua`
 
 File list is fully sorted after every `fts` traversal. For 100k files, this is 100k×log(100k) comparisons on every TTL expiration.
@@ -661,7 +661,7 @@ The design note says this is intentional (for the `editor` global). Creates a hi
 
 ---
 
-### M47 [MEDIUM] `clipboard.set_if_different` reads full clipboard on every write attempt
+### M47 [MEDIUM] `clipboard.set_if_different` reads full clipboard on every write attempt — **FIXED**
 **File:** `clipboard.lua:111-116`
 
 ```lua
@@ -1122,15 +1122,15 @@ The clean lint result confirms that the *surface* of the code (syntax, type anno
 | H21 | HIGH | `completers.lua` is a 1,352-line grab-bag | `completers.lua` |
 | H22 | HIGH | No `workspace/applyEdit` inbound handler | `lsp_lane.lua` |
 | M23 | MEDIUM | Comment-to-code ratio ~1:1 across 42K LOC | (many files) |
-| M24 | MEDIUM | `debug.getinfo` called on every keystroke | `editor.lua:~855` |
-| M25 | MEDIUM | `advice.__call` creates N new closures per invocation — no cache | `advice.lua:85-89` |
-| M26 | MEDIUM | `utf8.lua` Extended_Pictographic: linear 25-clause or chain | `utf8.lua:295-318` |
+| M24 | MEDIUM | `debug.getinfo` called on every keystroke — **FIXED** | `editor.lua:~855` |
+| M25 | MEDIUM | `advice.__call` creates N new closures per invocation — no cache — **FIXED** | `advice.lua:85-89` |
+| M26 | MEDIUM | `utf8.lua` Extended_Pictographic: linear 25-clause or chain — **FIXED** | `utf8.lua:295-318` |
 | M27 | MEDIUM | LSP capabilities sent as empty `{}` | `lsp_lane.lua:593` |
 | M28 | MEDIUM | `M.store_diagnostics` version ambiguity | `lsp_client.lua:~1247` |
 | M29 | MEDIUM | `spawn_or_get` — dead code | `lsp_client.lua:333-358` |
 | M30 | MEDIUM | Dead closures on_message/on_exit | `editor_listeners.lua:490-498` |
 | M31 | MEDIUM | `utf8.lua` LV_lo/LV_hi mislabeled | `utf8.lua:280-281` |
-| M32 | MEDIUM | ~16 mode files duplicate same tab_width/expand_tab/indent_width | `modes/*.lua` |
+| M32 | MEDIUM | ~16 mode files duplicate same tab_width/expand_tab/indent_width — **FIXED** | `modes/*.lua` |
 | M33 | MEDIUM | `log.lua` fallback filename uses os.time() — collision risk | `log.lua:170` |
 | M34 | MEDIUM | KILL_SENT and terminal EXIT may race (out of order) | `proc_lane.lua:290,147` |
 | M35 | MEDIUM | sync_open/sync_change don't validate write_text_direct return | `lsp_client.lua` |
@@ -1138,14 +1138,14 @@ The clean lint result confirms that the *surface* of the code (syntax, type anno
 | M37 | MEDIUM | send_handshake / send_missing near-identical | `lsp_lane.lua:95-128` |
 | M38 | MEDIUM | relay_response / relay_notification near-identical | `lsp_lane.lua:170-260` |
 | M39 | MEDIUM | `Buffer:line_len()` iterates all pieces every time | `buffer.lua:189-213` |
-| M40 | MEDIUM | `string.rep(" ", w)` allocates per sub-row per frame | `editor.lua` (render path) |
+| M40 | MEDIUM | `string.rep(" ", w)` allocates per sub-row per frame — **FIXED** | `editor.lua` (render path) |
 | M41 | MEDIUM | `_paint_underline_profiled` — profiled clone | `overlay.lua` |
-| M42 | MEDIUM | `completers.buffer_words` O(total_chars) per debounce | `completers.lua` |
-| M43 | MEDIUM | `fzy.lua:score()` builds per-call lowercase arrays — O(2n) per candidate | `fzy.lua` |
-| M44 | MEDIUM | `walk_with_fts()` O(n log n) sort after each walk | `file_index.lua` |
+| M42 | MEDIUM | `completers.buffer_words` O(total_chars) per debounce — **FIXED** | `completers.lua` |
+| M43 | MEDIUM | `fzy.lua:score()` builds per-call lowercase arrays — O(2n) per candidate — **FIXED** | `fzy.lua` |
+| M44 | MEDIUM | `walk_with_fts()` O(n log n) sort after each walk — **FIXED** | `file_index.lua` |
 | M45 | MEDIUM | `event_system.lua` no reentrancy guard | `event_system.lua:86-100` |
 | M46 | MEDIUM | `config.lua` requires `_G.editor` before `Config.load()` | `config.lua:255-263` |
-| M47 | MEDIUM | `clipboard.set_if_different` reads full clipboard on every write | `clipboard.lua:111-116` |
+| M47 | MEDIUM | `clipboard.set_if_different` reads full clipboard on every write — **FIXED** | `clipboard.lua:111-116` |
 | M48 | MEDIUM | `running` flag — Lua reads without atomic semantics | `shared_ffi.lua:40`, `shared.lua:82` |
 | M49 | MEDIUM | `SharedState.shared_tree` omitted from FFI struct | `shared_ffi.lua:26-41` |
 | L50 | LOW | Four lane main loops copy-pasted across Lua lane files | `*_lane.lua` |

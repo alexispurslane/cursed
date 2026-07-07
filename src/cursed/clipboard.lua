@@ -102,17 +102,22 @@ function clipboard.copy(text)
     return true
 end
 
---- Set the system clipboard to text, if the current text differs.
---- This is an optimization to avoid unnecessary clipboard updates.
+local _last_written = nil
+
+--- Set the system clipboard to text, if it differs from the last value
+--- we wrote. Avoids a costly clipboard read on every write attempt.
 ---@param text string
 ---@return boolean ok
 ---@return string|nil err
 function clipboard.set_if_different(text)
-    local current = clipboard.paste()
-    if current == text then
+    if _last_written == text then
         return true
     end
-    return clipboard.copy(text)
+    local ok, err = clipboard.copy(text)
+    if ok then
+        _last_written = text
+    end
+    return ok, err
 end
 
 return clipboard

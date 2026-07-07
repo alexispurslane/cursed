@@ -135,8 +135,9 @@ local MATCH_MAX_LEN = 1024
 ---@param needle string the query
 ---@param haystack string the candidate (e.g. file path)
 ---@param bonuses? number[] precomputed bonuses (optional; computed if absent)
+---@param lneedle? integer[] precomputed lowercase needle bytes (optional; computed if absent). Precompute once via fzy.lower_needle(needle) when scoring many candidates against the same query.
 ---@return number? score or nil
-local function score(needle, haystack, bonuses)
+local function score(needle, haystack, bonuses, lneedle)
     local ni = #needle
     local hi = #haystack
 
@@ -165,12 +166,15 @@ local function score(needle, haystack, bonuses)
     -- Precompute bonuses (or reuse from caller).
     bonuses = bonuses or precompute_bonus(haystack)
 
-    -- Build lowercase needle byte array and lowercase haystack byte array
-    -- for fast comparison in the hot loop.
-    local lneedle = {}
-    for i = 1, ni do
-        lneedle[i] = LOWER[needle:byte(i)]
+    -- Build lowercase needle byte array (or reuse from caller).
+    if lneedle == nil then
+        lneedle = {}
+        for i = 1, ni do
+            lneedle[i] = LOWER[needle:byte(i)]
+        end
     end
+
+    -- Build lowercase haystack byte array for fast comparison in the hot loop.
     local lhaystack = {}
     for i = 1, hi do
         lhaystack[i] = LOWER[haystack:byte(i)]
@@ -241,6 +245,18 @@ local function score(needle, haystack, bonuses)
     return prev_M[hi]
 end
 
+--- Precompute the lowercase needle byte array for reuse across many
+--- candidates scored against the same query.
+---@param needle string
+---@return integer[]
+local function lower_needle(needle)
+    local t = {}
+    for i = 1, #needle do
+        t[i] = LOWER[needle:byte(i)]
+    end
+    return t
+end
+
 ----------------------------------------------------------------------------------------------------
 -- Module export
 ----------------------------------------------------------------------------------------------------
@@ -248,6 +264,7 @@ end
 return {
     score = score,
     has_match = has_match,
+    lower_needle = lower_needle,
     SCORE_MIN = SCORE_MIN,
     SCORE_MAX = SCORE_MAX,
 }

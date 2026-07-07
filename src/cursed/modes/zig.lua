@@ -4,7 +4,4 @@
 ---@return MajorModeSpec
 return {
     name = "zig",
-    tab_width = 4,
-    expand_tab = true,
-    indent_width = 4,
 }

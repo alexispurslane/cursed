@@ -195,9 +195,6 @@ return {
     name = "rust",
     language = "rust",
     highlight_query = RUST_HIGHLIGHT_QUERY,
-    tab_width = 4,
-    expand_tab = true,
-    indent_width = 4,
     textobjects = {
         word = "[^%w_]",
         sexp = TO.sexp({

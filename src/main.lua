@@ -991,7 +991,7 @@ local function main()
     -- a fully-initialized editor and is applied for real rather than
     -- clobbered by a later trie build.
     prime_default_keybindings(editor)
-    local config = Config.load()
+    local config = Config.load(editor)
     editor._config = config
     -- Apply init.lua's returned `keybindings` table on top via the same
     -- live path (`__printable` override handled there too).

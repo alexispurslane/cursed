@@ -14,6 +14,10 @@
 ---@field _level_num integer current minimum numeric level
 ---@field _output file*|nil output handle (nil = stderr)
 ---@field _output_path string|nil file path for output
+local ffi = require("ffi")
+local pffi = require("cursed.posix_ffi")
+local c = pffi.C
+
 local Log = {}
 
 --- Level name → numeric value
@@ -172,7 +176,7 @@ function Log.configure(opts)
         end
         Log._output = io.open(opts.output, "a")
         if Log._output == nil then
-            local fallback = "/tmp/cursed-" .. tostring(os.time()) .. ".log"
+            local fallback = "/tmp/cursed-" .. tostring(c.getpid()) .. ".log"
             local out = io.open(fallback, "a")
             io.stderr:write(("log: could not open %s; trying %s\n"):format(opts.output, fallback))
             if out then
