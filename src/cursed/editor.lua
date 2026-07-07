@@ -2382,15 +2382,23 @@ function Editor:start_query_replace(initial_query)
             -- Push transient key handler for y/n navigation (LIFO).
             -- Self-deactivates when _query_ranges is cleared.
             if not self._query_range_handler_id then
+                local query_handler = keybind.handler({
+                    ["y"] = function(ed)
+                        return ed:_handle_query_candidate_key("y")
+                    end,
+                    ["n"] = function(ed)
+                        return ed:_handle_query_candidate_key("n")
+                    end,
+                })
                 self._query_range_handler_id = self:push_transient_handler(
-                    function(ed, _, ch, is_printable)
+                    function(ed, token, ch, is_printable)
                         if not ed._query_ranges then
                             return false
                         end
-                        if is_printable and ch then
-                            return ed:_handle_query_candidate_key(ch)
+                        if not is_printable or not ch then
+                            return false
                         end
-                        return false
+                        return query_handler(ed, token, ch, is_printable)
                     end
                 )
             end
@@ -2616,13 +2624,24 @@ function Editor:_begin_replace_regexp_batch(template, origin_line, origin_col, c
     -- Push transient key handler for y/n/!/enter navigation (LIFO).
     -- Self-deactivates when _replace_regexp_active is cleared.
     if not self._replace_regexp_handler_id then
+        local regexp_handler = keybind.handler({
+            ["y"] = function(ed)
+                return ed:_handle_replace_regexp_key("y")
+            end,
+            ["n"] = function(ed)
+                return ed:_handle_replace_regexp_key("n")
+            end,
+            ["!"] = function(ed)
+                return ed:_handle_replace_regexp_key("!")
+            end,
+        })
         self._replace_regexp_handler_id = self:push_transient_handler(
             function(ed, token, ch, is_printable)
                 if not ed._replace_regexp_active then
                     return false
                 end
                 if is_printable and ch then
-                    return ed:_handle_replace_regexp_key(ch)
+                    return regexp_handler(ed, token, ch, is_printable)
                 end
                 if token == "enter" then
                     ed:_commit_replace_regexp()

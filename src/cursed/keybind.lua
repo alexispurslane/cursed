@@ -396,6 +396,32 @@ function Trie.build(bindings)
     return root
 end
 
+--- Build a transient key handler from a keybinding map.
+--- Returns a function `(editor, token, ch, is_printable) → boolean`
+--- suitable for `Editor:push_transient_handler`. The handler uses
+--- `Trie.build` + `Trie:lookup` internally, so chords (e.g.
+--- "ctrl-g", "C-x C-s") are parsed the same way as editor keybindings.
+---
+--- Usage:
+---   editor:push_transient_handler(keybind.handler({
+---       ["y"] = function(ed) ed:_promote(); return true end,
+---       ["n"] = function(ed) ed:_skip(); return true end,
+---       ["ctrl-g"] = function(ed) ed:_cancel(); return true end,
+---   }))
+---
+---@param bindings table<string, function> chord_string → handler(editor): boolean
+---@return function handler(editor, token, ch, is_printable): boolean
+local function build_handler(bindings)
+    local trie = Trie.build(bindings)
+    return function(editor, token, _, _)
+        local action = trie:lookup({ token })
+        if action then
+            return action(editor)
+        end
+        return false
+    end
+end
+
 ----------------------------------------------------------------------------------------------------
 -- Chord formatting (token form → human-readable, e.g. "C-x C-s")
 ----------------------------------------------------------------------------------------------------
@@ -497,4 +523,5 @@ return {
     build_chord_for_command = build_chord_for_command,
     mirror_chord = mirror_chord,
     Trie = Trie,
+    handler = build_handler,
 }
