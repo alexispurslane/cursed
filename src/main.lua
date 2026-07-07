@@ -374,215 +374,181 @@ local function now_us()
     return tonumber(main_now_tv[0].tv_sec) * 1000000 + tonumber(main_now_tv[0].tv_usec)
 end
 
---- Process a key event token through the chord trie and editing logic.
----@param editor Editor
----@param view View|nil
----@param trie table root trie node
----@param key_state table accumulated key tokens
----@param key_node table current trie position
----@param token string key token from event_to_token
----@param ev any struct tb_event cdata
----@param printable_fn function|nil
----@return table key_state
----@return table key_node
----@return string|nil "quit" to exit
-local function process_key(editor, view, trie, key_state, key_node, token, ev, printable_fn)
-    local modified = keybind.is_modified(ev)
-    local in_chord = #key_state > 0
-    -- `_extend` is set true by a `*_select` command before it runs its
-    -- motion, so the motion's transient-anchor drop is suppressed for
-    -- that one gesture. Reset every keypress so it can't leak into a
-    -- later plain motion (which must drop a shift-selection).
-    editor._extend = false
-
-    -- Determine if this is a printable character
-    local is_printable = false
-    local ch
+--- Detect whether `ev` is a printable ASCII character.
+---@param ev any
+---@return boolean is_printable
+---@return string|nil ch
+local function _detect_printable(ev)
     if ev.key == 0 and tonumber(ev.ch) >= 32 and tonumber(ev.ch) < 127 then
         local ch_code = tonumber(ev.ch)
         ---@cast ch_code integer
-        ch = string.char(ch_code)
-        is_printable = true
+        return true, string.char(ch_code)
     end
+    return false, nil
+end
 
-    -- Read-char (one-shot) interception. If a read-char interaction
-    -- is active, the next printable key (or C-g/Escape cancel) is
-    -- consumed by the editor's callback. Non-printable keys (arrows,
-    -- function keys, chords) are NOT consumed so the user can still
-    -- move around; the read-char interaction stays pending.
-    if editor:_read_char_consume(token, ch) then
-        return key_state, key_node, nil
-    end
-
-    -- In-buffer completion menu: when the popup is open, it gets first
-    -- crack at nav / accept / cancel keys (up/down/C-n/C-p/pgup/pgdn,
-    -- Tab/Enter to accept, Escape/C-g to close). Any other key falls
-    -- through to normal dispatch (and, being a non-edit command,
-    -- dismisses the menu via the post_command hook). A parallel
-    -- controller to the minibuffer's — does NOT touch the minibuffer.
-    -- Per-keystroke trace; gated on profiling so production runs don't
-    -- write+flush a JSON line to disk on every key (a real hot-path
-    -- cost that was previously unconditional at the default info level).
-    if profile.enabled then
-        log.info("main_process_key", "completion_menu_intercept", {
-            token = token,
-            active = editor.completion_menu and editor.completion_menu.active,
-        })
-    end
-    if editor.completion_menu and editor.completion_menu.active then
-        if editor.completion_menu:handle_key(editor, token) then
-            return key_state, key_node, nil
+--- Phase 1: Run transient key handlers (LIFO — last pushed gets
+--- first crack). Used by read-char, completion menu, query-replace,
+--- and replace-regexp instead of hardcoded special cases.
+---@param editor Editor
+---@param token string|nil
+---@param ch string|nil
+---@param is_printable boolean
+---@return boolean consumed
+local function _intercept_special_keys(editor, token, ch, is_printable)
+    local handlers = editor._transient_handlers
+    -- Iterate in reverse (LIFO): most recently pushed handler wins.
+    for i = #handlers, 1, -1 do
+        local handler = handlers[i]
+        if handler ~= nil and handler(editor, token, ch, is_printable) then
+            return true
         end
     end
+    return false
+end
 
-    -- Query-replace candidate intercept: y/n single-char keys promote
-    -- or skip the current candidate during a replace session.
-    if editor._query_ranges and is_printable and ch then
-        if editor:_handle_query_candidate_key(ch) then
-            return key_state, key_node, nil
-        end
-    end
-
-    -- Query-replace-regexp batch walk intercept: y/n/! single-char
-    -- keys stash-or-skip the current candidate (all matches are
-    -- already marked as pending cursors). Enter commits the stashed
-    -- selections so far and exits (drops remaining candidates).
-    if editor._replace_regexp_active then
-        if is_printable and ch and editor:_handle_replace_regexp_key(ch) then
-            return key_state, key_node, nil
-        end
-        if token == "enter" then
-            editor:_commit_replace_regexp()
-            return key_state, key_node, nil
-        end
-    end
-
-    -- M-digit / M-- prefix argument interception.
-    -- alt-0..alt-9 accumulate digits; alt-- sets negative.
-    -- These are intercepted before the trie so they don't conflict
-    -- with any bound chords.
+--- Phase 2: M-digit / M-- prefix argument accumulation.
+--- Returns: "done" if consumed, "commit" if digit arg should commit
+--- and fall through to trie, "cancel" if cancelled, nil to continue.
+---@param editor Editor
+---@param token string|nil
+---@return string|nil signal
+local function _handle_digit_arg(editor, token)
     if token then
         local digit = token:match("^alt%-(%d)$")
         if digit then
             ---@type integer
             local d = (tonumber(digit)) --[[@as integer]]
             editor:accumulate_digit(d)
-            return key_state, key_node, nil
+            return "done"
         end
         if token == "alt--" then
             editor:set_digit_negative()
-            return key_state, key_node, nil
+            return "done"
         end
     end
 
-    -- When M-digit/M-- accumulation is active and a non-digit command
-    -- key arrives, commit the accumulated digit into universal_args,
-    -- then fall through to the trie.
-    -- C-g and escape cancel instead.
     if editor._digit_active then
         if token == "ctrl-g" or token == "escape" then
             editor:cancel_digit_arg()
-            key_state = {}
-            key_node = trie
-            return key_state, key_node, nil
+            return "cancel"
         end
         editor:commit_digit_arg()
-        -- Fall through to feed_trie; editor.universal_args is now set
-        goto feed_trie
+        return "commit"
     end
 
-    -- Unmodified printable character with no active chord:
-    -- Ask __printable whether to feed the trie or self-insert.
-    -- If __printable returns true, the character is a chord participant.
-    -- If false/nil, __printable already handled insertion, done.
-    --
-    -- When universal arg is active, printable chars always self-insert
-    -- into the minibuffer (argument collector) instead.
-    if not modified and not in_chord and is_printable then
-        -- Self-insert is a non-kill command; reset the merge flag.
-        editor._last_was_kill = false
-        if editor._universal_active then
-            -- Feed printable char to the minibuffer's view for self-insert
-            local mb_view = editor.minibuffer.view
-            mb_view:delete_selection()
-            mb_view:insert_char(ch)
-            return key_state, key_node, nil
-        end
-        if printable_fn then
-            -- Per-mode printable handler wins over the global __printable
-            -- when the focused view's top mode declares one. This is how
-            -- non-file-backed "app" buffers (pickers, dashboards) intercept
-            -- typing — e.g. append to a filter string and refilter the
-            -- buffer — instead of self-inserting into the buffer.
-            local mode = view and view:top_mode()
-            local pfn = (mode and mode.printable) or printable_fn
-            local ok, claimed = pcall(pfn, view, editor, ch)
-            if not ok then
-                log.error("main", "printable error", { error = tostring(claimed) })
-                return key_state, key_node, nil
-            end
-            if claimed then
-                -- Character is a chord participant (e.g. vim chord mode)
-                goto feed_trie
-            end
-        end
-        -- Self-insert just ran via __printable. Emit post_command_hook so
-        -- observers (e.g. LSP didChange debounce) see the mutation; without
-        -- this, plain typing bypasses the command hook entirely.
-        editor.event_system:emit("post_command_hook", "__printable", view)
-        -- Record self-insert for kmacro (only when minibuffer is
-        -- inactive — minibuffer inputs are captured separately via
-        -- the _recorded_mb_inputs stack)
-        if editor._recording and not (editor.minibuffer and editor.minibuffer.active) then
-            editor._recorded_commands[#editor._recorded_commands + 1] =
-                { name = "__printable", ch = ch, universal_args = editor.universal_args }
-        end
-        -- __printable handled insertion, done
-        return key_state, key_node, nil
+    return nil
+end
+
+--- Phase 3: Unmodified printable character handling.
+--- Handles self-insert into minibuffer (universal arg active) or
+--- the buffer (via __printable). Returns: "done" if consumed,
+--- "trie" if __printable declined (goto feed_trie).
+---@param editor Editor
+---@param view View|nil
+---@param ch string|nil
+---@param modified boolean
+---@param in_chord boolean
+---@param is_printable boolean
+---@param printable_fn function|nil
+---@return string|nil signal
+local function _handle_printable(editor, view, ch, modified, in_chord, is_printable, printable_fn)
+    if modified or in_chord or not is_printable then
+        return nil
     end
 
-    -- When universal arg is active and a chord key arrives:
-    -- C-u toggles the flag; C-g/escape cancel; backspace/delete edit the
-    -- minibuffer; everything else terminates and dispatches.
+    editor._last_was_kill = false
+
+    -- Universal arg active: feed printable to minibuffer for self-insert
     if editor._universal_active then
-        if token == "ctrl-u" then
-            editor:toggle_universal_arg()
-            return key_state, key_node, nil
-        end
-        if token == "ctrl-g" or token == "escape" then
-            editor:cancel_universal_arg()
-            key_state = {}
-            key_node = trie
-            return key_state, key_node, nil
-        end
-        -- Backspace/delete edit the argument text in the minibuffer
-        if token == "backspace" then
-            local mb_view = editor.minibuffer.view
-            if not mb_view:delete_selection() then
-                editor.minibuffer.view = mb_view
-                if mb_view:p().col > 0 then
-                    mb_view:delete_char(-1)
-                end
-            end
-            return key_state, key_node, nil
-        end
-        -- Any other chord key terminates universal arg collection.
-        -- Compute the args and store on editor for the command to read.
-        editor:get_universal_args()
-        -- Fall through to feed_trie; editor.universal_args is now set
+        local mb_view = editor.minibuffer.view
+        mb_view:delete_selection()
+        ---@cast ch string
+        mb_view:insert_char(ch)
+        return "done"
     end
 
-    ::feed_trie::
-    -- Which-key paging: while a prefix is held and the hint popup
-    -- overflows, Page Up/Down page the popup instead of feeding the
-    -- trie (these keys are otherwise undefined mid-prefix).
+    if printable_fn then
+        local mode = view and view:top_mode()
+        local pfn = (mode and mode.printable) or printable_fn
+        local ok, claimed = pcall(pfn, view, editor, ch)
+        if not ok then
+            log.error("main", "printable error", { error = tostring(claimed) })
+            return "done"
+        end
+        if claimed then
+            return "trie"
+        end
+    end
+
+    -- Self-insert was handled by __printable; emit post_command_hook
+    -- so LSP didChange debounce sees the mutation.
+    editor.event_system:emit("post_command_hook", "__printable", view)
+
+    -- Record self-insert for kmacro (skip minibuffer inputs)
+    if editor._recording and not (editor.minibuffer and editor.minibuffer.active) then
+        editor._recorded_commands[#editor._recorded_commands + 1] =
+            { name = "__printable", ch = ch, universal_args = editor.universal_args }
+    end
+
+    return "done"
+end
+
+--- Phase 4: Universal argument state machine (C-u/C-g/Escape/Backspace).
+--- Returns: "done" if consumed, "cancel" to reset and continue,
+--- "commit" to finalize args and fall through to trie.
+---@param editor Editor
+---@param token string|nil
+---@return string|nil signal
+local function _handle_universal_arg(editor, token)
+    if not editor._universal_active then
+        return nil
+    end
+
+    if token == "ctrl-u" then
+        editor:toggle_universal_arg()
+        return "done"
+    end
+    if token == "ctrl-g" or token == "escape" then
+        editor:cancel_universal_arg()
+        return "cancel"
+    end
+    if token == "backspace" then
+        local mb_view = editor.minibuffer.view
+        if not mb_view:delete_selection() then
+            if mb_view:p().col > 0 then
+                mb_view:delete_char(-1)
+            end
+        end
+        return "done"
+    end
+
+    -- Any other chord key terminates universal arg collection
+    editor:get_universal_args()
+    return "commit"
+end
+
+--- Phase 5: Trie dispatch (the ::feed_trie:: section).
+--- Handles which-key paging, chord lookup, command dispatch,
+--- and prefix accumulation.
+---@param editor Editor
+---@param view View|nil
+---@param trie table
+---@param key_state table
+---@param key_node table
+---@param token string|nil
+---@param in_chord boolean
+---@return table key_state
+---@return table key_node
+---@return string|nil quit
+local function _dispatch_trie(editor, view, trie, key_state, key_node, token, in_chord)
+    -- Which-key paging while a prefix is held
     if in_chord and token ~= nil and WhichKey.try_page(editor, token) then
         return key_state, key_node, nil
     end
-    -- Modified key, non-printable, chord participant, or any key while in a chord
+
     local child = key_node.children[token]
     if child == nil then
-        -- No match: reset chord state, show warning
         key_state = {}
         key_node = trie
         editor.universal_args = nil
@@ -590,9 +556,7 @@ local function process_key(editor, view, trie, key_state, key_node, token, ev, p
             editor.status_message = "undefined chord"
         end
     elseif child.action ~= nil then
-        -- Full match: dispatch the command.
-        -- If action is a string, it's a command name to resolve from
-        -- the commands table. If it's a function, call it directly.
+        -- Full match: dispatch the command
         local act = child.action
         local cmd_name
         if type(act) == "string" then
@@ -606,24 +570,11 @@ local function process_key(editor, view, trie, key_state, key_node, token, ev, p
             end
         end
 
-        -- Prepare consecutive-kill merge tracking.
-        -- _last_was_kill reflects the previous command; clear _kill_called
-        -- so push_kill can flag the current command as a kill.
         editor._kill_called = false
 
         if act then
-            -- Pre-command hook: emit before the command function runs.
-            -- Carries the command name (nil when the chord maps directly
-            -- to a function) and the focused view.
             editor.event_system:emit("pre_command_hook", cmd_name, view)
-            -- Save minibuffer state BEFORE the command runs, so that
-            -- commands which open the minibuffer (e.g. isearch) are
-            -- still recorded correctly.
             local mb_was_active_before = editor.minibuffer and editor.minibuffer.active
-            -- If the function accepts varargs, unpack universal args into the
-            -- call (after nil-filling any named params beyond view/editor).
-            -- If no varargs, just pass view, editor — universal args are
-            -- available on editor.universal_args for manual inspection.
             local info = commands.get_cmd_info(act)
             local ok, result
             if info and info.isvararg and editor.universal_args then
@@ -634,7 +585,6 @@ local function process_key(editor, view, trie, key_state, key_node, token, ev, p
                     ---@diagnostic disable-next-line: deprecated
                     ok, result = pcall(act, view, editor, unpack(args))
                 else
-                    -- Fill named-param gap with nils, then universal args go to ...
                     local call_args = { view, editor }
                     for _ = 1, gap do
                         call_args[#call_args + 1] = nil
@@ -660,15 +610,8 @@ local function process_key(editor, view, trie, key_state, key_node, token, ev, p
                     ef:close()
                 end
             end
-            -- Update consecutive-kill merge state after command dispatch.
-            -- If push_kill was called, this was a kill command; otherwise it wasn't.
             editor._last_was_kill = editor._kill_called
             editor._kill_called = false
-            -- Record the command invocation for kmacro
-            -- (skip recording/control commands themselves, and skip
-            -- any command dispatched while the minibuffer was active
-            -- since minibuffer inputs are captured separately via
-            -- the _recorded_mb_inputs stack)
             if
                 editor._recording
                 and cmd_name
@@ -680,11 +623,6 @@ local function process_key(editor, view, trie, key_state, key_node, token, ev, p
                 editor._recorded_commands[#editor._recorded_commands + 1] =
                     { name = cmd_name, universal_args = editor.universal_args }
             end
-            -- Post-command hook: emit after the command ran (whether it
-            -- succeeded or errored) and after kill-merge / kmacro
-            -- bookkeeping. Fires before the chord state is reset and
-            -- before an early "quit" return so listeners always see the
-            -- command complete.
             editor.event_system:emit("post_command_hook", cmd_name, view)
             key_state = {}
             key_node = trie
@@ -697,12 +635,76 @@ local function process_key(editor, view, trie, key_state, key_node, token, ev, p
         key_state[#key_state + 1] = token
         key_node = child
     else
-        -- Leaf with no action (shouldn't happen, but reset)
+        -- Leaf with no action: reset
         key_state = {}
         key_node = trie
     end
 
     return key_state, key_node, nil
+end
+
+--- Process a key event token through the chord trie and editing logic.
+---@param editor Editor
+---@param view View|nil
+---@param trie table root trie node
+---@param key_state table accumulated key tokens
+---@param key_node table current trie position
+---@param token string key token from event_to_token
+---@param ev any struct tb_event cdata
+---@param printable_fn function|nil
+---@return table key_state
+---@return table key_node
+---@return string|nil "quit" to exit
+local function process_key(editor, view, trie, key_state, key_node, token, ev, printable_fn)
+    local modified = keybind.is_modified(ev)
+    local in_chord = #key_state > 0
+    -- `_extend` is set true by a `*_select` command before it runs its
+    -- motion, so the motion's transient-anchor drop is suppressed for
+    -- that one gesture. Reset every keypress so it can't leak into a
+    -- later plain motion (which must drop a shift-selection).
+    editor._extend = false
+
+    local is_printable, ch = _detect_printable(ev)
+
+    -- Phase 1: Special key intercepts (read-char, completion, query-replace, replace-regexp)
+    if _intercept_special_keys(editor, token, ch, is_printable) then
+        return key_state, key_node, nil
+    end
+
+    -- Phase 2: M-digit / M-- prefix argument accumulation
+    local sig = _handle_digit_arg(editor, token)
+    if sig == "done" then
+        return key_state, key_node, nil
+    elseif sig == "cancel" then
+        key_state = {}
+        key_node = trie
+        return key_state, key_node, nil
+    elseif sig == "commit" then
+        goto feed_trie
+    end
+
+    -- Phase 3: Unmodified printable character handling
+    sig = _handle_printable(editor, view, ch, modified, in_chord, is_printable, printable_fn)
+    if sig == "done" then
+        return key_state, key_node, nil
+    elseif sig == "trie" then
+        goto feed_trie
+    end
+
+    -- Phase 4: Universal argument state machine
+    sig = _handle_universal_arg(editor, token)
+    if sig == "done" then
+        return key_state, key_node, nil
+    elseif sig == "cancel" then
+        key_state = {}
+        key_node = trie
+        return key_state, key_node, nil
+    elseif sig == "commit" then
+        goto feed_trie
+    end
+
+    ::feed_trie::
+    return _dispatch_trie(editor, view, trie, key_state, key_node, token, in_chord)
 end
 
 ----------------------------------------------------------------------------------------------------

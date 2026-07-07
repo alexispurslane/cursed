@@ -188,6 +188,11 @@ end
 
 --- Close the popup and cancel any pending auto-open debounce.
 function CompletionMenu:close()
+    -- Remove transient key handler
+    if self._transient_id then
+        self._editor:remove_transient_handler(self._transient_id)
+        self._transient_id = nil
+    end
     if profile.enabled then
         log.info("completion_menu", "close", {
             active = self.active,
@@ -324,6 +329,15 @@ function CompletionMenu:_tick(force)
             self._selected = 0
             self._scroll = 0
             self.active = true
+            -- Push transient key handler (LIFO) so the menu gets first crack
+            if not self._transient_id then
+                self._transient_id = self._editor:push_transient_handler(function(ed, token, _, _)
+                    if self.active then
+                        return self:handle_key(ed, token)
+                    end
+                    return false
+                end)
+            end
             log.info("completion_menu", "tick_open_loading")
             return
         end
@@ -344,6 +358,15 @@ function CompletionMenu:_tick(force)
     end
     self:_ensure_visible()
     self.active = true
+    -- Push transient key handler (LIFO) so the menu gets first crack
+    if not self._transient_id then
+        self._transient_id = self._editor:push_transient_handler(function(ed, token, _, _)
+            if self.active then
+                return self:handle_key(ed, token)
+            end
+            return false
+        end)
+    end
     self._loading = false
     log.info("completion_menu", "tick_open", {
         was_active = was_active,

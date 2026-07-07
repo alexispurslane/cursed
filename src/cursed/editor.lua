@@ -390,6 +390,7 @@ end
 ---@field _printable_fn function? the __printable handler
 ---@field _read_char_cb function|nil active callback for read-char (one-shot)
 ---@field _read_char_prompt string the prompt shown during read-char
+---@field _transient_handlers function[] stack of transient key handlers (LIFO)
 ---@field _config Config the loaded user configuration
 ---@field margin integer|nil max text render width; when set, the (gutter+text) column is centered in the window
 ---@field _blink_on boolean caret visible (drawn) this blink phase
@@ -466,6 +467,7 @@ function Editor.new(term)
         _printable_fn = nil,
         _read_char_cb = nil,
         _read_char_prompt = "",
+        _transient_handlers = {},
         _config = nil,
         _blink_on = true, -- caret visible (drawn) this phase
         _last_command = nil, -- most recent dispatched command name
@@ -1620,17 +1622,52 @@ end
 --- Start a one-shot read-char interaction. The next key event's
 --- character (or `nil` if the user cancels with C-g/Escape) is passed
 --- to `callback`. Used by quoted-insert (C-q), zap-to-char (M-z),
---- and zap-up-to-char (M-Z).
+--- Push a transient key handler onto the LIFO stack. The handler
+--- gets first crack at every key event before the trie. Returns an
+--- id that can be passed to remove_transient_handler.
 ---
---- The prompt is shown in the status area (left of the modeline)
---- so the user knows what is being read; the main loop checks
---- `editor:_read_char_consume(token, ch)` after every key event,
---- which returns true if the event was consumed.
+--- handler(editor, token, ch, is_printable) → true if consumed
+---
+---@param handler function
+---@return integer id
+function Editor:push_transient_handler(handler)
+    local h = self._transient_handlers
+    h[#h + 1] = handler
+    return #h
+end
+
+--- Remove a transient handler by id. Idempotent.
+---@param id integer
+function Editor:remove_transient_handler(id)
+    local h = self._transient_handlers
+    if id and id <= #h then
+        h[id] = nil
+    end
+end
+
+----------------------------------------------------------------------------------------------------
+-- One-shot read-char (zap-to-char, query-replace confirm, etc.)
+--
+-- The prompt is shown in the status area (left of the modeline)
+-- so the user knows what is being read; the main loop checks
+-- `editor:_read_char_consume(token, ch)` after every key event,
+-- which returns true if the event was consumed.
 ---@param prompt string short prompt (e.g. "Zap to char: ")
 ---@param callback fun(ch: string|nil) called with the char (or nil on cancel)
 function Editor:read_char(prompt, callback)
+    -- Remove previous read-char handler if still active
+    if self._read_char_handler_id then
+        self:remove_transient_handler(self._read_char_handler_id)
+        self._read_char_handler_id = nil
+    end
     self._read_char_cb = callback
     self._read_char_prompt = prompt
+    -- Push a transient handler that wraps _read_char_consume.
+    -- The handler self-removes when consumed (see _read_char_consume).
+    local editor = self
+    self._read_char_handler_id = self:push_transient_handler(function(ed, token, ch, _)
+        return ed:_read_char_consume(token, ch)
+    end)
 end
 
 --- Try to consume a key event for an active read-char interaction.
@@ -1652,19 +1689,27 @@ function Editor:_read_char_consume(token, ch)
         local cb = self._read_char_cb
         self._read_char_cb = nil
         self._read_char_prompt = ""
+        -- Remove the transient handler
+        if self._read_char_handler_id then
+            self:remove_transient_handler(self._read_char_handler_id)
+            self._read_char_handler_id = nil
+        end
         if cb then
             cb(nil)
         end
         return true
     end
     if ch and #ch == 1 then
-        -- Avoid Control characters (the is_printable filter in main
-        -- already excludes them, but guard anyway).
         local byte = ch:byte(1)
         if byte >= 32 then
             local cb = self._read_char_cb
             self._read_char_cb = nil
             self._read_char_prompt = ""
+            -- Remove the transient handler
+            if self._read_char_handler_id then
+                self:remove_transient_handler(self._read_char_handler_id)
+                self._read_char_handler_id = nil
+            end
             if cb then
                 cb(ch)
             end
@@ -2334,6 +2379,21 @@ function Editor:start_query_replace(initial_query)
             local buf = mv.buffer
             mv.pending_cursors = {}
             self._query_ranges = {}
+            -- Push transient key handler for y/n navigation (LIFO).
+            -- Self-deactivates when _query_ranges is cleared.
+            if not self._query_range_handler_id then
+                self._query_range_handler_id = self:push_transient_handler(
+                    function(ed, _, ch, is_printable)
+                        if not ed._query_ranges then
+                            return false
+                        end
+                        if is_printable and ch then
+                            return ed:_handle_query_candidate_key(ch)
+                        end
+                        return false
+                    end
+                )
+            end
             local iter, err = self:_isearch_iter(buf, query, { line = 0, offset = 0 }, 1)
             if iter then
                 local count = 0
@@ -2553,6 +2613,25 @@ function Editor:_begin_replace_regexp_batch(template, origin_line, origin_col, c
     end
     mv:unset_mark()
     self._replace_regexp_active = true
+    -- Push transient key handler for y/n/!/enter navigation (LIFO).
+    -- Self-deactivates when _replace_regexp_active is cleared.
+    if not self._replace_regexp_handler_id then
+        self._replace_regexp_handler_id = self:push_transient_handler(
+            function(ed, token, ch, is_printable)
+                if not ed._replace_regexp_active then
+                    return false
+                end
+                if is_printable and ch then
+                    return ed:_handle_replace_regexp_key(ch)
+                end
+                if token == "enter" then
+                    ed:_commit_replace_regexp()
+                    return true
+                end
+                return false
+            end
+        )
+    end
     self.status_message = count
         .. " matches — y replace, n skip, ! all, RET commit, C-g cancel (C-x C-n/p to navigate)"
 end
