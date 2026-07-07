@@ -627,7 +627,7 @@ local function process_key(editor, view, trie, key_state, key_node, token, ev, p
             -- call (after nil-filling any named params beyond view/editor).
             -- If no varargs, just pass view, editor — universal args are
             -- available on editor.universal_args for manual inspection.
-            local info = debug.getinfo(act, "u")
+            local info = commands.get_cmd_info(act)
             local ok, result
             if info and info.isvararg and editor.universal_args then
                 local gap = math.max(0, info.nparams - 2)

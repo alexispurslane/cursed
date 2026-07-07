@@ -23,6 +23,20 @@ local CompletionMenu = require("cursed.completion_menu")
 local log = require("cursed.log")
 local profile = require("cursed.profile")
 
+--- Cached space-fill buffer: avoids per-frame string.rep allocations
+--- in the render path. Grown lazily to the widest request seen.
+local _spaces = ""
+
+local function spaces(n)
+    if n <= 0 then
+        return ""
+    end
+    if n > #_spaces then
+        _spaces = string.rep(" ", n)
+    end
+    return string.sub(_spaces, 1, n)
+end
+
 --- Resolve a UI chrome color from the active colorscheme.
 --- UI concepts (line_number, modeline_fg, cursor_bg, …) live in the
 --- same CONCEPT_SLOTS table as syntax concepts, so `:color()` resolves
@@ -2920,7 +2934,7 @@ function Editor:render_modeline(view, w, y, fp)
             text = truncate_cells(text, alloc)
         end
         -- bg block fill for the whole allocation.
-        fp(x, y, string.rep(" ", alloc), s.fg_color, s.bg_color)
+        fp(x, y, spaces(alloc), s.fg_color, s.bg_color)
         -- text overdrawn at the start.
         if text ~= "" then
             fp(x, y, text, s.fg_color, s.bg_color)
@@ -3336,8 +3350,8 @@ function Editor:render()
                 -- block_x=0 and block_w=w so this collapses to a single
                 -- full-width row_bg fill (the historical behavior).
                 local _, empty_bg = focus_dim(ui("default_fg"), ui("default_bg"))
-                term:print(0, row, string.rep(" ", w), empty_bg, empty_bg)
-                term:print(block_x, row, string.rep(" ", block_w), row_bg, row_bg)
+                term:print(0, row, spaces(w), empty_bg, empty_bg)
+                term:print(block_x, row, spaces(block_w), row_bg, row_bg)
                 -- Gutter: 1-col left margin + right-aligned line number
                 -- on the first sub-row (blank on wrapped continuation
                 -- rows — the row_bg pre-fill already covers those cells),
@@ -3350,7 +3364,7 @@ function Editor:render()
                 -- blanks the digits while keeping the gutter frame.
                 if not view.no_gutter and sub_row == 0 then
                     local line_num = view.no_line_numbers and "" or tostring(li + 1)
-                    local num_pad = string.rep(" ", line_digits - #line_num)
+                    local num_pad = spaces(line_digits - #line_num)
                     term:print(block_x, row, " " .. num_pad .. line_num, num_fg, row_bg)
                 end
                 if not view.no_gutter and signs then
@@ -3563,7 +3577,7 @@ function Editor:render()
                                     -- on top of the syntax/selection layer.
                                     local cfg = ui("cursor_fg")
                                     local cbg = ui("cursor_bg")
-                                    ov:put_float(text_x, row, string.rep(" ", row_w), cfg, cbg)
+                                    ov:put_float(text_x, row, spaces(row_w), cfg, cbg)
                                     for _, run in ipairs(runs) do
                                         local chunk = line_text:sub(run.byte_start, run.byte_end)
                                         if #chunk > 0 then

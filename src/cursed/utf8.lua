@@ -970,6 +970,63 @@ local WIDTH2 = {
     0x3FFFD,
 }
 
+--- Extended_Pictographic: consolidated emoji ranges used for
+--- grapheme-cluster classification (GB11 ZWJ sequences).
+---@type integer[]
+local PICTOGRAPHIC = {
+    -- Symbols, dingbats, arrows below 0x1F300 that participate
+    -- in ZWJ emoji sequences (e.g. heart U+2764 in "couple with heart").
+    0x00A9,
+    0x00AE,
+    0x203C,
+    0x2049,
+    0x2122,
+    0x2139,
+    0x2194,
+    0x2199,
+    0x21A9,
+    0x21AA,
+    0x231A,
+    0x231B,
+    0x2328,
+    0x2328,
+    0x23CF,
+    0x23CF,
+    0x23E9,
+    0x23F3,
+    0x23F8,
+    0x23FA,
+    0x24C2,
+    0x24C2,
+    0x25AA,
+    0x25AB,
+    0x25B6,
+    0x25B6,
+    0x25C0,
+    0x25C0,
+    0x25FB,
+    0x25FE,
+    0x2600,
+    0x27BF,
+    0x2934,
+    0x2935,
+    0x2B05,
+    0x2B07,
+    0x2B1B,
+    0x2B1C,
+    0x2B50,
+    0x2B55,
+    -- Supplemental pictographic blocks
+    0x1F004,
+    0x1F0CF,
+    0x1F18E,
+    0x1F19A,
+    0x1F1E6,
+    0x1F1FF,
+    0x1F300,
+    0x1FAFF,
+}
+
 --- Binary-search a flat {lo1,hi1, lo2,hi2, ...} range table for `cp`.
 ---@param cp integer
 ---@param t integer[]
@@ -1060,44 +1117,10 @@ function utf8.grapheme_type(cp)
     if cp >= RI_lo and cp <= RI_hi then
         return "Regional_Indicator"
     end
-    -- Extended_Pictographic approximation: the consolidated emoji
-    -- ranges mirrored from WIDTH2 (small pre-1F300 pictographs + the
-    -- 0x1F300-0x1FAFF block). Grapheme clustering only needs a rough
-    -- Pictographic classification for GB11 (ZWJ sequences) — the exact
-    -- width comes from `width()`, not from this predicate.
-    --
-    -- Per Unicode's emoji-data.txt Extended_Pictographic property:
-    -- includes the supplemental pictographic blocks below 0x1F300
-    -- (symbols, dingbats, arrows) that participate in ZWJ sequences
-    -- like the "couple with heart" emoji (woman + ZWJ + heart + VS16 +
-    -- ZWJ + man), where the heart U+2764 must be Pictographic for GB11
-    -- to keep the cluster intact.
-    if
-        (cp >= 0x00A9 and cp <= 0x00AE)
-        or (cp >= 0x203C and cp <= 0x2049)
-        or (cp >= 0x2122 and cp <= 0x2139)
-        or (cp >= 0x2194 and cp <= 0x2199)
-        or (cp >= 0x21A9 and cp <= 0x21AA)
-        or (cp >= 0x231A and cp <= 0x231B)
-        or (cp >= 0x2328 and cp <= 0x2328)
-        or (cp >= 0x23CF and cp <= 0x23CF)
-        or (cp >= 0x23E9 and cp <= 0x23F3)
-        or (cp >= 0x23F8 and cp <= 0x23FA)
-        or (cp >= 0x24C2 and cp <= 0x24C2)
-        or (cp >= 0x25AA and cp <= 0x25AB)
-        or (cp >= 0x25B6 and cp <= 0x25B6)
-        or (cp >= 0x25C0 and cp <= 0x25C0)
-        or (cp >= 0x25FB and cp <= 0x25FE)
-        or (cp >= 0x2600 and cp <= 0x27BF)
-        or (cp >= 0x2934 and cp <= 0x2935)
-        or (cp >= 0x2B05 and cp <= 0x2B07)
-        or (cp >= 0x2B1B and cp <= 0x2B1C)
-        or (cp >= 0x2B50 and cp <= 0x2B55)
-        or (cp >= 0x1F004 and cp <= 0x1F0CF)
-        or (cp >= 0x1F18E and cp <= 0x1F19A)
-        or (cp >= 0x1F1E6 and cp <= 0x1F1FF)
-        or (cp >= 0x1F300 and cp <= 0x1FAFF)
-    then
+    -- Extended_Pictographic: binary-searched range table for GB11 (ZWJ
+    -- sequence) grapheme clustering. Ranges mirror the supplemental
+    -- pictographic blocks below 0x1F300 plus the 0x1F300-0x1FAFF block.
+    if in_table(cp, PICTOGRAPHIC) then
         return "Pictographic"
     end
     -- Prepend: a handful of codepoints with Cf category (this is the

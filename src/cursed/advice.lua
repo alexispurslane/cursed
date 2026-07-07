@@ -25,12 +25,17 @@
 ---
 --- `Advice.__call` is a GENERIC FOLD that knows NOTHING about which
 --- combinators exist or how they run. It only knows: "I have an original
---- function and a list of fold-steps; fold them and call the result."
+--- function and a list of fold-steps; fold them once and cache the
+--- composed result for subsequent calls."
 ---
 ---   function Advice.__call(self, ...)
----     local composed = self._original
----     for i = 1, #self._runners do
----       composed = self._runners[i].step(composed)
+---     local composed = self._composed
+---     if composed == nil then
+---       composed = self._original
+---       for i = 1, #self._runners do
+---         composed = self._runners[i].step(composed)
+---       end
+---       self._composed = composed
 ---     end
 ---     return composed(...)
 ---   end
@@ -84,6 +89,7 @@ local log = require("cursed.log")
 ---@class Advice
 ---@field _original function the unwrapped original function
 ---@field _runners { fn: function, step: fun(next: function):function }[] fold-steps, add-order (last-added outermost after fold)
+---@field _composed function|nil cached composed function (invalidated on add/remove)
 local Advice = {}
 Advice.__index = Advice
 
@@ -125,9 +131,13 @@ end
 --- every combinator's semantics live in its own step closure.
 ---@param self Advice
 function Advice.__call(self, ...)
-    local composed = self._original
-    for i = 1, #self._runners do
-        composed = self._runners[i].step(composed)
+    local composed = self._composed
+    if composed == nil then
+        composed = self._original
+        for i = 1, #self._runners do
+            composed = self._runners[i].step(composed)
+        end
+        self._composed = composed
     end
     return composed(...)
 end
@@ -308,6 +318,7 @@ function Advice.add(module, name, combinator, fn)
         error(("advice: combinator did not return a step function, got %s"):format(type(step)), 2)
     end
     wrap._runners[#wrap._runners + 1] = { fn = fn, step = step }
+    wrap._composed = nil -- invalidate composed cache
     log.debug("advice", "added", { name = name })
     return fn
 end
@@ -338,6 +349,7 @@ function Advice.remove(module, name, fn)
     end
     if removed then
         wrap._runners = kept
+        wrap._composed = nil -- invalidate composed cache
         if #kept == 0 then
             module[name] = wrap._original
             log.debug("advice", "restored original (no advices left)", { name = name })

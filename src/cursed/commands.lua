@@ -20,6 +20,26 @@ local advice = require("cursed.advice")
 
 local commands = {}
 
+---@type table<function, {isvararg: boolean, nparams: integer}>
+local _cmd_info_cache = setmetatable({}, { __mode = "k" })
+
+--- Return cached debug.getinfo metadata for a command function.
+--- Avoids a reflective debug.getinfo call on every dispatch.
+---@param fn function
+---@return {isvararg: boolean, nparams: integer}|nil
+local function get_cmd_info(fn)
+    local cached = _cmd_info_cache[fn]
+    if cached ~= nil then
+        return cached
+    end
+    local info = debug.getinfo(fn, "u")
+    if info then
+        cached = { isvararg = info.isvararg, nparams = info.nparams or 0 }
+        _cmd_info_cache[fn] = cached
+    end
+    return cached
+end
+
 ----------------------------------------------------------------------------------------------------
 -- Motion commands
 ----------------------------------------------------------------------------------------------------
@@ -1283,7 +1303,7 @@ commands.execute_command = function(view, editor)
             -- Dispatch using the same logic as the keybinding path
             -- in main.lua: if the command is vararg and universal
             -- args are present, unpack them after view/editor.
-            local info = debug.getinfo(cmd, "u")
+            local info = get_cmd_info(cmd)
             local ok, result
             if info and info.isvararg and editor.universal_args then
                 local gap = math.max(0, info.nparams - 2)
@@ -4830,6 +4850,9 @@ end
 function commands.lookup(name)
     return commands[name:gsub(" ", "_"):lower()]
 end
+
+---@see get_cmd_info
+commands.get_cmd_info = get_cmd_info
 
 --- Return an iterator over all command names (for completion).
 ---@return function
