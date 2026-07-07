@@ -3057,232 +3057,79 @@ end
 -- Rendering
 ----------------------------------------------------------------------------------------------------
 
---- Render the entire viewport.
-function Editor:render()
-    local render_t0 = profile.now_us()
-    local term = self.term
-    local w = term:width()
-    local h = term:height()
-    -- Defensive backstop: clamp all cursors before reading them for
-    -- rendering so a stale past-eol position can never produce a broken
-    -- caret / modeline. Motions/edits already clamp, but cursor state
-    -- can also be set by undo/redo, file reload, or mode activation.
-    local clamp_t0 = profile.now_us()
+--- Clamp all cursors in all file-loaded views before rendering.
+function Editor:_render_clamp_views()
     for _, v in ipairs(self.views) do
         if v.file_loaded then
             v:_clamp_all_cursors()
         end
     end
-    profile.span("editor", "clamp_all_cursors", clamp_t0, { views = #self.views })
-    -- Hoisted early (before the clear + paint helpers) so the focus
-    -- backdrop can consult mb.palette at clear time and so the paint
-    -- helpers can close over `mb` directly.
+end
+
+--- Clear the backbuffer and apply focus-backdrop tint.
+---@param term table
+function Editor:_render_clear(term)
     local mb = self.minibuffer
-
-    -- Overlay frame: snapshot the view being rendered + clear the overlay
-    -- queues. `view` is hoisted above the paint helpers so begin_frame runs
-    -- before any chrome registers, and so `fp` (the float-print sink the
-    -- chrome closures capture) is defined alongside the other paint helpers.
-    local view = self:current_view()
-    local ov = self.overlays
-    local ov_begin_t0 = profile.now_us()
-    ov:begin_frame(view)
-    profile.span("editor", "overlay_begin", ov_begin_t0)
-    --- Float-print sink: route chrome (modeline / minibuffer / completions)
-    --- through the overlay manager so it composes with extension overlays
-    --- in a single z-ordered flush. `fp(x,y,text,fg,bg)` is the screen-space
-    --- overlay equivalent of `term:print` — same signature, deferred paint.
-    local function fp(x, y, text, fg, bg)
-        ov:put_float(x, y, text, fg, bg)
+    local clear_bg = ui("default_bg")
+    if mb and mb.palette then
+        clear_bg = blend(clear_bg, 0x000000, 195)
     end
-
-    local footer_rows = self:footer_rows()
-
-    -- Clear the backbuffer every frame (full repaint). The palette focus
-    -- backdrop tints the whole buffer region — including empty rows below
-    -- the last line — so use the black-blended bg instead of the bright
-    -- default_bg when it's open.
-    do
-        local clear_bg = ui("default_bg")
-        if mb and mb.palette then
-            clear_bg = blend(clear_bg, 0x000000, 195)
-        end
-        local clear_t0 = profile.now_us()
-        term:clear(ui("default_fg"), clear_bg)
-        profile.span("editor", "term_clear", clear_t0, { w = w, h = h })
-    end
-    -- The hardware terminal caret is always hidden; the caret is drawn
-    -- as a reverse-video cell (toggled on/off by the blink timer)
-    -- wherever it should appear (main view + minibuffer).
+    term:clear(ui("default_fg"), clear_bg)
     term:hide_cursor()
+end
 
-    --- Focus-backdrop tint: when the palette (M-x) is open, darken the
-    --- buffer region toward TRUE BLACK (not default_bg) so the backdrop
-    --- reads as saturated OLED-dark rather than merely "dimmer". bg
-    --- blends ~75% toward 0x000000 — clearly darker than base00 on any
-    --- palette. fg blends ~65% toward 0x000000 so text recedes but
-    --- stays legible against the now-blacker bg. Returns the originals
-    --- unchanged when the palette isn't active. The modeline is painted
-    --- separately and stays full-saturation.
-    local BLACK = 0x000000
-    local function focus_dim(fg, bg)
-        if not (mb and mb.palette) then
-            return fg, bg
-        end
-        return blend(fg, BLACK, 165), blend(bg, BLACK, 195)
-    end
+--- Render the "Loading..." placeholder.
+---@param term table
+---@param ov OverlayManager
+---@param fp function
+function Editor:_render_loading(term, ov, fp)
+    local msg = "Loading..."
+    local x = math.floor(term:width() / 2) - math.floor(#msg / 2)
+    local y = math.floor(term:height() / 2)
+    fp(x, y, msg, ui("default_fg"), ui("default_bg"))
+    ov:emit_render()
+    ov:flush()
+    term:present()
+end
 
-    --- Paint a text chunk's base layer with syntax-highlight spans.
-    --- Falls back to a single plain-default print when highlighting is off
-    --- or the chunk has no spans. Overlays (selection/cursor/drops) are
-    --- painted afterwards by the caller and override these segments.
-    --- row_bg: background to paint text-region cells with, so the
-    --- active-line highlight carries through the syntax spans (which
-    --- would otherwise repaint with default_bg). Defaults to
-    --- default_bg for non-active rows.
-    --- Paint a single grapheme run's base layer with syntax spans.
-    --- `run` is an entry from `View:sub_row_runs`: it carries the run's
-    --- 1-based byte range into `line_text` and the 0-based DISPLAY
-    --- column (within the sub-row) where it starts. We emit the whole
-    --- run's slice at `text_x + run.col`; syntax spans that intersect
-    --- the run are overlaid on top at the same display column (a span
-    --- never crosses a grapheme boundary, so any intersecting span is
-    --- fully contained in the run). Wide / combining glyphs are printed
-    --- as a single `term:print` so termbox advances the correct number
-    --- of cells for us.
-    --- row_bg: background to paint text-region cells with, so the
-    --- active-line highlight carries through syntax spans.
-    local t_hlseg, t_termprint = 0, 0
-    -- Shared cursor into the per-logical-line `line_segs` list. `runs`
-    -- (grapheme runs of a sub-row) and `line_segs` (sorted syntax spans)
-    -- both advance monotonically in byte order, AND the sub-rows of a
-    -- single logical line visit byte offsets in strictly increasing
-    -- order. So instead of walking `line_segs` from index 1 on every
-    -- `paint_run` call (O(runs × |line_segs|) per sub-row, brutal on a
-    -- single 192 KB line where |line_segs| is huge and the visible
-    -- sub-rows sit near the end of the line), we advance one cursor
-    -- across the whole logical line. Reset to 1 once per line below.
-    local seg_idx = 1
-    local function paint_run(view, li, row, text_x, line_text, run, row_bg, line_segs)
-        local chunk_start = run.byte_start - 1
-        local chunk_end = run.byte_end
-        local dfg = ui("default_fg")
-        local dbg = row_bg or ui("default_bg")
-        dfg, dbg = focus_dim(dfg, dbg)
-        local chunk = line_text:sub(run.byte_start, run.byte_end)
-        local x = text_x + run.col
-        local tp = function(...)
-            local tp0 = profile.now_us()
-            term:print(...)
-            t_termprint = t_termprint + (profile.now_us() - tp0)
-        end
-        if line_segs == nil or #line_segs == 0 then
-            tp(x, row, chunk, dfg, dbg)
-            return
-        end
-        local painted = 0 -- byte offset within chunk already painted
-        local n = #line_segs
-        -- Skip spans that end at or before this run's chunk_start. Spans
-        -- are sorted by cs; once seg_idx passes the run, the cursor stays
-        -- parked for the *next* paint_run call (which targets a strictly
-        -- later byte range — same sub-row or next sub-row of this line).
-        while seg_idx <= n and line_segs[seg_idx].ce <= chunk_start do
-            seg_idx = seg_idx + 1
-        end
-        -- Walk intersecting spans from the cursor forward. The cursor is
-        -- advanced in-step, so each span contributes constant work across
-        -- the whole logical line.
-        while seg_idx <= n do
-            local s = line_segs[seg_idx]
-            -- spans are pre-sorted by cs; stop once we're past this run.
-            if s.cs >= chunk_end then
-                break
-            end
-            -- s.ce > chunk_start holds here (the skip loop above drained
-            -- every span ending at/before chunk_start).
-            local cs = math.max(s.cs, chunk_start) - chunk_start
-            local ce = math.min(s.ce, chunk_end) - chunk_start
-            if cs > painted then
-                tp(x, row, chunk:sub(painted + 1, cs), dfg, dbg)
-            end
-            if ce > cs then
-                local seg_fg = focus_dim(s.fg, dbg)
-                tp(x, row, chunk:sub(cs + 1, ce), seg_fg, dbg)
-            end
-            if ce > painted then
-                painted = ce
-            end
-            -- A span that extends past chunk_end straddles the boundary
-            -- into the next run (chunk_end_k == chunk_start_{k+1} for
-            -- contiguous graphemes — within a sub-row, and across sub-rows
-            -- of the same logical line). The skip-loop above will NOT drain
-            -- it on the next call (its s.ce > chunk_end_k = chunk_start_{k+1}),
-            -- so by PARKING the cursor here, the next paint_run invocation
-            -- hits the same span and paints its remaining bytes. Without
-            -- this park step, every multi-byte highlight span would be
-            -- painted only on the FIRST grapheme it overlaps — broken.
-            if s.ce > chunk_end then
-                break
-            end
-            seg_idx = seg_idx + 1
-        end
-        if painted < #chunk then
-            tp(x, row, chunk:sub(painted + 1), dfg, dbg)
-        end
-    end
-
-    if not view or not view.file_loaded then
-        local msg = "Loading..."
-        local x = math.floor(w / 2) - math.floor(#msg / 2)
-        local y = math.floor(h / 2)
-        fp(x, y, msg, ui("default_fg"), ui("default_bg"))
-        ov:emit_render()
-        ov:flush()
-        profile.span("editor", "render_total", render_t0)
-        term:present()
-        return
-    end
-
-    local buf = view.buffer
-    local line_count = buf:line_count()
-
-    -- Gutter width + centered text column. Centralized in View:text_geometry
-    -- so the mouse click→buffer mapping stays in lockstep with what's
-    -- painted here.
-    local gutter_width, text_x, text_width, block_x, block_w = view:text_geometry(w)
-    local avail_text = w - gutter_width
-    if avail_text <= 0 then
-        profile.span("editor", "render_total", render_t0)
-        term:present()
-        return
-    end
-
-    -- Gutter-sign callbacks (editor.gutter_sign_fns): each consumes one
-    -- fixed column between the line number and the separator. Cached here
-    -- so the per-line evaluation loop below can index them without
-    -- re-reading the editor field per call.
+--- Compute text geometry and return a table of derived values.
+---@param view View
+---@param w integer terminal width
+---@return table geo {gutter_w, text_x, text_w, block_x, block_w, line_digits, sign_fns, sign_count}
+function Editor:_render_geometry(view, w)
+    local gutter_w, text_x, text_w, block_x, block_w = view:text_geometry(w)
+    local line_count = view.buffer:line_count()
     local sign_fns = self.gutter_sign_fns
-    local sign_count = sign_fns and #sign_fns or 0
-    -- Digit width of the number field mirrors View:text_geometry.
-    local line_digits = #tostring(line_count)
+    return {
+        gutter_w = gutter_w,
+        text_x = text_x,
+        text_w = text_w,
+        block_x = block_x,
+        block_w = block_w,
+        line_digits = #tostring(line_count),
+        sign_fns = sign_fns,
+        sign_count = sign_fns and #sign_fns or 0,
+    }
+end
 
-    -- Paint minibuffer chrome (inline bottom strip / floating palette)
-    -- via the overlay float sink, and capture how many rows it reserved
-    -- below the modeline — the "move-up" amount the buffer region must
-    -- shrink by. The eval result, when shown, also lives in this region
-    -- (just below the modeline); count + paint its row separately below.
-    local mbr_t0 = profile.now_us()
+--- Compute footer layout, wrap settings, and viewport byte range.
+---@param mb Minibuffer
+---@param view View
+---@param text_w integer
+---@param term table
+---@param fp function
+---@param ov OverlayManager
+---@return table layout {max_y, footer_tail, reflowed, vstart_li, vend_li}
+function Editor:_render_layout(mb, view, text_w, term, fp, ov)
+    local w, h = term:width(), term:height()
+
+    -- Minibuffer chrome
     local mb_tail = self.minibuffer:_render(self, w, h, fp)
-    profile.span("editor", "minibuffer_render", mbr_t0, { mb_tail = mb_tail })
     local eval_rows = (not (mb and mb.active) and self._eval_result) and 1 or 0
     local footer_tail = mb_tail + eval_rows
     local max_y = h - footer_tail - 2
 
-    -- Soft wrapping: set wrap_width to the text area width
-    -- so the cache stays consistent with the current window size.
-    -- `no_wrap` (non-file app buffers, e.g. pickers) keeps wrap_width
-    -- nil so View:wrap_rows returns one sub-row per line.
-    local wrap_t0 = profile.now_us()
+    -- Wrap width
     local reflowed = false
     if view.no_wrap then
         if view.wrap_width ~= nil then
@@ -3290,103 +3137,149 @@ function Editor:render()
             view:invalidate_wrap_cache()
             reflowed = true
         end
-    elseif view.wrap_width ~= text_width then
-        view.wrap_width = text_width
+    elseif view.wrap_width ~= text_w then
+        view.wrap_width = text_w
         view:invalidate_wrap_cache()
         reflowed = true
     else
-        -- Invalidate if buffer has been edited since last cache build
         local gen = tonumber(view.buffer._ptr.undo.count) + tonumber(view.buffer._ptr.redo.count)
         if view._wrap_gen ~= gen then
             view:invalidate_wrap_cache()
             view._wrap_gen = gen
         end
     end
-    -- A resize-driven reflow shifts the cursor's screen row even when
-    -- its logical (line, col) is unchanged; force a same-frame re-scroll
-    -- (the guard would otherwise skip it and we'd lag a frame behind).
     if reflowed then
-        view:scroll_to_cursor(h - footer_rows + 1, true)
+        view:scroll_to_cursor(h - self:footer_rows() + 1, true)
     end
-    profile.span("editor", "wrap_setup", wrap_t0, { reflowed = reflowed })
 
-    -- Render visible lines (line-anchored, viewport-local)
-    -- Notify the highlighter of the visible viewport's byte range so its
-    -- lazy dispatcher (View:_hl_tick) can queue queries for absent buckets.
-    -- vstart/vend come from a forward walk of `max_y` rows from the
-    -- anchor — O(viewport), no full wrap-cache prefix build — so opening
-    -- or jumping anywhere in a big file parses ~viewport-depth of lines.
-    local vstart_li, vend_li
-    local vp_t0 = profile.now_us()
-    do
-        vstart_li = view.scroll_li or 0
-        local sub = view.scroll_sub_row or 0
-        local li = vstart_li
-        local filled = (view:wrap_rows(li) or 1) - sub
+    -- Viewport byte range for highlighter
+    local vstart_li = view.scroll_li or 0
+    local sub = view.scroll_sub_row or 0
+    local li = vstart_li
+    local filled = (view:wrap_rows(li) or 1) - sub
+    local vend_li = li
+    local line_count = view.buffer:line_count()
+    while filled <= max_y and li < line_count - 1 do
+        li = li + 1
+        filled = filled + (view:wrap_rows(li) or 1)
         vend_li = li
-        while filled <= max_y and li < line_count - 1 do
-            li = li + 1
-            filled = filled + (view:wrap_rows(li) or 1)
-            vend_li = li
-        end
-        local starts = view:_hl_line_starts()
-        local vstart_byte = starts[vstart_li + 1] or 0
-        local vend_byte = (starts[vend_li + 2] or starts[#starts] or 0)
-        if vend_byte > 0 then
-            vend_byte = vend_byte - 1 -- exclude trailing \n of last visible line
-        end
-        view:_hl_notify_viewport(vstart_byte, vend_byte)
     end
-    profile.span("editor", "hl_viewport_setup", vp_t0, { vstart = vstart_li, vend = vend_li })
+    local starts = view:_hl_line_starts()
+    local vstart_byte = starts[vstart_li + 1] or 0
+    local vend_byte = (starts[vend_li + 2] or starts[#starts] or 0)
+    if vend_byte > 0 then
+        vend_byte = vend_byte - 1
+    end
+    view:_hl_notify_viewport(vstart_byte, vend_byte)
 
-    local rows_t0 = profile.now_us()
-    local t_strip, t_wraprows, t_subruns, t_paint, t_body = 0, 0, 0, 0, 0
-    local t_wsub, t_sel, t_cur, t_search = 0, 0, 0, 0
-    local sub_count = 0
-    -- Always redraw the whole viewport: start at the scroll anchor and
-    -- paint every sub-row down to the bottom.
+    return {
+        max_y = max_y,
+        footer_tail = footer_tail,
+        reflowed = reflowed,
+        vstart_li = vstart_li,
+        vend_li = vend_li,
+    }
+end
+
+--- Paint a text chunk's base layer with syntax-highlight spans.
+--- Returns the updated seg_idx for the next call on the same logical line.
+---@param term table
+---@param view View
+---@param li integer
+---@param row integer
+---@param text_x integer
+---@param line_text string
+---@param run table grapheme run {byte_start, byte_end, col}
+---@param row_bg integer
+---@param line_segs table[]|nil sorted syntax spans {cs,ce,fg}
+---@param seg_idx integer cursor into line_segs
+---@param focus_dim function(fg, bg) → fg, bg
+---@return integer seg_idx
+local function _paint_run(
+    term,
+    view,
+    li,
+    row,
+    text_x,
+    line_text,
+    run,
+    row_bg,
+    line_segs,
+    seg_idx,
+    focus_dim
+)
+    local chunk_start = run.byte_start - 1
+    local chunk_end = run.byte_end
+    local dfg = ui("default_fg")
+    local dbg = row_bg or ui("default_bg")
+    dfg, dbg = focus_dim(dfg, dbg)
+    local chunk = line_text:sub(run.byte_start, run.byte_end)
+    local x = text_x + run.col
+    if line_segs == nil or #line_segs == 0 then
+        term:print(x, row, chunk, dfg, dbg)
+        return seg_idx
+    end
+    local painted = 0
+    local n = #line_segs
+    while seg_idx <= n and line_segs[seg_idx].ce <= chunk_start do
+        seg_idx = seg_idx + 1
+    end
+    while seg_idx <= n do
+        local s = line_segs[seg_idx]
+        if s.cs >= chunk_end then
+            break
+        end
+        local cs = math.max(s.cs, chunk_start) - chunk_start
+        local ce = math.min(s.ce, chunk_end) - chunk_start
+        if cs > painted then
+            term:print(x, row, chunk:sub(painted + 1, cs), dfg, dbg)
+        end
+        if ce > cs then
+            local seg_fg = focus_dim(s.fg, dbg)
+            term:print(x, row, chunk:sub(cs + 1, ce), seg_fg, dbg)
+        end
+        if ce > painted then
+            painted = ce
+        end
+        if s.ce > chunk_end then
+            break
+        end
+        seg_idx = seg_idx + 1
+    end
+    if painted < #chunk then
+        term:print(x, row, chunk:sub(painted + 1), dfg, dbg)
+    end
+    return seg_idx
+end
+
+--- Render the main content loop (viewport rows).
+---@param view View
+---@param term table
+---@param mb Minibuffer
+---@param ov OverlayManager
+---@param focus_dim function
+---@param geo table from _render_geometry
+---@param layout table from _render_layout
+function Editor:_render_content(view, term, mb, ov, focus_dim, geo, layout)
+    local w = term:width()
+    local max_y = layout.max_y
+    local line_count = view.buffer:line_count()
+    local sign_fns, sign_count = geo.sign_fns, geo.sign_count
     local li = view.scroll_li or 0
     local sub_row = view.scroll_sub_row or 0
     local row = 0
-    _ = vstart_li -- (kept for future diagnostics)
-    while row <= max_y and li < line_count do
-        local a = profile.now_us()
-        local line_text = view:_line_text_stripped(li)
-        t_strip = t_strip + (profile.now_us() - a)
-        local display_text = line_text
 
+    while row <= max_y and li < line_count do
+        local line_text = view:_line_text_stripped(li)
+        local display_text = line_text
         local content_len = #display_text
 
-        -- Resolve syntax-highlight segments ONCE per logical line,
-        -- CLIPPED to the actually-visible byte range within the line.
-        -- Deferred to the first iteration of the per-sub-row loop
-        -- below so it can use the first visible sub-row's real byte
-        -- offset (`runs[1].byte_start`) as the clip lower bound —
-        -- NOT the line's start byte (which on a 192 KB single-line
-        -- buffer with the viewport at the end after Ctrl-E would
-        -- force buckets 0–22 to be walked every render). On the test
-        -- case this skips ~22 of ~24 buckets in highlight_segments'
-        -- bucket iteration, leaving ~2–3 (~3 KB) to walk & sort.
-        -- Visible-end estimate: chunk_start + visible_rows × wrap_w × 4
-        -- (×4 for 4-byte UTF-8 worst case; clamped to content_len);
-        -- for ASCII text this is ~4× the visible bytes — still ~50×
-        -- narrower than content_len on a 192 KB line. Returned
-        -- cs/ce are relative to chunk_start; translate back to line-
-        -- relative so paint_run's run.byte_start comparisons (line-
-        -- relative 0-based) resolve cleanly.
+        -- Syntax highlight segments (lazy, per logical line, visible range)
         local line_segs = nil
-        local line_seg_vstart = 0
-        -- Reset the shared `line_segs` cursor for this logical line.
-        seg_idx = 1
-        local b = profile.now_us()
+        local seg_idx = 1
         local total_sub = view:wrap_rows(li)
-        t_wraprows = t_wraprows + (profile.now_us() - b)
-        t_wraprows = t_wraprows + (profile.now_us() - b)
-        -- Evaluate per-line gutter signs ONCE per logical line and cache
-        -- the results in `signs`; every sub-row of this line (including
-        -- wrapped continuation rows, where the line number itself is
-        -- blanked) paints the same glyphs in the same columns. Each
-        -- callback returns {fg, bg?, char} or nil (blank slot).
+
+        -- Gutter signs (once per logical line)
         local signs
         if sign_count > 0 then
             signs = {}
@@ -3394,13 +3287,8 @@ function Editor:render()
                 signs[i] = sign_fns[i](self, view, li)
             end
         end
-        -- Indent-guide columns (text-relative, 0-based) for this line:
-        -- one │ at the LAST whitespace cell of each indent level (i.e.
-        -- at ts-1, 2·ts-1, …). Placing the guide on the boundary cell
-        -- (ts, 2·ts, …) would paint over the first real character when
-        -- lead_w is an exact multiple of ts; g-1 stays within the
-        -- leading whitespace. Computed once per logical line; only the
-        -- first sub-row actually paints them (indentation lives at col 0).
+
+        -- Indent-guide columns
         local guide_cols = {}
         do
             local ts = view.tab_width
@@ -3425,48 +3313,26 @@ function Editor:render()
             end
         end
 
-        -- Render sub-rows for this logical line
+        -- Sub-rows for this logical line
         while sub_row < total_sub and row <= max_y do
-            sub_count = sub_count + 1
-            local body_t0 = profile.now_us()
             local ok, err = pcall(function()
-                -- Active-line highlight: tint the whole row (gutter→edge)
-                -- when this logical line holds the primary cursor, and
-                -- brighten its line number. The single biggest "modern
-                -- editor" cue in a TUI.
                 local is_active = (view:p().line == li)
                 local row_bg = is_active and ui("active_line_bg") or ui("default_bg")
                 local num_fg = is_active and ui("line_number_active") or ui("line_number")
-                -- Focus backdrop: dim the gutter numbers + the row bg so
-                -- the whole buffer region (gutter + text) recedes behind
-                -- the palette together.
                 num_fg, row_bg = focus_dim(num_fg, row_bg)
-                -- Pre-fill: outside the centered text column gets the
-                -- default bg (so the column reads as centered); the
-                -- column itself (gutter + text) gets row_bg so the active
-                -- tint spans exactly the block. When no margin is set,
-                -- block_x=0 and block_w=w so this collapses to a single
-                -- full-width row_bg fill (the historical behavior).
+
                 local _, empty_bg = focus_dim(ui("default_fg"), ui("default_bg"))
                 term:print(0, row, spaces(w), empty_bg, empty_bg)
-                term:print(block_x, row, spaces(block_w), row_bg, row_bg)
-                -- Gutter: 1-col left margin + right-aligned line number
-                -- on the first sub-row (blank on wrapped continuation
-                -- rows — the row_bg pre-fill already covers those cells),
-                -- then one column per gutter-sign callback painted on
-                -- EVERY sub-row so multi-row lines stay aligned, then a
-                -- 1-col separator before the text (also covered by the
-                -- pre-fill). Sign slots that returned nil stay blank.
-                -- Skipped entirely when view.no_gutter (text_geometry
-                -- already returned gutter_width=0). `no_line_numbers`
-                -- blanks the digits while keeping the gutter frame.
+                term:print(geo.block_x, row, spaces(geo.block_w), row_bg, row_bg)
+
+                -- Gutter: line numbers + signs
                 if not view.no_gutter and sub_row == 0 then
                     local line_num = view.no_line_numbers and "" or tostring(li + 1)
-                    local num_pad = spaces(line_digits - #line_num)
-                    term:print(block_x, row, " " .. num_pad .. line_num, num_fg, row_bg)
+                    local num_pad = spaces(geo.line_digits - #line_num)
+                    term:print(geo.block_x, row, " " .. num_pad .. line_num, num_fg, row_bg)
                 end
                 if not view.no_gutter and signs then
-                    local sx = block_x + 2 + line_digits -- +1 left margin +1 separator after number
+                    local sx = geo.block_x + 2 + geo.line_digits
                     for i = 1, #signs do
                         local s = signs[i]
                         if s then
@@ -3475,29 +3341,16 @@ function Editor:render()
                     end
                 end
 
-                -- Extract the sub-row's grapheme runs: each run carries its
-                -- 0-based DISPLAY column (within the sub-row), its 1-based
-                -- byte range into `line_text`, and its display width. We
-                -- emit one term:print per run at text_x+run.col so wide /
-                -- combining / ZWJ-cluster glyphs advance the correct number
-                -- of terminal cells (termbox knows about wide glyphs).
-                local runs_t0 = profile.now_us()
+                -- Grapheme runs
                 local runs, row_w = view:sub_row_runs(li, sub_row)
-                t_subruns = t_subruns + (profile.now_us() - runs_t0)
-                local chunk_start -- sub-row's first byte (0-based), set below
-                local chunk_end -- sub-row's last-after byte (0-based)
+                local chunk_start, chunk_end = 0, 0
                 if #runs > 0 then
                     chunk_start = runs[1].byte_start - 1
                     chunk_end = runs[#runs].byte_end
-                else
-                    chunk_start = 0
-                    chunk_end = 0
                 end
+
+                -- Lazy highlight segments for visible byte range
                 if line_segs == nil and chunk_end > chunk_start then
-                    -- Lazy clip: compute highlight segments for the
-                    -- visible byte range within this line. See the
-                    -- comment block above the per-sub-row loop.
-                    local hs_t0 = profile.now_us()
                     local visible_rows = (max_y or 0) + 2
                     local wrap_w = view.wrap_width or content_len
                     local vstart = chunk_start
@@ -3505,7 +3358,6 @@ function Editor:render()
                     if vend_est > content_len then
                         vend_est = content_len
                     end
-                    line_seg_vstart = vstart
                     local raw_segs = view:highlight_segments(li, vstart, vend_est)
                     if raw_segs and vstart > 0 then
                         for i = 1, #raw_segs do
@@ -3514,15 +3366,11 @@ function Editor:render()
                         end
                     end
                     line_segs = raw_segs
-                    t_hlseg = t_hlseg + (profile.now_us() - hs_t0)
                 end
+
+                -- Paint grapheme runs + selection overlay
                 if #runs > 0 then
-                    -- Selection rendering: build the union of selected
-                    -- byte ranges for THIS sub-row across ALL cursors
-                    -- (multi-cursor selections render together).
-                    -- sel_runs: list of {cs, ce} clamped to this sub-row,
-                    -- then merged for overlapping spans.
-                    local sel_t0 = profile.now_us()
+                    -- Selection ranges for this sub-row
                     local sel_runs = {}
                     for rsl, rsc, rel, rec in view:selection_ranges() do
                         ---@cast rsl integer
@@ -3542,7 +3390,6 @@ function Editor:render()
                     table.sort(sel_runs, function(a, b)
                         return a[1] < b[1]
                     end)
-                    -- Merge overlapping/adjacent runs
                     local merged = {}
                     for _, r in ipairs(sel_runs) do
                         if #merged > 0 and r[1] <= merged[#merged][2] then
@@ -3552,17 +3399,25 @@ function Editor:render()
                         end
                     end
 
-                    -- Base layer: paint every grapheme run.
-                    local paint_t0 = profile.now_us()
+                    -- Base layer: paint grapheme runs
                     for _, run in ipairs(runs) do
-                        paint_run(view, li, row, text_x, line_text, run, row_bg, line_segs)
+                        seg_idx = _paint_run(
+                            term,
+                            view,
+                            li,
+                            row,
+                            geo.text_x,
+                            line_text,
+                            run,
+                            row_bg,
+                            line_segs,
+                            seg_idx,
+                            focus_dim
+                        )
                     end
-                    t_paint = t_paint + (profile.now_us() - paint_t0)
 
-                    -- Selection overlay (reverse-video). Marked bytes map
-                    -- to graphemically-aligned display columns via byte_to_col.
+                    -- Selection overlay
                     for _, r in ipairs(merged) do
-                        -- byte range within sub-row -> display columns
                         local dcs = view:byte_to_col(li, r[1]) - view:byte_to_col(li, chunk_start)
                         local dce = view:byte_to_col(li, r[2]) - view:byte_to_col(li, chunk_start)
                         if dcs < 0 then
@@ -3572,12 +3427,6 @@ function Editor:render()
                             dce = row_w
                         end
                         if dce > dcs then
-                            -- Paint each grapheme run that intersects the
-                            -- selection range at that run's OWN display
-                            -- column (run.col). Advancing a running x here
-                            -- would drift past non-selected runs sitting
-                            -- before the selection start, drawing the
-                            -- reversed text at the wrong column.
                             for _, run in ipairs(runs) do
                                 if run.byte_end > r[1] and run.byte_start <= r[2] then
                                     local s = math.max(run.byte_start, r[1] + 1)
@@ -3586,7 +3435,7 @@ function Editor:render()
                                         local sel_text =
                                             line_text:sub(s, e):gsub(" ", "·"):gsub("\t", "→")
                                         term:print(
-                                            text_x + run.col,
+                                            geo.text_x + run.col,
                                             row,
                                             sel_text,
                                             ui("selection_fg"),
@@ -3595,18 +3444,13 @@ function Editor:render()
                                     end
                                 end
                             end
-                            -- Newline marker: this run reaches the
-                            -- last cell of the line's last sub-row AND
-                            -- the original line had a trailing newline
-                            -- → the selection includes EOL, so draw ↵ one
-                            -- cell past content.
                             if
                                 r[2] >= chunk_end
                                 and chunk_end >= content_len
                                 and #line_text > 0
-                                and buf:line_text(li):byte(-1) == 10
+                                and view.buffer:line_text(li):byte(-1) == 10
                             then
-                                local nl_x = text_x + row_w
+                                local nl_x = geo.text_x + row_w
                                 if nl_x < w then
                                     term:print(
                                         nl_x,
@@ -3619,87 +3463,100 @@ function Editor:render()
                             end
                         end
                     end
-                    t_sel = t_sel + (profile.now_us() - sel_t0)
                 end
 
-                -- Indent guides: faint │ at tab-stop boundaries inside
-                -- leading whitespace. Registered on the overlay layer
-                -- (screen-space floats) rather than painted inline with
-                -- the text, so they compose with extension overlays in a
-                -- single z-ordered flush. Queued BEFORE the cursor overlay
-                -- below so the float flush (registration order) keeps the
-                -- caret on top when it sits on a guide cell. Only on the
-                -- first sub-row (the only place indentation lives), and only
-                -- for guides that fall within this sub-row's display-column
-                -- range.
+                -- Indent guides
                 if sub_row == 0 and #guide_cols > 0 then
                     local guide_fg = ui("indent_guide")
                     for _, g in ipairs(guide_cols) do
                         if g < row_w then
-                            ov:put_float(text_x + g, row, "│", guide_fg, row_bg)
+                            ov:put_float(geo.text_x + g, row, "│", guide_fg, row_bg)
                         end
                     end
                 end
 
-                -- Cursor overlay: paint every cursor whose position
-                -- falls in THIS sub-row as a reverse-video cell of the
-                -- underlying grapheme (or a blank when the cursor sits
-                -- past end-of-content / on an empty line). Runs OUTSIDE
-                -- the runs-guard so a cursor on an empty line still
-                -- renders. c.col is a byte offset; translate to the
-                -- sub-row's display column via byte_to_col so the
-                -- caret lands on the correct cell for wide glyphs.
-                local cur_t0 = profile.now_us()
-                for _, c in ipairs(view.cursors) do
-                    if self._blink_on and c.line == li then
-                        local ws_t0 = profile.now_us()
-                        local csub_row = select(1, view:wrap_sub_position(li, c.col))
-                        t_wsub = t_wsub + (profile.now_us() - ws_t0)
-                        if csub_row == sub_row then
-                            local ccol = view:byte_to_col(li, c.col)
-                                - view:byte_to_col(li, chunk_start)
-                            if ccol < 0 then
-                                ccol = 0
+                -- Cursor overlay
+                if self._blink_on then
+                    for _, c in ipairs(view.cursors) do
+                        if c.line == li then
+                            local csub_row = select(1, view:wrap_sub_position(li, c.col))
+                            if csub_row == sub_row then
+                                local ccol = view:byte_to_col(li, c.col)
+                                    - view:byte_to_col(li, chunk_start)
+                                if ccol < 0 then
+                                    ccol = 0
+                                end
+                                if ccol <= row_w then
+                                    if view.whole_line_cursor then
+                                        local cfg = ui("cursor_fg")
+                                        local cbg = ui("cursor_bg")
+                                        ov:put_float(geo.text_x, row, spaces(row_w), cfg, cbg)
+                                        for _, run in ipairs(runs) do
+                                            local chunk =
+                                                line_text:sub(run.byte_start, run.byte_end)
+                                            if #chunk > 0 then
+                                                ov:put_float(
+                                                    geo.text_x + run.col,
+                                                    row,
+                                                    chunk,
+                                                    cfg,
+                                                    cbg
+                                                )
+                                            end
+                                        end
+                                    else
+                                        local ch = " "
+                                        for _, run in ipairs(runs) do
+                                            if
+                                                c.col + 1 >= run.byte_start
+                                                and c.col + 1 <= run.byte_end
+                                            then
+                                                ch = line_text:sub(run.byte_start, run.byte_end)
+                                                break
+                                            end
+                                        end
+                                        ov:put_float(
+                                            geo.text_x + ccol,
+                                            row,
+                                            ch,
+                                            ui("cursor_fg"),
+                                            ui("cursor_bg")
+                                        )
+                                    end
+                                end
                             end
-                            -- Allow the cursor to sit one cell past the
-                            -- last grapheme for end-of-content cursors.
-                            if ccol <= row_w then
-                                if view.whole_line_cursor then
-                                    -- Whole-row highlight (the "selected
-                                    -- row" for list app buffers): fill the
-                                    -- sub-row text area in cursor colors,
-                                    -- then re-emit each grapheme run on
-                                    -- top so the line text stays readable
-                                    -- (reverse-video across the whole row).
-                                    -- Painted as floats so the caret stays
-                                    -- on top of the syntax/selection layer.
-                                    local cfg = ui("cursor_fg")
-                                    local cbg = ui("cursor_bg")
-                                    ov:put_float(text_x, row, spaces(row_w), cfg, cbg)
-                                    for _, run in ipairs(runs) do
-                                        local chunk = line_text:sub(run.byte_start, run.byte_end)
-                                        if #chunk > 0 then
-                                            ov:put_float(text_x + run.col, row, chunk, cfg, cbg)
-                                        end
-                                    end
-                                else
-                                    local ch = " "
-                                    -- Find the grapheme run covering c.col.
-                                    for _, run in ipairs(runs) do
-                                        if
-                                            c.col + 1 >= run.byte_start
-                                            and c.col + 1 <= run.byte_end
-                                        then
-                                            ch = line_text:sub(run.byte_start, run.byte_end)
-                                            break
-                                        end
-                                    end
+                        end
+                    end
+                end
+
+                -- Isearch match overlay
+                local im = self._isearch_match
+                if im then
+                    local s_col, e_col
+                    if im.line == li and im.end_line == li then
+                        s_col, e_col = im.offset, im.end_offset
+                    elseif im.line == li then
+                        s_col, e_col = im.offset, content_len
+                    elseif im.end_line == li then
+                        s_col, e_col = 0, im.end_offset
+                    elseif li > im.line and li < im.end_line then
+                        s_col, e_col = 0, content_len
+                    end
+                    if s_col and e_col and e_col > s_col then
+                        local m_fg, m_bg = ui("default_fg"), ui("search_match_bg")
+                        for _, run in ipairs(runs) do
+                            local rb = run.byte_start - 1
+                            local re = run.byte_end
+                            if rb < e_col and re > s_col then
+                                local mcol = view:byte_to_col(li, rb)
+                                    - view:byte_to_col(li, chunk_start)
+                                if mcol >= 0 and mcol <= row_w then
                                     ov:put_float(
-                                        text_x + ccol,
+                                        geo.text_x + mcol,
                                         row,
-                                        ch,
-                                        ui("cursor_fg"),
-                                        ui("cursor_bg")
+                                        line_text:sub(run.byte_start, run.byte_end),
+                                        m_fg,
+                                        m_bg
                                     )
                                 end
                             end
@@ -3707,52 +3564,9 @@ function Editor:render()
                     end
                 end
 
-                -- Isearch match overlay (typing-phase match highlight).
-                -- Highlights the full byte range of the current match
-                -- using search_match_bg without touching the selection.
-                local im = self._isearch_match
-                if im then
-                    local s_col, e_col
-                    if im.line == li and im.end_line == li then
-                        s_col = im.offset
-                        e_col = im.end_offset
-                    elseif im.line == li then
-                        s_col = im.offset
-                        e_col = content_len
-                    elseif im.end_line == li then
-                        s_col = 0
-                        e_col = im.end_offset
-                    elseif li > im.line and li < im.end_line then
-                        s_col = 0
-                        e_col = content_len
-                    end
-                    if s_col and e_col and e_col > s_col then
-                        local m_fg = ui("default_fg")
-                        local m_bg = ui("search_match_bg")
-                        for _, run in ipairs(runs) do
-                            local rb = run.byte_start - 1 -- 0-based
-                            local re = run.byte_end -- 0-based past-end
-                            if rb < e_col and re > s_col then
-                                local mcol = view:byte_to_col(li, rb)
-                                    - view:byte_to_col(li, chunk_start)
-                                if mcol >= 0 and mcol <= row_w then
-                                    local ch = line_text:sub(run.byte_start, run.byte_end)
-                                    ov:put_float(text_x + mcol, row, ch, m_fg, m_bg)
-                                end
-                            end
-                        end
-                    end
-                end
-
-                -- Pending-drop markers (drop mode staged by
-                -- add_cursor_here before commit_pending_cursors).
-                -- Painted with a yellow BACKGROUND so the user can see
-                -- where the staged drops are. Same display-column
-                -- mapping as the active-cursor overlay above.
+                -- Pending-drop markers
                 for _, c in ipairs(view.pending_cursors) do
                     if c.line == li then
-                        -- Skip if an active cursor already sits here (so
-                        -- the cursor overlay isn't hidden by the drop marker).
                         local occluded = false
                         for _, ac in ipairs(view.cursors) do
                             if ac.line == c.line and ac.col == c.col then
@@ -3761,11 +3575,9 @@ function Editor:render()
                             end
                         end
                         if occluded then
-                            goto continue
+                            goto continue_drop
                         end
-                        local ws_t0 = profile.now_us()
                         local csub_row = select(1, view:wrap_sub_position(li, c.col))
-                        t_wsub = t_wsub + (profile.now_us() - ws_t0)
                         if csub_row == sub_row then
                             local ccol = view:byte_to_col(li, c.col)
                                 - view:byte_to_col(li, chunk_start)
@@ -3783,79 +3595,111 @@ function Editor:render()
                                         break
                                     end
                                 end
-                                ov:put_float(text_x + ccol, row, ch, ui("cursor_fg"), ui("drop_bg"))
+                                ov:put_float(
+                                    geo.text_x + ccol,
+                                    row,
+                                    ch,
+                                    ui("cursor_fg"),
+                                    ui("drop_bg")
+                                )
                             end
                         end
                     end
-                    ::continue::
+                    ::continue_drop::
                 end
-                t_cur = t_cur + (profile.now_us() - cur_t0)
             end)
-            t_body = t_body + (profile.now_us() - body_t0)
             if not ok then
                 log.error(
                     "editor",
                     "render row failed",
                     { row = row, li = li, sub_row = sub_row, error = tostring(err) }
                 )
-                break
+                return
             end
-
             sub_row = sub_row + 1
             row = row + 1
         end
-
         li = li + 1
         sub_row = 0
     end
-    profile.report("editor", "row_strip", t_strip)
-    profile.report("editor", "row_wraprows", t_wraprows)
-    profile.report("editor", "row_subruns", t_subruns, { sub_rows = sub_count })
-    profile.report("editor", "row_paint", t_paint)
-    profile.report("editor", "row_hlseg", t_hlseg)
-    profile.report("editor", "row_termprint", t_termprint)
-    profile.report("editor", "row_body", t_body)
-    profile.report("editor", "row_wsub", t_wsub)
-    profile.report("editor", "row_sel", t_sel)
-    profile.report("editor", "row_cur", t_cur)
-    profile.report("editor", "row_search", t_search)
-    profile.span("editor", "row_loop", rows_t0)
+end
 
-    -- Cursor (only in main view when minibuffer is inactive)
-    if not (mb and mb.active) then
-        -- The visible caret is drawn as a reverse-video cell in the
-        -- per-chunk loop above (toggled by the blink timer). The
-        -- hardware terminal caret is always hidden (see term:hide_cursor
-        -- at the top of render), so there is nothing to position here.
-    end
+--- Render modeline, eval result, overlay flush, and present.
+---@param view View
+---@param term table
+---@param mb Minibuffer
+---@param ov OverlayManager
+---@param fp function
+---@param layout table from _render_layout
+function Editor:_render_finalize(view, term, mb, ov, fp, layout)
+    local h = term:height()
+    local w = term:width()
 
-    -- Modeline (at row h - footer_rows). Delegated to the segmented
-    -- renderer (Editor:render_modeline) so users can override/reorder/
-    -- append sections via `editor.modeline_segments`. Separators are
-    -- auto-calculated (alternating ◢/◣) with colors derived from adjacent
-    -- segment bg colors; text color is auto-detected from bg luminance.
-    local modeline_y = h - footer_tail - 1
-    local ml_t0 = profile.now_us()
+    -- Modeline
+    local modeline_y = h - layout.footer_tail - 1
     self:render_modeline(view, w, modeline_y, fp)
-    profile.span("editor", "render_modeline", ml_t0)
 
-    -- Eval result row, shown when the minibuffer is inactive. (The
-    -- inline strip / floating palette chrome was already painted by
-    -- Minibuffer:_render above, near the top of render.)
+    -- Eval result
+    local eval_rows = (not (mb and mb.active) and self._eval_result) and 1 or 0
     if eval_rows > 0 then
         fp(0, modeline_y + 1, "=> " .. self._eval_result, ui("status_message"), ui("default_bg"))
     end
 
-    local emit_t0 = profile.now_us()
     ov:emit_render()
-    profile.span("editor", "overlay_emit", emit_t0)
-    local flush_t0 = profile.now_us()
     ov:flush()
-    profile.span("editor", "overlay_flush", flush_t0)
-    profile.span("editor", "render_total", render_t0)
-    local present_t0 = profile.now_us()
     term:present()
-    profile.span("editor", "term_present", present_t0)
+end
+
+--- Render the entire viewport.
+function Editor:render()
+    local render_t0 = profile.now_us()
+    local term = self.term
+
+    -- Phase 1: Clamp cursors + setup
+    self:_render_clamp_views()
+    local mb = self.minibuffer
+    local ov = self.overlays
+    local view = self:current_view()
+    ov:begin_frame(view)
+    local fp = function(x, y, text, fg, bg)
+        ov:put_float(x, y, text, fg, bg)
+    end
+    local BLACK = 0x000000
+    local function focus_dim(fg, bg)
+        if not (mb and mb.palette) then
+            return fg, bg
+        end
+        return blend(fg, BLACK, 165), blend(bg, BLACK, 195)
+    end
+
+    -- Phase 2: Clear
+    self:_render_clear(term)
+
+    -- Phase 3: Loading state
+    if not view or not view.file_loaded then
+        self:_render_loading(term, ov, fp)
+        profile.span("editor", "render_total", render_t0)
+        return
+    end
+
+    -- Phase 4: Geometry
+    local geo = self:_render_geometry(view, term:width())
+    if geo.text_w <= 0 then
+        term:present()
+        profile.span("editor", "render_total", render_t0)
+        return
+    end
+
+    -- Phase 5: Layout
+    local layout = self:_render_layout(mb, view, geo.text_w, term, fp, ov)
+
+    -- Phase 6: Content
+    self:_render_content(view, term, mb, ov, focus_dim, geo, layout)
+
+    -- Phase 7: Finalize
+    self:_render_finalize(view, term, mb, ov, fp, layout)
+
+    profile.span("editor", "render_total", render_t0)
 end
 
 return Editor

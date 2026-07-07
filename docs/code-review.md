@@ -13,7 +13,7 @@
 |------|:-----:|:-----:|----------------|
 | C Core (main.c, shared_state.h, buffer.h, FFI bindings) | **6.5/10** | ~3,500 | ABI fixed, struct-tearing fixed, thread functions consolidated |
 | Core Editor (editor.lua, view.lua, buffer.lua, commands.lua, main.lua) | **5.5/10** | ~18,000 | Drain functions consolidated, run_replace stale-closure fixed, 750-line render() still monolithic |
-| LSP & Threading (lsp_*.lua, proc_*.lua, highlight_lane.lua, io_lane.lua, editor_listeners.lua) | **5/10** | ~5,200 | read_buf leak fixed, waitpid logging added, applyEdit relay added, 500-line closures still open |
+| LSP & Threading (lsp_*.lua, proc_*.lua, highlight_lane.lua, io_lane.lua, editor_listeners.lua) | **6/10** | ~5,200 | read_buf leak fixed, waitpid logging added, applyEdit relay added, listener closures extracted to module level |
 | UI & Input (minibuffer.lua, completion_menu.lua, whichkey.lua, overlay.lua, completers.lua, etc.) | **4/10** | ~8,000 | Completion rendering extracted, nil-comparison crash fixed, ~180 lines duplicate code removed |
 | Infrastructure (utf8.lua, ts.lua, advice.lua, shared.lua, config.lua, clipboard.lua, etc.) | **6/10** | ~7,500 | Error logging added to advice, nil deref fixed in clipboard, shutdown push fixed, ownership documented |
 
@@ -172,14 +172,16 @@ Two consecutive pushes to `outbox_io`; the IO lane's inbox never receives a shut
 
 ---
 
-### H09 [HIGH] 750-line monolithic `Editor:render()` function
-**File:** `editor.lua:2287-3037`
+### H09 [HIGH] 750-line monolithic `Editor:render()` function — **FIXED**
+**File:** `editor.lua`
 
 Single function handling: clamp, clear, gutter-paint, syntax-highlight, selection-overlay, cursor-overlay, indent-guide, pending-drop, modeline, eval-result, minibuffer chrome, and overlay flush — with nested function definitions (`paint_run`, `fp`, `focus_dim`) re-created every frame.
 
 **Impact:** Impossible to understand, test, or modify safely. Performance instrumentation interspersed with rendering logic.
 
 **Fix:** Factor into 5-7 separate methods (e.g., `render_background`, `render_gutter`, `render_content`, `render_modeline`, `render_overlays`).
+
+**Resolution (2026-07-07):** Decomposed into 8 methods: `_render_clamp_views`, `_render_clear`, `_render_loading`, `_render_geometry`, `_render_layout`, `_paint_run` (module-level local), `_render_content` (main loop, ~370 lines), `_render_finalize`. `render()` is now a 52-line orchestrator with 7 clear phases. `render_modeline` already existed separately. `just check` passes clean.
 
 ---
 
@@ -210,7 +212,7 @@ followed by a call to the corresponding motion. Forward/backward motion pairs di
 
 ---
 
-### H12 [HIGH] `editor_listeners.lua` — ~500 lines of event-handler closures
+### H12 [HIGH] `editor_listeners.lua` — ~500 lines of event-handler closures — **FIXED**
 **File:** `editor_listeners.lua`
 
 Diagnostic squiggle overlay (~90 lines), hover popup (~190 lines), code action gutter markers — all defined as inline closures within `register_all`. Debug logging closures `on_message`/`on_exit` are defined but never used (dead code from old callback-based LSP API).
@@ -218,6 +220,8 @@ Diagnostic squiggle overlay (~90 lines), hover popup (~190 lines), code action g
 **Impact:** Monolithic, untestable. Dead closures create confusion for maintainers.
 
 **Fix:** Extract each handler to a named module-level function. Remove dead closures.
+
+**Resolution (2026-07-07):** Extracted 21 named handler functions (`on_pre_command_debug`, `on_mode_enter_lsp`, `on_render_diagnostic_squiggles`, etc.) + 2 gutter sign functions to module level. `setup()` went from ~970 lines of inline closures to 52 lines of `es:on(...)` registrations. `version_stale` and `commands_mod` require moved to module level. `just check` passes clean.
 
 ---
 
@@ -330,8 +334,8 @@ Caller receives a raw `void*` cdata. No ownership info, no size, no GC finalizer
 
 ---
 
-### H20 [HIGH] `process_key` function is ~287 lines and uses `goto`
-**File:** `editor.lua:~610-897`
+### H20 [HIGH] `process_key` function is ~287 lines and uses `goto` — **FIXED**
+**File:** `main.lua:389-710`
 
 Handles: read-char interception, completion-menu dispatch, M-digit accumulation, universal-arg state machine, printable handling, trie navigation, and command dispatch. Uses a `goto feed_trie` label.
 
@@ -339,9 +343,13 @@ Handles: read-char interception, completion-menu dispatch, M-digit accumulation,
 
 **Fix:** Split into separate functions: `process_read_char`, `process_completion`, `process_universal_arg`, `process_printable`, `process_trie_dispatch`.
 
+**Resolution (2026-07-07):** Extracted 6 phase functions: `_detect_printable`, `_intercept_special_keys`, `_handle_digit_arg`, `_handle_printable`, `_handle_universal_arg`, `_dispatch_trie`. `process_key` is now a 51-line orchestrator with clear signal-based control flow ("done"/"commit"/"cancel"/"trie"). 
+
+**Bonus:** Introduced a **transient key handler stack** (`editor._transient_handlers`, `push_transient_handler`/`remove_transient_handler`) replacing the hardcoded special-case checks in `_intercept_special_keys` with a generic LIFO handler array. Read-char, completion menu, query-replace, and replace-regexp each push a handler when activated. Adding a new transient mode now requires zero changes to `process_key`. Also added `keybind.handler(bindings)` — builds a trie from a keybinding map and returns a handler ready for `push_transient_handler`.
+
 ---
 
-### H21 [HIGH] `completers.lua` is a 1,352-line grab-bag
+### H21 [HIGH] `completers.lua` is a 1,352-line grab-bag — **SKIPPED**
 **File:** `completers.lua`
 
 Mixes LSP completion (async bridging), symbol navigation (document + workspace), command completion, file completion, buffer-words completion, dabbrev, and mode dispatch resolver. The LSP completers alone are ~600 lines of tangled async orchestration.
@@ -1107,10 +1115,10 @@ The clean lint result confirms that the *surface* of the code (syntax, type anno
 | C06 | CRITICAL | `find_executable` never checks X_OK | `lsp_lane.lua:432-441` |
 | H07 | HIGH | `shared.lua` pushes `MSG_SHUTDOWN` to `outbox_io` twice | `shared.lua:62-68` |
 | H08 | HIGH | Missing tree-sitter parser symbols in `vendor.h` | `vendor.h:10-20` |
-| H09 | HIGH | 750-line monolithic `Editor:render()` function | `editor.lua:2287-3037` |
+| H09 | HIGH | 750-line monolithic `Editor:render()` function — **FIXED** | `editor.lua` |
 | H10 | HIGH | `commands.lua` ~60% copy-paste — **FIXED** | `commands.lua` |
 | H11 | HIGH | `main.lua` event loop is 850+ lines with 4 duplicated drain functions | `main.lua:900-1759` |
-| H12 | HIGH | `editor_listeners.lua` — ~500 lines of event-handler closures | `editor_listeners.lua` |
+| H12 | HIGH | `editor_listeners.lua` — ~500 lines of event-handler closures — **FIXED** | `editor_listeners.lua` |
 | H13 | HIGH | Massive rendering duplication: minibuffer × completion_menu | `minibuffer.lua`, `completion_menu.lua` |
 | H14 | HIGH | Four lane thread functions are copy-paste in C | `main.c:105-198` |
 | H15 | HIGH | `advice.lua` silently swallows errors in before/after | `advice.lua:109-128` |
@@ -1118,8 +1126,8 @@ The clean lint result confirms that the *surface* of the code (syntax, type anno
 | H17 | HIGH | `reap_if_done` silently masks all waitpid errors | `proc_lane.lua:166-172` |
 | H18 | HIGH | `run_replace` uses stale view closure across yields | `commands.lua:4620-4680` |
 | H19 | HIGH | `SharedState:pop()` returns raw ptr cdata with no ownership | `shared.lua:42-55` |
-| H20 | HIGH | `process_key` function is ~287 lines and uses goto | `editor.lua:~610-897` |
-| H21 | HIGH | `completers.lua` is a 1,352-line grab-bag | `completers.lua` |
+| H20 | HIGH | `process_key` function is ~287 lines and uses goto — **FIXED** | `main.lua:389-710` |
+| H21 | HIGH | `completers.lua` is a 1,352-line grab-bag — **SKIPPED** | `completers.lua` |
 | H22 | HIGH | No `workspace/applyEdit` inbound handler | `lsp_lane.lua` |
 | M23 | MEDIUM | Comment-to-code ratio — **SKIPPED** | (many files) |
 | M24 | MEDIUM | `debug.getinfo` called on every keystroke — **FIXED** | `editor.lua:~855` |

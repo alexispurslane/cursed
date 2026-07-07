@@ -24,11 +24,18 @@ so the agent can pick up context across sessions.
 
 ## Gotchas & Errors
 
-- lua:55: kqueue: add_fd(15) on kq=0 failed (rc=-1 errno=9)
-- lua:276: table index is nil
 - /bin/bash: line 26: luajit: command not found
 - Command aborted
 - Good idea in principle — but I can't actually launch subagents from here.
 - Could not find the exact text in /Users/alexispurslane/Development/scratch/cursed/src/cursed/modes/lua.lua. The old text must match exactly including all whitespace and newlines.
 - Could not find the exact text in /Users/alexispurslane/Development/scratch/cursed/src/cursed/modes/rust.lua. The old text must match exactly including all whitespace and newlines.
 - (no output)
+- Validation failed for tool "edit": — Fix: Let me fix this in two separate calls — first fix `_paint_run`, then fix its call site:
+- Could not find the exact text in /Users/alexispurslane/Development/scratch/cursed/src/cursed/editor.lua. The old text must match exactly including all whitespace and newlines.
+
+## Heavily Read
+
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/editor_listeners.lua (5 reads) — Let me start by reading the file to understand the current structure.
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/editor.lua (23 reads) — Let me trace how each consumer activates/deactivates to find the right push/remo
+- /Users/alexispurslane/Development/scratch/cursed/src/main.lua (5 reads) — It's in `main.lua`, not `editor.lua`. Let me read it:
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/keybind.lua (3 reads) — The `Trie.build()` and `Trie:lookup()` already exist and work. What's missing is
