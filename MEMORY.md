@@ -11,7 +11,6 @@ so the agent can pick up context across sessions.
 
 ## Key Decisions
 
-- we should also have an input_hook that completes tags
 - Could mitigate by keeping the array for O(1) prefix access and only using BIT for update paths, rebuilding the array from BIT when convenient.
 - when the user is in the minibuffer crafting a search, we should only find the first instance, jumping there so they can see it; only when they hit enter should the search be turned into candidate cursors at every match.
 - add_cursor_candidate doesn't seem to only activate the candidates within the region --- it seems to always do all of them
@@ -21,6 +20,7 @@ so the agent can pick up context across sessions.
 - lsp_rename` right after the `find_word_*` helpers so it can use `find_word_at` as an upvalue.
 - lsp_version then
 - Merge into a single function that optionally handles the NULL-exe_name case.
+- we have a fair amount of LSP capabilities at this point, we should probably advertise all of them
 
 ## Gotchas & Errors
 
@@ -35,11 +35,11 @@ so the agent can pick up context across sessions.
 
 ## Heavily Read
 
-- /Users/alexispurslane/Development/scratch/cursed/docs/code-review.md (11 reads) — nope, mark what you've done so far off in @docs/code-review.md
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/editor.lua (6 reads) — M39 is more involved than it looks — the piece mutation surface is large, and th
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/commands.lua (7 reads) — Now I have a clear picture. Let me check what function contains the `debug.getin
-- /Users/alexispurslane/Development/scratch/cursed/src/main.lua (4 reads) — Now I understand both call sites. Let me read the main.lua dispatch for complete
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/advice.lua (3 reads) — Good. The doc comment at line 31 still describes the old behavior. Let me update
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/buffer.lua (10 reads) — Found it at line 237. Let me read it:
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/utf8.lua (8 reads) — Three quick perf wins done (M24, M25, M40). M39 was a skip (too invasive for the
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/completers.lua (3 reads) — Now the cache logic in `completers.buffer_words`:
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/lsp_client.lua (4 reads) — Now update the stale comment in `lsp_client.lua` that references the old `{}`:
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/lsp_lane.lua (7 reads) — let's mark M38 as not going to do; let's remove send_missing, and just call send
+- /Users/alexispurslane/Development/scratch/cursed/docs/code-review.md (14 reads) — look at H10 and *pitch* me how you'd factor commands.lua out without significant
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/shared_ffi.lua (3 reads) — I think you caused an issue from one of the earlier edits this jj revision:
+- /Users/alexispurslane/Development/scratch/cursed/src/shared_state.h (5 reads) — Good — I can see the exact C layout. Let me fix both at once. First, add the C h
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/proc_lane.lua (6 reads) — Let me trace through the actual control flow carefully.
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/commands.lua (17 reads) — The deletion accidentally ate `scroll_up` and `beginning_of_buffer`. Let me fix:
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/default_textobjects.lua (4 reads) — Let me do this in order. First, the textobject definitions:

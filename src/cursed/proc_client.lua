@@ -24,9 +24,8 @@
 ---     - pushes MSG_PROC_STDIN (malloc'd copy; lane frees)
 ---
 ---   kill(procid, signal)
----     - pushes MSG_PROC_KILL (SIGTERM default)
----     - lane acks via MSG_PROC_EXIT(KILL_SENT); the authoritative
----       death notice (SIGNALED/EXITED) arrives later
+---     - pushes MSG_PROC_KILL (SIGTERM default); the authoritative
+---       death notice (SIGNALED/EXITED) arrives when the child is reaped
 ---
 ---   on_proc_exit(procid)
 ---     - unregisters the `process_in:<procid>` listener (called by
@@ -200,8 +199,8 @@ function M.send_stdin(procid, bytes)
 end
 
 --- Deliver a signal to a process (SIGTERM by default). Fire-and-forget;
---- the lane acks with KILL_SENT, then the authoritative SIGNALED/EXITED
---- arrives later as the pipes EOF + the child is reaped.
+--- the authoritative SIGNALED/EXITED arrives later when the pipes EOF
+--- and the child is reaped.
 ---@param procid integer
 ---@param signal integer|nil  default 15 (SIGTERM)
 function M.kill(procid, signal)

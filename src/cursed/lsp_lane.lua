@@ -92,25 +92,14 @@ end
 --- (main frees on consume).
 local function send_handshake(client)
     local hs = ffi.cast("struct LspHandshake *", ffi.C.calloc(1, ffi.sizeof("struct LspHandshake")))
-    ffi.copy(hs.exe_name, client.exe_name, math.min(#client.exe_name, 63))
+    if client.exe_name ~= nil then
+        ffi.copy(hs.exe_name, client.exe_name, math.min(#client.exe_name, 63))
+    end
     hs.client_id = client.client_id
     hs.status = client.status
     if client.trigger_chars ~= nil and #client.trigger_chars > 0 then
         ffi.copy(hs.trigger_chars, client.trigger_chars, math.min(#client.trigger_chars, 63))
     end
-    ss:push(ss._ptr.inbox_lsp, { type = constants.MSG_LSP_HANDSHAKE, ptr = hs })
-end
-
---- Relay a MISSING status for a client_id whose binary wasn't on PATH.
---- No client object exists (spawn never succeeded), so build the
---- handshake directly. Lets main move its provisional entry → missing.
-local function send_missing(client_id, exe_name)
-    local hs = ffi.cast("struct LspHandshake *", ffi.C.calloc(1, ffi.sizeof("struct LspHandshake")))
-    if exe_name ~= nil then
-        ffi.copy(hs.exe_name, exe_name, math.min(#exe_name, 63))
-    end
-    hs.client_id = client_id
-    hs.status = constants.LSP_STATUS_MISSING
     ss:push(ss._ptr.inbox_lsp, { type = constants.MSG_LSP_HANDSHAKE, ptr = hs })
 end
 
@@ -616,7 +605,39 @@ local function spawn(cands, workspace_dir, client_id)
     client:request("initialize", {
         processId = pid,
         rootUri = "file://" .. workspace_dir,
-        capabilities = {},
+        capabilities = {
+            offsetEncoding = "utf-8",
+            general = {
+                positionEncodings = { "utf-8" },
+            },
+            textDocument = {
+                synchronization = {
+                    didSave = false,
+                },
+                completion = {
+                    completionItem = {
+                        snippetSupport = false,
+                        documentationFormat = { "plaintext" },
+                    },
+                },
+                hover = {
+                    contentFormat = { "plaintext" },
+                },
+                definition = {},
+                rename = {
+                    prepareSupport = false,
+                },
+                codeAction = {},
+                formatting = {},
+                publishDiagnostics = {},
+            },
+            workspace = {
+                applyEdit = true,
+                workspaceEdit = {
+                    documentChanges = true,
+                },
+            },
+        },
     })
 
     -- Relay "running, not yet initialized" so the modeline can show the
@@ -705,7 +726,11 @@ local function handle_spawn(msg)
         log.info("lsp_lane", "executable not found on PATH", { candidates = #cands })
         -- Relay MISSING so main moves its provisional entry → missing
         -- (and the modeline shows srv— instead of hanging in spawning).
-        send_missing(client_id, cands[1].bin)
+        send_handshake({
+            client_id = client_id,
+            exe_name = cands[1].bin,
+            status = constants.LSP_STATUS_MISSING,
+        })
         return
     end
 end

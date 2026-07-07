@@ -307,7 +307,6 @@ end
 local PROC_KIND_EXITED = 0
 local PROC_KIND_SIGNALED = 1
 local PROC_KIND_FAILED = 2
-local PROC_KIND_KILL_SENT = 3
 
 --- Map a kind code to the event tag callers see as the second arg to
 --- `process_out:<procid>` listeners.
@@ -318,8 +317,6 @@ local function proc_kind_tag(kind)
         return "signaled"
     elseif kind == PROC_KIND_FAILED then
         return "failed"
-    elseif kind == PROC_KIND_KILL_SENT then
-        return "kill_sent"
     end
     return "unknown"
 end

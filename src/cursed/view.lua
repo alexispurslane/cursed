@@ -980,6 +980,7 @@ function View:set_major_modes(modes)
     if self.editor then
         self.editor:rebuild_active_trie()
     end
+    self._cached_textobjects = nil -- invalidated on mode change
 end
 
 --- Dynamically change display options (no_gutter, no_line_numbers,
@@ -4784,8 +4785,12 @@ end
 --- ever sees functions.
 ---@return table
 function View:_get_textobjects()
+    if self._cached_textobjects ~= nil then
+        return self._cached_textobjects
+    end
     local defaults = load_default_textobjects()
     if #self._major_modes == 0 then
+        self._cached_textobjects = defaults
         return defaults
     end
     local merged = {}
@@ -4797,6 +4802,7 @@ function View:_get_textobjects()
             merged[k] = v
         end
     end
+    self._cached_textobjects = merged
     return merged
 end
 

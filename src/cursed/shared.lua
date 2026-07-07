@@ -96,7 +96,7 @@ end
 -- Running flag
 ----------------------------------------------------------------------------------------------------
 
---- Check if the shared state is still running.
+--- Check if the shared state is still running (atomic load).
 ---@return boolean
 function SharedState:running()
     return self._ptr.running

@@ -95,26 +95,6 @@ commands.move_line_end = function(view, _editor, ...)
     end
 end
 
-commands.backward_char = function(view, _editor, ...)
-    local n = repeat_count(...)
-    view:move_char(-n)
-end
-
-commands.forward_char = function(view, _editor, ...)
-    local n = repeat_count(...)
-    view:move_char(n)
-end
-
-commands.previous_line = function(view, _editor, ...)
-    local n = repeat_count(...)
-    view:move_line(-n)
-end
-
-commands.next_line = function(view, _editor, ...)
-    local n = repeat_count(...)
-    view:move_line(n)
-end
-
 ----------------------------------------------------------------------------------------------------
 -- Shift-select motion variants.
 --
@@ -134,41 +114,13 @@ end
 -- chord is free (alt-E/alt-A are; alt-F/alt-B collide with bigword).
 ----------------------------------------------------------------------------------------------------
 
-commands.forward_char_select = function(view, editor, ...)
-    local n = repeat_count(...)
-    editor._extend = true
-    view:_begin_shift_select()
-    view:move_char(n)
-end
-
-commands.backward_char_select = function(view, editor, ...)
-    local n = repeat_count(...)
-    editor._extend = true
-    view:_begin_shift_select()
-    view:move_char(-n)
-end
-
-commands.next_line_select = function(view, editor, ...)
-    local n = repeat_count(...)
-    editor._extend = true
-    view:_begin_shift_select()
-    view:move_line(n)
-end
-
-commands.previous_line_select = function(view, editor, ...)
-    local n = repeat_count(...)
-    editor._extend = true
-    view:_begin_shift_select()
-    view:move_line(-n)
-end
-
 commands.arrow_up_select = function(view, editor)
     local mb = editor.minibuffer
     if mb and mb.active and mb.completion and #mb._completions > 0 then
         mb:comp_up()
         return
     end
-    commands.previous_line_select(view, editor)
+    commands.backward_line_select(view, editor)
 end
 
 commands.arrow_down_select = function(view, editor)
@@ -177,7 +129,7 @@ commands.arrow_down_select = function(view, editor)
         mb:comp_down()
         return
     end
-    commands.next_line_select(view, editor)
+    commands.forward_line_select(view, editor)
 end
 
 commands.move_line_start_select = function(view, editor, ...)
@@ -200,58 +152,6 @@ commands.move_line_end_select = function(view, editor, ...)
     else
         view:move_line_end()
     end
-end
-
-commands.forward_word_select = function(view, editor, ...)
-    local n = repeat_count(...)
-    editor._extend = true
-    view:_begin_shift_select()
-    view:move_word(n, "word")
-end
-
-commands.backward_word_select = function(view, editor, ...)
-    local n = repeat_count(...)
-    editor._extend = true
-    view:_begin_shift_select()
-    view:move_word(-n, "word")
-end
-
-commands.forward_bigword_select = function(view, editor, ...)
-    local n = repeat_count(...)
-    editor._extend = true
-    view:_begin_shift_select()
-    view:move_word(n, "bigword")
-end
-
-commands.backward_bigword_select = function(view, editor, ...)
-    local n = repeat_count(...)
-    editor._extend = true
-    view:_begin_shift_select()
-    view:move_word(-n, "bigword")
-end
-
-commands.forward_sentence_select = function(view, editor, ...)
-    editor._extend = true
-    view:_begin_shift_select()
-    return view:move_word(math.abs(repeat_count(...)), "sentence")
-end
-
-commands.backward_sentence_select = function(view, editor, ...)
-    editor._extend = true
-    view:_begin_shift_select()
-    return view:move_word(-math.abs(repeat_count(...)), "sentence")
-end
-
-commands.forward_subsentence_select = function(view, editor, ...)
-    editor._extend = true
-    view:_begin_shift_select()
-    return view:move_word(math.abs(repeat_count(...)), "subsentence")
-end
-
-commands.backward_subsentence_select = function(view, editor, ...)
-    editor._extend = true
-    view:_begin_shift_select()
-    return view:move_word(-math.abs(repeat_count(...)), "subsentence")
 end
 
 commands.beginning_of_buffer_select = function(view, editor, ...)
@@ -294,48 +194,6 @@ commands.scroll_up = function(view, editor, ...)
     local n = repeat_count(...)
     local page_size = editor.term:height() - editor:footer_rows()
     view:scroll_page(n, page_size)
-end
-
-commands.forward_word = function(view, _editor, ...)
-    local n = repeat_count(...)
-    view:move_word(n, "word")
-end
-
-commands.backward_word = function(view, _editor, ...)
-    local n = repeat_count(...)
-    view:move_word(-n, "word")
-end
-
---- Sentence / subsentence motion is expressed purely over the
---- textobject range via move_word, which already implements the
---- dir-aware contract (forward→next unit when between, backward→prev)
---- plus the end/start-of-document guards. The range's (el,ec) is
---- right after the punctuation char and (sl,sc) is the first char
---- after the previous gap — exactly Emacs' landing points — so no
---- match-table / boundary-pattern machinery is needed.
-
---- Emacs `forward-sentence` (M-e). Universal arg repeats.
---- Multi-cursor aware.
-commands.forward_sentence = function(view, _editor, ...)
-    return view:move_word(math.abs(repeat_count(...)), "sentence")
-end
-
---- Emacs `backward-sentence` (M-a): move to the start of the
---- current sentence, or (if already there) the previous one.
---- Universal arg repeats. Multi-cursor aware.
-commands.backward_sentence = function(view, _editor, ...)
-    return view:move_word(-math.abs(repeat_count(...)), "sentence")
-end
-
---- Forward subsentence motion (next clause boundary).
---- Same landing semantics as forward_sentence over "subsentence".
-commands.forward_subsentence = function(view, _editor, ...)
-    return view:move_word(math.abs(repeat_count(...)), "subsentence")
-end
-
---- Backward subsentence motion (previous clause boundary).
-commands.backward_subsentence = function(view, _editor, ...)
-    return view:move_word(-math.abs(repeat_count(...)), "subsentence")
 end
 
 commands.beginning_of_buffer = function(view, _editor, ...)
@@ -1352,7 +1210,7 @@ commands.arrow_up = function(view, editor)
         mb:comp_up()
         return
     end
-    commands.previous_line(view, editor)
+    commands.backward_line(view, editor)
 end
 
 commands.arrow_down = function(view, editor)
@@ -1361,7 +1219,7 @@ commands.arrow_down = function(view, editor)
         mb:comp_down()
         return
     end
-    commands.next_line(view, editor)
+    commands.forward_line(view, editor)
 end
 
 commands.enter_key = function(view, editor)

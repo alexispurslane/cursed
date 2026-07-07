@@ -30,6 +30,43 @@
 local TO = require("cursed.textobject")
 
 return {
+    --- Single character — the atomic motion unit. Returns the range
+    --- of the character at/in the direction of `dir` from (line,col).
+    --- Also serves as the smallest rung on the expand-region ladder.
+    ---@param view table
+    ---@param line integer
+    ---@param col integer
+    ---@param dir integer 1=forward, -1=backward
+    char = function(view, line, col, dir)
+        if dir and dir > 0 then
+            local eol = view:content_len(line)
+            if col >= eol then
+                if line + 1 >= view:line_count() then
+                    return nil
+                end
+                return line + 1, 0, line + 1, 1, 0
+            end
+            return line, col, line, col + 1, 0
+        elseif dir and dir < 0 then
+            if col == 0 then
+                if line == 0 then
+                    return nil
+                end
+                local prev_eol = view:content_len(line - 1)
+                return line - 1, prev_eol + 1, line - 1, prev_eol + 1, 0
+            end
+            return line, col - 1, line, col, 0
+        else
+            -- No dir: selection mode (expand-region, mark_char). Return
+            -- the character at (line,col) as a range.
+            local eol = view:content_len(line)
+            if col >= eol then
+                return line, eol, line, eol, 0
+            end
+            return line, col, line, col + 1, 0
+        end
+    end,
+
     --- Word boundary: non-word characters (not alphanumeric or underscore).
     --- "foo_bar" is one word; "foo.bar" has a boundary at the dot.
     word = TO.pattern("[^%w_]"),
@@ -61,22 +98,31 @@ return {
         return view:paragraph_range(line)
     end,
 
-    --- Line: the full content of the line containing `line` (excluding
-    --- the trailing newline). The natural unit between word and
-    --- paragraph in the expand-region ladder. Structural — whole-line,
-    --- not a boundary pattern — so it's a function returning a concrete
-    --- range. On an empty line yields a zero-width selection at col 0.
+    --- Line motion: move one full line up or down, preserving the
+    --- cursor column (clamped to the target line's length). For
+    --- expand-region selection, returns the whole line.
     ---@param view table
-    ---@param line integer 0-based line of point
-    ---@param col integer 0-based col of point (unused)
-    ---@return integer sl
-    ---@return integer sc
-    ---@return integer el
-    ---@return integer ec
-    ---@return integer boundary_len
-    line = function(view, line, col)
-        local eol = view:content_len(line)
-        return line, 0, line, eol, 0
+    ---@param line integer
+    ---@param col integer
+    ---@param dir integer 1=forward, -1=backward
+    line = function(view, line, col, dir)
+        if dir and dir > 0 then
+            if line + 1 >= view:line_count() then
+                return nil
+            end
+            local target = math.min(col, view:content_len(line + 1))
+            return line + 1, target, line + 1, target, 0
+        elseif dir and dir < 0 then
+            if line == 0 then
+                return nil
+            end
+            local target = math.min(col, view:content_len(line - 1))
+            return line - 1, target, line - 1, target, 0
+        else
+            -- No dir: selection mode. Return the whole current line.
+            local eol = view:content_len(line)
+            return line, 0, line, eol, 0
+        end
     end,
 
     --- Buffer: the entire buffer from (0,0) to end-of-file. The largest

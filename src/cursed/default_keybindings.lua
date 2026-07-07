@@ -45,9 +45,9 @@ return {
     ["right"] = "forward_char",
 
     -- Line navigation
-    ["ctrl-p"] = "previous_line",
+    ["ctrl-p"] = "backward_line",
     ["up"] = "arrow_up",
-    ["ctrl-n"] = "next_line",
+    ["ctrl-n"] = "forward_line",
     ["down"] = "arrow_down",
 
     -- Shift-select (move-and-select): arrow / home / end keys are the

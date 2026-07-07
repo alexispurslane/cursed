@@ -23,6 +23,17 @@ struct RingBuf {
     uintptr_t  wake_ident;
 };
 
+struct SharedTreeSlot {
+    uint32_t view_id;
+    uint32_t gen;
+    void    *tree;
+};
+
+struct SharedTree {
+    uint64_t _mutex[8];             /* pthread_mutex_t (64 bytes, 8-byte aligned) */
+    struct SharedTreeSlot slots[64];
+};
+
 struct SharedState {
     struct RingBuf outbox_io;
     struct RingBuf inbox_io;
@@ -38,6 +49,8 @@ struct SharedState {
     int            lsp_kq_fd;
     int            proc_kq_fd;
     bool    running;
+    uint8_t _pad[7]; /* alignment for shared_tree */
+    struct SharedTree shared_tree;
 };
 
 struct SharedState *shared_state_alloc(void);
@@ -236,8 +249,8 @@ struct ProcStdinReq {
     uint8_t *ptr;       /* malloc'd bytes (NULL when len==0) */
 };
 
-/* MSG_PROC_KILL (main → proc): deliver signal; lane acks via
- * MSG_PROC_EXIT(KILL_SENT). Fire-and-forget. */
+/* MSG_PROC_KILL (main → proc): deliver signal; fire-and-forget.
+ * The authoritative death notice (SIGNALED/EXITED) arrives later. */
 struct ProcKillReq {
     uint32_t procid;
     uint32_t signal;    /* 9=SIGKILL, 15=SIGTERM, ... */
@@ -254,7 +267,7 @@ struct ProcOutput {
 };
 
 /* MSG_PROC_EXIT (proc → main): lifecycle. kind: 0=exited 1=signaled
- * 2=failed 3=kill_sent. EXITED/SIGNALED/FAILED are terminal. */
+ * 2=failed. EXITED/SIGNALED/FAILED are terminal. */
 struct ProcExit {
     uint32_t procid;
     uint8_t  kind;

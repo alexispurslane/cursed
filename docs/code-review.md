@@ -183,7 +183,7 @@ Single function handling: clamp, clear, gutter-paint, syntax-highlight, selectio
 
 ---
 
-### H10 [HIGH] `commands.lua` is ~60% copy-paste (4,765 lines)
+### H10 [HIGH] `commands.lua` is ~60% copy-paste (4,765 lines) — **FIXED**
 **File:** `commands.lua`
 
 ~16 select-variant commands each repeat:
@@ -365,7 +365,7 @@ The client supports `workspace/executeCommand` via `request_execute_command`, bu
 
 # Medium Issues
 
-### M23 [MEDIUM] Comment-to-code ratio ~1:1 across 42K LOC
+### M23 [MEDIUM] Comment-to-code ratio ~1:1 across 42K LOC — **SKIPPED**
 ~10,699 comment lines in Lua source. ~828 LDoc annotations. Many comments explain *what* instead of *why*.
 
 **Examples:**
@@ -424,7 +424,7 @@ Evaluated for every codepoint. Should use a binary-searched range table like the
 
 ---
 
-### M27 [MEDIUM] LSP capabilities sent as empty `{}`
+### M27 [MEDIUM] LSP capabilities sent as empty `{}` — **FIXED**
 **File:** `lsp_lane.lua:593`
 
 `capabilities = {}`. The server doesn't know about `textDocumentSync`, `completionItem.commitCharactersSupport`, `offsetEncoding`, etc. The server falls back to defaults (UTF-16 position encoding, no sync).
@@ -435,7 +435,7 @@ Evaluated for every codepoint. Should use a binary-searched range table like the
 
 ---
 
-### M28 [MEDIUM] `M.store_diagnostics` version ambiguity
+### M28 [MEDIUM] `M.store_diagnostics` version ambiguity — **FIXED**
 **File:** `lsp_client.lua:~1247`
 
 ```lua
@@ -448,7 +448,7 @@ Stores `nil` for version 0. LSP spec says document version is a non-negative int
 
 ---
 
-### M29 [MEDIUM] `spawn_or_get` — dead code from old callback API
+### M29 [MEDIUM] `spawn_or_get` — dead code from old callback API — **FIXED**
 **File:** `lsp_client.lua:333-358`
 
 ```lua
@@ -466,7 +466,7 @@ NUses parameters named `_on_message`/`_on_exit` (unused). Calling convention (`_
 
 ---
 
-### M30 [MEDIUM] Dead closures `on_message`/`on_exit` in `editor_listeners.lua`
+### M30 [MEDIUM] Dead closures `on_message`/`on_exit` in `editor_listeners.lua` — **FIXED**
 **File:** `editor_listeners.lua:490-498`
 
 ```lua
@@ -510,7 +510,7 @@ Only `markdown.lua` (tab_width=2) differs.
 
 ---
 
-### M33 [MEDIUM] `log.lua` fallback filename uses `os.time()` — collision risk
+### M33 [MEDIUM] `log.lua` fallback filename uses `os.time()` — collision risk — **FIXED**
 **File:** `log.lua:170`
 
 ```lua
@@ -523,7 +523,7 @@ local fallback = "/tmp/cursed-" .. tostring(os.time()) .. ".log"
 
 ---
 
-### M34 [MEDIUM] `reap_if_done` — KILL_SENT and terminal EXIT may race
+### M34 [MEDIUM] `reap_if_done` — KILL_SENT and terminal EXIT may race — **FIXED**
 **File:** `proc_lane.lua:290` / `proc_lane.lua:147`
 
 When `kill()` sends a signal, `handle_kill` pushes `KILL_SENT` immediately, then `reap_if_done` will later push `SIGNALED`/`EXITED`. But pipe EOF could fire on a different kqueue iteration and push `SIGNALED` BEFORE `KILL_SENT`. Main-thread listeners expecting `KILL_SENT` first will see reversed ordering.
@@ -534,7 +534,7 @@ When `kill()` sends a signal, `handle_kill` pushes `KILL_SENT` immediately, then
 
 ---
 
-### M35 [MEDIUM] `sync_open` / `sync_change` don't validate `buf:write_text_direct` return
+### M35 [MEDIUM] `sync_open` / `sync_change` don't validate `buf:write_text_direct` return — **FIXED**
 **File:** `lsp_client.lua` (sync_open / sync_change callers)
 
 `buf:write_text_direct()` returns `(ptr, len)`. If the buffer is closed or empty, this could return `(nil, 0)`. The lane side (`handle_doc_sync`) has `if d.text_ptr ~= nil then ... end`, but the main-side enqueueing doesn't validate before sending.
@@ -545,7 +545,7 @@ When `kill()` sends a signal, `handle_kill` pushes `KILL_SENT` immediately, then
 
 ---
 
-### M36 [MEDIUM] `store_diagnostics` gutter version-gating duplicated
+### M36 [MEDIUM] `store_diagnostics` gutter version-gating duplicated — **FIXED**
 **File:** `editor_listeners.lua:701-703, 717-719`
 
 ```lua
@@ -560,7 +560,7 @@ Same 3-line guard repeated in both diagnostic and code-action gutter sign functi
 
 ---
 
-### M37 [MEDIUM] `send_handshake` / `send_missing` are near-identical
+### M37 [MEDIUM] `send_handshake` / `send_missing` are near-identical — **FIXED**
 **File:** `lsp_lane.lua:95-128`
 
 Both allocate `LspHandshake`, fill fields, and push. `send_missing` is just `send_handshake` with no client object.
@@ -569,7 +569,7 @@ Both allocate `LspHandshake`, fill fields, and push. `send_missing` is just `sen
 
 ---
 
-### M38 [MEDIUM] `relay_response` / `relay_notification` are near-identical
+### M38 [MEDIUM] `relay_response` / `relay_notification` are near-identical — **SKIPPED**
 **File:** `lsp_lane.lua:170-260`
 
 Both decode a `yyjson_doc`, malloc a C struct, copy fields, and push to the inbox. Only the struct type (`LspResponse` vs `LspNotification`) and JSON key navigated differ.
@@ -578,7 +578,7 @@ Both decode a `yyjson_doc`, malloc a C struct, copy fields, and push to the inbo
 
 ---
 
-### M39 [MEDIUM] `Buffer:line_len()` iterates ALL pieces of the line every time
+### M39 [MEDIUM] `Buffer:line_len()` iterates ALL pieces of the line every time — **SKIPPED**
 **File:** `buffer.lua:189-213`
 
 For lines with many pieces (e.g., after heavy editing), this is O(pieces). Called by many operations (view text rendering, wrap calculation, cursor clamping).
@@ -601,7 +601,7 @@ For a 100-row viewport, that's 100 string allocations per frame (60fps = 6000 al
 
 ---
 
-### M41 [MEDIUM] `_paint_underline_profiled` — profiled clone of `_paint_underline`
+### M41 [MEDIUM] `_paint_underline_profiled` — profiled clone of `_paint_underline` — **FIXED**
 **File:** `overlay.lua`
 
 A 55-line profiled clone of a 45-line function. The profiled version adds timing instrumentation around `wrap_sub_position`, `viewport_row_for_line`, and the squiggle cell loop.
@@ -639,7 +639,7 @@ File list is fully sorted after every `fts` traversal. For 100k files, this is 1
 
 ---
 
-### M45 [MEDIUM] `event_system.lua` has no reentrancy guard — infinite recursion possible
+### M45 [MEDIUM] `event_system.lua` has no reentrancy guard — infinite recursion possible — **FIXED**
 **File:** `event_system.lua:86-100`
 
 The doc explicitly acknowledges: `emit("X")` from an `"X"` handler causes infinite recursion. No depth counter or reentrant flag.
@@ -648,7 +648,7 @@ The doc explicitly acknowledges: `emit("X")` from an `"X"` handler causes infini
 
 ---
 
-### M46 [MEDIUM] `config.lua:255-263` requires `_G.editor` before `Config.load()`
+### M46 [MEDIUM] `config.lua:255-263` requires `_G.editor` before `Config.load()` — **FIXED**
 **File:** `config.lua`
 
 ```lua
@@ -678,7 +678,7 @@ Reads the entire clipboard (O(N) depending on OS clipboard tool). Doesn't handle
 
 ---
 
-### M48 [MEDIUM] `running` flag — Lua reads without atomic semantics
+### M48 [MEDIUM] `running` flag — Lua reads without atomic semantics — **FIXED**
 **Files:** `shared_ffi.lua:40`, `shared.lua:82`
 
 C header: `_Atomic bool running;` → FFI: `bool running;`. Lua code reads `self._ptr.running` as a plain memory access. LuaJIT FFI bypasses C's type system — on aarch64, could observe a stale cached value.
@@ -689,7 +689,7 @@ C header: `_Atomic bool running;` → FFI: `bool running;`. Lua code reads `self
 
 ---
 
-### M49 [MEDIUM] `SharedState.shared_tree` omitted from FFI struct
+### M49 [MEDIUM] `SharedState.shared_tree` omitted from FFI struct — **FIXED**
 **File:** `shared_ffi.lua:26-41`
 
 The FFI declaration of `struct SharedState` ends at `running` and omits `struct SharedTree shared_tree`. `ffi.sizeof("struct SharedState")` returns the wrong value in Lua. Currently no Lua code uses this sizeof, but it's a latent trap.
@@ -1108,7 +1108,7 @@ The clean lint result confirms that the *surface* of the code (syntax, type anno
 | H07 | HIGH | `shared.lua` pushes `MSG_SHUTDOWN` to `outbox_io` twice | `shared.lua:62-68` |
 | H08 | HIGH | Missing tree-sitter parser symbols in `vendor.h` | `vendor.h:10-20` |
 | H09 | HIGH | 750-line monolithic `Editor:render()` function | `editor.lua:2287-3037` |
-| H10 | HIGH | `commands.lua` is ~60% copy-paste (4,765 lines) | `commands.lua` |
+| H10 | HIGH | `commands.lua` ~60% copy-paste — **FIXED** | `commands.lua` |
 | H11 | HIGH | `main.lua` event loop is 850+ lines with 4 duplicated drain functions | `main.lua:900-1759` |
 | H12 | HIGH | `editor_listeners.lua` — ~500 lines of event-handler closures | `editor_listeners.lua` |
 | H13 | HIGH | Massive rendering duplication: minibuffer × completion_menu | `minibuffer.lua`, `completion_menu.lua` |
@@ -1121,33 +1121,33 @@ The clean lint result confirms that the *surface* of the code (syntax, type anno
 | H20 | HIGH | `process_key` function is ~287 lines and uses goto | `editor.lua:~610-897` |
 | H21 | HIGH | `completers.lua` is a 1,352-line grab-bag | `completers.lua` |
 | H22 | HIGH | No `workspace/applyEdit` inbound handler | `lsp_lane.lua` |
-| M23 | MEDIUM | Comment-to-code ratio ~1:1 across 42K LOC | (many files) |
+| M23 | MEDIUM | Comment-to-code ratio — **SKIPPED** | (many files) |
 | M24 | MEDIUM | `debug.getinfo` called on every keystroke — **FIXED** | `editor.lua:~855` |
 | M25 | MEDIUM | `advice.__call` creates N new closures per invocation — no cache — **FIXED** | `advice.lua:85-89` |
 | M26 | MEDIUM | `utf8.lua` Extended_Pictographic: linear 25-clause or chain — **FIXED** | `utf8.lua:295-318` |
-| M27 | MEDIUM | LSP capabilities sent as empty `{}` | `lsp_lane.lua:593` |
-| M28 | MEDIUM | `M.store_diagnostics` version ambiguity | `lsp_client.lua:~1247` |
-| M29 | MEDIUM | `spawn_or_get` — dead code | `lsp_client.lua:333-358` |
-| M30 | MEDIUM | Dead closures on_message/on_exit | `editor_listeners.lua:490-498` |
-| M31 | MEDIUM | `utf8.lua` LV_lo/LV_hi mislabeled | `utf8.lua:280-281` |
+| M27 | MEDIUM | LSP capabilities sent as empty `{}` — **FIXED** | `lsp_lane.lua:593` |
+| M28 | MEDIUM | `M.store_diagnostics` version ambiguity — **FIXED** | `lsp_client.lua:~1247` |
+| M29 | MEDIUM | `spawn_or_get` — dead code — **FIXED** | `lsp_client.lua:333-358` |
+| M30 | MEDIUM | Dead closures on_message/on_exit — **FIXED** | `editor_listeners.lua:490-498` |
+| M31 | MEDIUM | `utf8.lua` LV_lo/LV_hi mislabeled — **FIXED** | `utf8.lua:280-281` |
 | M32 | MEDIUM | ~16 mode files duplicate same tab_width/expand_tab/indent_width — **FIXED** | `modes/*.lua` |
-| M33 | MEDIUM | `log.lua` fallback filename uses os.time() — collision risk | `log.lua:170` |
-| M34 | MEDIUM | KILL_SENT and terminal EXIT may race (out of order) | `proc_lane.lua:290,147` |
-| M35 | MEDIUM | sync_open/sync_change don't validate write_text_direct return | `lsp_client.lua` |
-| M36 | MEDIUM | Gutter version-gating duplicated | `editor_listeners.lua:701-719` |
-| M37 | MEDIUM | send_handshake / send_missing near-identical | `lsp_lane.lua:95-128` |
-| M38 | MEDIUM | relay_response / relay_notification near-identical | `lsp_lane.lua:170-260` |
-| M39 | MEDIUM | `Buffer:line_len()` iterates all pieces every time | `buffer.lua:189-213` |
+| M33 | MEDIUM | `log.lua` fallback filename uses os.time() — collision risk — **FIXED** | `log.lua:170` |
+| M34 | MEDIUM | KILL_SENT and terminal EXIT may race — **FIXED** | `proc_lane.lua:290,147` |
+| M35 | MEDIUM | sync_open/sync_change don't validate write_text_direct return — **FIXED** | `lsp_client.lua` |
+| M36 | MEDIUM | Gutter version-gating duplicated — **FIXED** | `editor_listeners.lua:701-719` |
+| M37 | MEDIUM | send_handshake / send_missing near-identical — **FIXED** | `lsp_lane.lua:95-128` |
+| M38 | MEDIUM | relay_response / relay_notification near-identical — **SKIPPED** | `lsp_lane.lua:170-260` |
+| M39 | MEDIUM | `Buffer:line_len()` iterates all pieces — **SKIPPED** | `buffer.lua:189-213` |
 | M40 | MEDIUM | `string.rep(" ", w)` allocates per sub-row per frame — **FIXED** | `editor.lua` (render path) |
-| M41 | MEDIUM | `_paint_underline_profiled` — profiled clone | `overlay.lua` |
+| M41 | MEDIUM | `_paint_underline_profiled` — profiled clone — **FIXED** | `overlay.lua` |
 | M42 | MEDIUM | `completers.buffer_words` O(total_chars) per debounce — **FIXED** | `completers.lua` |
 | M43 | MEDIUM | `fzy.lua:score()` builds per-call lowercase arrays — O(2n) per candidate — **FIXED** | `fzy.lua` |
 | M44 | MEDIUM | `walk_with_fts()` O(n log n) sort after each walk — **FIXED** | `file_index.lua` |
-| M45 | MEDIUM | `event_system.lua` no reentrancy guard | `event_system.lua:86-100` |
-| M46 | MEDIUM | `config.lua` requires `_G.editor` before `Config.load()` | `config.lua:255-263` |
+| M45 | MEDIUM | `event_system.lua` no reentrancy guard — **FIXED** | `event_system.lua:86-100` |
+| M46 | MEDIUM | `config.lua` requires `_G.editor` before `Config.load()` — **FIXED** | `config.lua:255-263` |
 | M47 | MEDIUM | `clipboard.set_if_different` reads full clipboard on every write — **FIXED** | `clipboard.lua:111-116` |
-| M48 | MEDIUM | `running` flag — Lua reads without atomic semantics | `shared_ffi.lua:40`, `shared.lua:82` |
-| M49 | MEDIUM | `SharedState.shared_tree` omitted from FFI struct | `shared_ffi.lua:26-41` |
+| M48 | MEDIUM | `running` flag — Lua reads without atomic semantics — **FIXED** | `shared_ffi.lua:40`, `shared.lua:82` |
+| M49 | MEDIUM | `SharedState.shared_tree` omitted from FFI struct — **FIXED** | `shared_ffi.lua:26-41` |
 | L50 | LOW | Four lane main loops copy-pasted across Lua lane files | `*_lane.lua` |
 | L51 | LOW | No reentrancy guard in event_system | `event_system.lua:86-100` |
 | L52 | LOW | `ring_push` fires kevent() syscall on every push | `shared_state.h:276-281` |

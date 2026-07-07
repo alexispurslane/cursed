@@ -648,11 +648,10 @@ end
 -- via Editor:apply_workspace_edit (which backgrounds-opens any not-open
 -- target docs, so a rename touching N files is complete).
 --
--- We do NOT advertise textDocument.rename.prepareSupport in initialize
--- (capabilities is `{}`), so servers accept a direct rename without a
--- preceding textDocument/prepareRename. If/when we declare prepareSupport,
--- add request_prepare_rename + a prepare→rename two-step so the server can
--- validate the position + supply a placeholder name.
+-- We advertise prepareSupport = false so servers accept a direct rename
+-- without a preceding textDocument/prepareRename step. If/when we enable
+-- prepareSupport, add request_prepare_rename + a prepare→rename two-step
+-- so the server can validate the position + supply a placeholder name.
 ----------------------------------------------------------------------------------------------------
 
 --- Request textDocument/rename at `position` for `new_name` on the server

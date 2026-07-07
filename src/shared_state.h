@@ -515,10 +515,9 @@ struct ProcStdinReq {
 };
 
 /* MSG_PROC_KILL (main → proc): deliver `signal` to the live process.
- * Fire-and-forget: the lane sends the signal, then immediately reports
- * MSG_PROC_EXIT with kind=KILL_SENT (code=signal) as an acknowledgment.
- * The authoritative death notice (kind=SIGNALED/EXITED) arrives later
- * when the child's stdout+stderr EOF and waitpid reaps it. */
+ * Fire-and-forget: the lane sends the signal. The authoritative death
+ * notice (SIGNALED/EXITED) arrives later when the child's stdout+stderr
+ * EOF and waitpid reaps it. */
 struct ProcKillReq {
     uint32_t procid;
     uint32_t signal;    /* 9=SIGKILL, 15=SIGTERM, ... */
@@ -540,14 +539,12 @@ struct ProcOutput {
  *   EXITED    (0)  process exited; code = exit status (0-255)
  *   SIGNALED  (1)  process killed by a signal; code = signal number
  *   FAILED    (2)  spawn failed (fork/exec); code = errno; no child reaped
- *   KILL_SENT (3)  informational: lane delivered `code` signal at main's request
- * EXITED/SIGNALED/FAILED are terminal (the procid is retired after);
- * KILL_SENT is advisory and is followed later by SIGNALED/EXITED. */
+ * EXITED/SIGNALED/FAILED are terminal (the procid is retired after). */
 struct ProcExit {
     uint32_t procid;
-    uint8_t  kind;      /* 0=exited 1=signaled 2=failed 3=kill_sent */
+    uint8_t  kind;      /* 0=exited 1=signaled 2=failed */
     uint8_t  _pad[3];
-    uint32_t code;      /* exit status (exited) | signal number (signaled/kill_sent) | errno (failed) */
+    uint32_t code;      /* exit status (exited) | signal number (signaled) | errno (failed) */
 };
 
 #endif /* SHARED_STATE_H */

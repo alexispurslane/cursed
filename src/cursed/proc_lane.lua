@@ -76,7 +76,6 @@ local STREAM_STDERR = 2
 local KIND_EXITED = 0
 local KIND_SIGNALED = 1
 local KIND_FAILED = 2
-local KIND_KILL_SENT = 3
 
 --- waitpid status macros (BSD/macOS layout). Evaluated inline so we
 --- don't need <sys/wait.h> macros through FFI.
@@ -581,10 +580,9 @@ local function handle_kill(msg)
         return
     end
     ffi.C.kill(proc.pid, signal)
-    send_exit(proc, KIND_KILL_SENT, signal)
-    -- Don't reap here; the pipe-EOF path will. But if the proc ignored
-    -- the signal, nothing else fires — that's the v1 contract (KILL is
-    -- advisory; main retires the id only on a terminal EXIT).
+    -- Don't reap here; the pipe-EOF path will. If the proc ignores
+    -- the signal, nothing else fires — that's the v1 contract (KILL
+    -- is advisory; main retires the id only on a terminal EXIT).
 end
 
 ----------------------------------------------------------------------------------------------------
