@@ -115,7 +115,7 @@ struct Msg {
 struct RingBuf {
     _Atomic uint32_t head;
     _Atomic uint32_t tail;
-    struct Msg       entries[RING_CAP];
+    struct Msg       entries[RING_CAP] __attribute__((aligned(16)));
     int              consumer_kq_fd;   /* kqueue fd of the consumer lane */
     uintptr_t       wake_ident;        /* EVFILT_USER ident for wake */
 };
@@ -267,7 +267,7 @@ bool ring_push(struct RingBuf *rb, const struct Msg *msg)
     if (head - tail >= RING_CAP)
         return false;
 
-    rb->entries[head & (RING_CAP - 1)] = *msg;
+    __atomic_store(&rb->entries[head & (RING_CAP - 1)], (struct Msg *)msg, __ATOMIC_RELEASE);
     atomic_store_explicit(&rb->head, head + 1, memory_order_release);
     /* Wake the consumer lane via EVFILT_USER on its kqueue. */
     if (rb->consumer_kq_fd >= 0) {
@@ -286,7 +286,7 @@ bool ring_pop(struct RingBuf *rb, struct Msg *msg)
     if (tail >= head)
         return false;
 
-    *msg = rb->entries[tail & (RING_CAP - 1)];
+    __atomic_load(&rb->entries[tail & (RING_CAP - 1)], msg, __ATOMIC_ACQUIRE);
     atomic_store_explicit(&rb->tail, tail + 1, memory_order_release);
     return true;
 }
@@ -309,7 +309,7 @@ void shared_tree_publish(struct SharedState *ss, uint32_t view_id, uint32_t gen,
     struct SharedTreeSlot *slot = NULL;   /* existing match */
     struct SharedTreeSlot *empty = NULL;  /* first free slot */
     struct SharedTreeSlot *victim = NULL;/* oldest-gen slot, for eviction */
-    uint32_t victim_gen = 0;
+    uint32_t victim_gen = UINT32_MAX;
     for (uint32_t i = 0; i < SHARED_TREE_CAP; i++) {
         struct SharedTreeSlot *s = &ss->shared_tree.slots[i];
         if (s->view_id == view_id) { slot = s; break; }
@@ -458,26 +458,27 @@ struct LspDocSync {
 };
 
 /* MSG_LSP_RESPONSE (lane → main): the lane relays a response to a
- * main-owned request (textDocument/formatting today; completion /
- * hover / signatureHelp later). The lane owns the JSON-RPC socket and
- * decodes the full message to a Lua table; it then RE-ENCODES just the
- * `result` field (which may be null, an array of TextEdits, etc.) via
- * yyjson and ships it as a JSON string. Main decodes the small result
- * via yyjson + dispatches by `id` against its pending-request registry.
- * This keeps the lane generic (no knowledge of TextEdit shape) while
- * keeping the (potentially large) full-message decode off-main: only the
- * result substring crosses the boundary, and only the small-result
- * decode runs on main.
- * Lane frees this struct (and the trailing result bytes) after pushing.
+ * main-owned request (completion, hover, signatureHelp, formatting,
+ * codeAction, etc.). The lane owns the JSON-RPC socket and parses the
+ * full body ONCE into a yyjson_doc (off-main). It then navigates to the
+ * `result` or `error` value and ships the doc + value pointers to main.
+ * Main walks the value into a Lua table via val_to_lua, dispatches by
+ * `id` against its pending-request registry, then frees the doc.
+ * This keeps the lane generic (no knowledge of method-specific shapes)
+ * while keeping the (potentially large) full-body decode off-main: only
+ * a small val_to_lua walk runs on main.
+ * Lane frees this struct (but NOT the doc) after pushing.
  * error_present is non-zero when `msg.error` was set (LSP error reply);
- * result_len is 0 for a null result. */
+ * val points at the `error` object if 1, `result` if 0.
+ * Ownership of *doc transfers to main (main calls yyjson_doc_free).
+ * WARNING: FFI is authoritative — update both files in tandem. */
 struct LspResponse {
     uint32_t client_id;    /* which server replied */
     uint32_t id;            /* request id main minted; dispatch key */
-    uint32_t result_len;   /* bytes of trailing result JSON (no NUL); 0 = null */
-    uint8_t  error_present;/* 1 = this is an error reply (result carries `error`) */
+    uint8_t  error_present; /* 1 = `error` reply, 0 = `result` reply */
     uint8_t  _pad[3];
-    /* followed by result_len bytes of JSON */
+    void    *doc;           /* yyjson_doc* — owned by main (free_doc) */
+    void    *val;           /* yyjson_val* — points into *doc at result/error */
 };
 
 /* ── Proc lane payloads ───────────────────────────────────────────── */

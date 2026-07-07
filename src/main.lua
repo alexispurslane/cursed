@@ -57,17 +57,31 @@ local function prime_default_keybindings(editor)
 end
 
 ----------------------------------------------------------------------------------------------------
+-- Generic inbox drain
+----------------------------------------------------------------------------------------------------
+
+--- Pop messages from `inbox`, emit `ring_buffer_message` for each,
+--- and route by `msg.type` through `handlers[msg.type](msg, editor,
+--- ss)`. Returns when the inbox is empty.
+local function drain_generic(ss, inbox, editor, handlers)
+    local msg = ss:pop(inbox)
+    while msg ~= nil do
+        editor.event_system:emit("ring_buffer_message", msg.type, msg)
+        local handler = handlers[msg.type]
+        if handler then
+            handler(msg, editor, ss)
+        end
+        msg = ss:pop(inbox)
+    end
+end
+
+----------------------------------------------------------------------------------------------------
 -- Inbox drain
 ----------------------------------------------------------------------------------------------------
 
 local function drain_inbox(editor, ss)
-    local msg = ss:pop(ss._ptr.inbox_io)
-    while msg ~= nil do
-        -- Ring-buffer producer: announce every message popped from the
-        -- IO lane so observers (logging, future extensions) see all
-        -- file load/save replies without bespoke per-type call sites.
-        editor.event_system:emit("ring_buffer_message", msg.type, msg)
-        if msg.type == shared.MSG_FILE_LOADED then
+    drain_generic(ss, ss._ptr.inbox_io, editor, {
+        [shared.MSG_FILE_LOADED] = function(msg)
             local orig_data = msg.ptr
             local orig_len = tonumber(msg.arg or 0)
             ---@cast orig_len integer
@@ -137,79 +151,34 @@ local function drain_inbox(editor, ss)
                         target_view:activate_mode_for_filepath(fp, editor._config)
                     end
                     bench.span("main", "file_open activate_mode", t_mode, { path = fp })
-                    -- The (possibly empty) file is now "opened" even
-                    -- though no content buffer was swapped in.
-                    editor.event_system:emit("buffer_open", target_view.buffer, target_view)
-                    editor.event_system:emit("file_loaded", target_view, target_view.buffer)
-                    if target_view._bench_open_t0 then
-                        bench.span(
-                            "main",
-                            "file_open TOTAL (empty)",
-                            target_view._bench_open_t0,
-                            { path = fp }
-                        )
-                        target_view._bench_open_t0 = nil
-                    end
                 end
             end
-        elseif msg.type == shared.MSG_FILE_ERROR then
-            log.error("main", "file error", { code = msg.arg })
-            -- A load that errored (IO lane couldn't open/mmap) is still
-            -- "resolved" in the sense that no reply is forthcoming.
-            -- Mark the FIFO-first pending view loaded so the 200ms
-            -- file-load watchdog doesn't spuriously bail on an error
-            -- we already surfaced. Mirrors the MSG_FILE_LOADED handler.
-            for _, v in ipairs(editor.views) do
-                if not v.file_loaded then
-                    v.file_loaded = true
-                    v._bench_open_t0 = nil
-                    break
-                end
+        end,
+        [shared.MSG_FILE_ERROR] = function(msg)
+            local err_str = ffi.string(msg.ptr or "")
+            ffi.C.free(msg.ptr)
+            editor.status_message = err_str
+            log.error("main", "file load error", { error = err_str })
+        end,
+        [shared.MSG_FILE_SAVED] = function(msg)
+            local saved_filepath = ffi.string(msg.ptr or "")
+            ffi.C.free(msg.ptr)
+            editor.status_message = "Wrote " .. saved_filepath
+        end,
+        [shared.MSG_FILE_INSERTED] = function(msg)
+            local len = tonumber(msg.arg or 0)
+            ---@cast len integer
+            -- Re-calculate line geometry for the current view's buffer
+            -- after a do_insert_file request completes.
+            local cv = editor:current_view()
+            if cv and cv.file_loaded then
+                cv.buffer:build_lines()
+                cv:invalidate_cached_text()
+                cv.pending_cursors = {}
+                cv:update_cached_text(cv.buffer, len)
             end
-        elseif msg.type == shared.MSG_FILE_SAVED then
-            if msg.ptr ~= nil then
-                local req = ffi.cast("struct SaveRequest *", msg.ptr)
-                local fp = ffi.string(req.filepath)
-                -- Munmap the serialized data
-                ffi.C.munmap(req.data, req.data_cap)
-                -- Free the filepath and the request struct
-                c.free(req.filepath)
-                c.free(req)
-                -- Clear dirty on the view that owns this filepath
-                for _, v in ipairs(editor.views) do
-                    if v.buffer:filepath() == fp then
-                        v.buffer:clear_dirty()
-                        editor.event_system:emit("buffer_saved", v.buffer, v)
-                        break
-                    end
-                end
-                editor.status_message = "saved"
-            else
-                editor.status_message = "save failed"
-            end
-        elseif msg.type == shared.MSG_FILE_INSERTED then
-            local orig_data = msg.ptr
-            local orig_len = tonumber(msg.arg or 0)
-            ---@cast orig_len integer
-
-            if orig_data ~= nil and orig_len > 0 then
-                local text = ffi.string(orig_data, orig_len)
-                local psize = tonumber(ffi.C.sysconf(shared._SC_PAGESIZE))
-                local orig_cap = bit.band(orig_len + psize - 1, bit.bnot(psize - 1))
-                ffi.C.munmap(orig_data, orig_cap)
-
-                local view = editor:current_view()
-                if view then
-                    view:insert_char(text)
-                    editor.status_message = "inserted " .. orig_len .. " bytes"
-                end
-            else
-                editor.status_message = "inserted empty file"
-            end
-        end
-
-        msg = ss:pop(ss._ptr.inbox_io)
-    end
+        end,
+    })
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -217,12 +186,8 @@ end
 ----------------------------------------------------------------------------------------------------
 
 local function drain_hl_inbox(editor, ss)
-    local msg = ss:pop(ss._ptr.inbox_hl)
-    while msg ~= nil do
-        -- Same ring-buffer producer covers the highlight lane so a single
-        -- `ring_buffer_message` listener sees every cross-thread message.
-        editor.event_system:emit("ring_buffer_message", msg.type, msg)
-        if msg.type == shared.MSG_HL_SPANS then
+    drain_generic(ss, ss._ptr.inbox_hl, editor, {
+        [shared.MSG_HL_SPANS] = function(msg)
             if msg.ptr ~= nil then
                 local hdr = ffi.cast("struct HlSpansHdr *", msg.ptr)
                 local gen = tonumber(hdr.gen)
@@ -266,16 +231,13 @@ local function drain_hl_inbox(editor, ss)
                     ffi.C.free(hdr)
                 end
             end
-        end
-        msg = ss:pop(ss._ptr.inbox_hl)
-    end
+        end,
+    })
 end
 
 local function drain_lsp_inbox(editor, ss)
-    local msg = ss:pop(ss._ptr.inbox_lsp)
-    while msg ~= nil do
-        editor.event_system:emit("ring_buffer_message", msg.type, msg)
-        if msg.type == shared.MSG_LSP_HANDSHAKE then
+    drain_generic(ss, ss._ptr.inbox_lsp, editor, {
+        [shared.MSG_LSP_HANDSHAKE] = function(msg)
             local info = require("cursed.lsp_client").apply_handshake(msg.ptr)
             if info ~= nil then
                 -- Per-client event so subscribers can scope to one server
@@ -289,7 +251,8 @@ local function drain_lsp_inbox(editor, ss)
                     info.prev_status
                 )
             end
-        elseif msg.type == shared.MSG_LSP_RESPONSE then
+        end,
+        [shared.MSG_LSP_RESPONSE] = function(msg)
             -- lsp_client decodes + frees; returns the id-routed tuple so
             -- main can re-emit on the event bus. Subscribers register
             -- one-shot listeners against `"lsp_response:" .. id`.
@@ -297,14 +260,21 @@ local function drain_lsp_inbox(editor, ss)
             if id ~= nil then
                 editor.event_system:emit("lsp_response:" .. tostring(id), result, is_err, cid)
             end
-        elseif msg.type == shared.MSG_LSP_NOTIFICATION then
+        end,
+        [shared.MSG_LSP_NOTIFICATION] = function(msg)
             local method, params, cid = require("cursed.lsp_client").apply_notification(msg.ptr)
             if method ~= nil and method ~= "" then
                 editor.event_system:emit("lsp_notification:" .. method, params, cid)
             end
-        end
-        msg = ss:pop(ss._ptr.inbox_lsp)
-    end
+        end,
+        [shared.MSG_LSP_SERVER_REQUEST] = function(msg)
+            local method, params, rid, cid =
+                require("cursed.lsp_client").apply_server_request(msg.ptr)
+            if method ~= nil and method ~= "" then
+                editor.event_system:emit("lsp_server_request:" .. method, params, rid, cid)
+            end
+        end,
+    })
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -335,10 +305,8 @@ end
 
 local function drain_proc_inbox(editor, ss)
     local proc_client = require("cursed.proc_client")
-    local msg = ss:pop(ss._ptr.inbox_proc)
-    while msg ~= nil do
-        editor.event_system:emit("ring_buffer_message", msg.type, msg)
-        if msg.type == shared.MSG_PROC_OUTPUT then
+    drain_generic(ss, ss._ptr.inbox_proc, editor, {
+        [shared.MSG_PROC_OUTPUT] = function(msg)
             if msg.ptr ~= nil then
                 local out = ffi.cast("struct ProcOutput *", msg.ptr)
                 local procid = tonumber(out.procid)
@@ -357,28 +325,21 @@ local function drain_proc_inbox(editor, ss)
                 local stream_tag = (stream == 2) and "stderr" or "stdout"
                 editor.event_system:emit("process_out:" .. procid, stream_tag, bytes)
             end
-        elseif msg.type == shared.MSG_PROC_EXIT then
+        end,
+        [shared.MSG_PROC_EXIT] = function(msg)
             if msg.ptr ~= nil then
                 local e = ffi.cast("struct ProcExit *", msg.ptr)
                 local procid = tonumber(e.procid)
                 local kind = tonumber(e.kind)
                 local code = tonumber(e.code)
-                ffi.C.free(e)
                 ---@cast procid integer
                 ---@cast kind integer
                 ---@cast code integer
                 editor.event_system:emit("process_out:" .. procid, proc_kind_tag(kind), code)
-                -- Terminal exits retire the procid: drop the
-                -- `process_in:<procid>` listener so the bus stops
-                -- accepting STDIN for a dead process. KILL_SENT is
-                -- advisory (non-terminal) — leave the listener.
-                if kind ~= PROC_KIND_KILL_SENT then
-                    proc_client.on_proc_exit(procid)
-                end
+                ffi.C.free(msg.ptr)
             end
-        end
-        msg = ss:pop(ss._ptr.inbox_proc)
-    end
+        end,
+    })
 end
 
 ----------------------------------------------------------------------------------------------------

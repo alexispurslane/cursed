@@ -210,8 +210,48 @@ local function relay_notification(client, msg, body_text)
     ss:push(ss._ptr.inbox_lsp, { type = constants.MSG_LSP_NOTIFICATION, ptr = buf })
 end
 
-----------------------------------------------------------------------------------------------------
--- Framing + send
+--- Relay a server\xe2\x86\x92main JSON-RPC request (any `msg.method` set,
+--- `msg.id ~= nil`). Same pattern as relay_notification but carries
+--- the request id so main can send a response. Currently handles
+--- workspace/applyEdit; other methods are relayed but dropped on main.
+local function relay_request(client, msg, body_text)
+    local method = msg.method or ""
+    local rid = tonumber(msg.id) or 0
+    local doc, root, derr = json.decode_to_doc(body_text)
+    if doc == nil then
+        log.warn("lsp", "request doc parse failed", {
+            method = method,
+            id = rid,
+            error = derr,
+        })
+        return
+    end
+    local params_val = ffi.C.shim_obj_get(root, "params")
+    local mlen = #method
+    local total = ffi.sizeof("struct LspServerRequest") + mlen
+    local buf = ffi.C.calloc(1, total)
+    if buf == nil then
+        ffi.C.shim_doc_free(doc)
+        return
+    end
+    local req = ffi.cast("struct LspServerRequest *", buf)
+    req.client_id = client.client_id
+    req.id = rid
+    req.method_len = mlen
+    req.doc = doc
+    req.params_val = params_val
+    if mlen > 0 then
+        ffi.copy(ffi.cast("char *", buf) + ffi.sizeof("struct LspServerRequest"), method, mlen)
+    end
+    log.info("lsp", "lane_relaying_request_to_main", {
+        client_id = client.client_id,
+        method = method,
+        id = rid,
+    })
+    ss:push(ss._ptr.inbox_lsp, { type = constants.MSG_LSP_SERVER_REQUEST, ptr = buf })
+end
+
+--- Framing + send
 ----------------------------------------------------------------------------------------------------
 
 function LSPClient:send_frame(msg)
@@ -272,6 +312,10 @@ function LSPClient:_teardown_dead()
     end
     self._dead = true
     self.running = false
+    if self.read_buf ~= nil then
+        ffi.C.free(self.read_buf)
+        self.read_buf = nil
+    end
     local fd = self.stdout_fd
     _clients_by_fd[fd] = nil
     _clients_by_id[self.client_id] = nil
@@ -450,18 +494,18 @@ function LSPClient:_dispatch(msg, body_text)
     -- `"lsp_notification:" .. method`. New notifications (window/
     -- showMessage, $/progress, ...) need no lane changes — only a
     -- main-side subscriber on the event bus.
-    -- Server-initiated requests (method + id) are distinct: they expect
-    -- a response and aren't notifications; log + drop for now.
+    -- Server-initiated requests (method + id) carry a JSON-RPC response
+    -- expectation. Relay them to main via MSG_LSP_SERVER_REQUEST so the
+    -- editor can apply edits (workspace/applyEdit) and respond. Requests
+    -- for methods main doesn't handle are acknowledged with a no-op
+    -- success response rather than timing out the server.
     if msg.method and msg.id == nil then
         relay_notification(self, msg, body_text)
         return
     end
     if msg.method and msg.id ~= nil then
-        log.debug("lsp_lane", "server-initiated request dropped (no handler yet)", {
-            exe = self.exe_name,
-            method = msg.method,
-            id = msg.id,
-        })
+        relay_request(self, msg, body_text)
+        return
     end
 end
 
@@ -477,9 +521,7 @@ local function find_executable(cands)
     for _, c in ipairs(cands) do
         for segment in path:gmatch("[^:]+") do
             local candidate = segment .. "/" .. c.bin
-            local f = io.open(candidate, "r")
-            if f then
-                f:close()
+            if pffi.C.access(candidate, pffi.X_OK) == 0 then
                 return candidate, c
             end
         end
@@ -701,6 +743,16 @@ local function handle_send(msg)
             "SEND for unknown/dead client",
             { method = method, client_id = client_id }
         )
+        return
+    end
+    if method == "__response" then
+        -- Response to a server-initiated request (e.g. workspace/applyEdit).
+        -- Construct {"jsonrpc": "2.0", id, result} without a method.
+        client:send_frame({
+            jsonrpc = "2.0",
+            id = id,
+            result = params,
+        })
         return
     end
     if id ~= 0 then

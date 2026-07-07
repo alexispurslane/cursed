@@ -112,7 +112,7 @@ function OverlayManager:file_to_screen(line, col)
     end
     local sub_row, sub_col = view:wrap_sub_position(line, col)
     local sy = view:viewport_row_for_line(line, sub_row)
-    if sy < 0 or sy > g.max_y then
+    if sy == nil or sy < 0 or sy > g.max_y then
         return nil
     end
     return g.text_x + sub_col, sy

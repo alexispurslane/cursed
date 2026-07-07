@@ -18,7 +18,7 @@ struct Msg {
 struct RingBuf {
     uint32_t head;
     uint32_t tail;
-    struct Msg entries[1024];
+    struct Msg entries[1024] __attribute__((aligned(16)));
     int        consumer_kq_fd;
     uintptr_t  wake_ident;
 };
@@ -205,7 +205,21 @@ struct LspNotification {
     /* followed by method_len bytes (method string, no NUL) */
 };
 
-/* ── Proc lane payloads (mirror shared_state.h) ───────────────── */
+/* serverâmain inbound request (method + id). The lane parses the
+ * body ONCE into a yyjson_doc, navigates to params, and ships the
+ * doc + value pointer + method string + request id to main. Main
+ * walks params into a Lua table, applies the edit, and sends a
+ * response back via lsp_client.respond(). */
+struct LspServerRequest {
+    uint32_t client_id;
+    uint32_t id;           /* JSON-RPC request id â echo in response */
+    uint32_t method_len;
+    void    *doc;          /* yyjson_doc* â owned by main */
+    void    *params_val;   /* yyjson_val* â points into *doc at params */
+    /* followed by method_len bytes (method string, no NUL) */
+};
+
+/* ââ Proc lane payloads (mirror shared_state.h) ââââââââââââââââ */
 
 /* MSG_PROC_SPAWN (main → proc): JSON spec + procid. Lane frees struct + spec. */
 struct ProcSpawnReq {
@@ -271,6 +285,7 @@ local MSG_LSP_HANDSHAKE = 14
 local MSG_LSP_DOC_SYNC = 15
 local MSG_LSP_RESPONSE = 16
 local MSG_LSP_NOTIFICATION = 17 -- server→main inbound JSON-RPC notification
+local MSG_LSP_SERVER_REQUEST = 23 -- lsp → main: ptr = struct LspServerRequest*
 
 local MSG_PROC_SPAWN = 18 -- main → proc: ptr = struct ProcSpawnReq*
 local MSG_PROC_STDIN = 19 -- main → proc: ptr = struct ProcStdinReq*
@@ -312,6 +327,7 @@ return {
     MSG_LSP_DOC_SYNC = MSG_LSP_DOC_SYNC,
     MSG_LSP_RESPONSE = MSG_LSP_RESPONSE,
     MSG_LSP_NOTIFICATION = MSG_LSP_NOTIFICATION,
+    MSG_LSP_SERVER_REQUEST = MSG_LSP_SERVER_REQUEST,
     MSG_PROC_SPAWN = MSG_PROC_SPAWN,
     MSG_PROC_STDIN = MSG_PROC_STDIN,
     MSG_PROC_KILL = MSG_PROC_KILL,

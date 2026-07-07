@@ -148,8 +148,12 @@ end
 function Advice.before(fn)
     return function(next)
         return function(...)
-            ---@diagnostic disable-next-line: deprecated
-            pcall(fn, unpack({ ... }))
+            local ok, err = pcall(fn, ...)
+            if not ok then
+                log.error("advice", "before-advice errored; continuing call", {
+                    error = tostring(err),
+                })
+            end
             return next(...)
         end
     end
@@ -166,8 +170,12 @@ function Advice.after(fn)
         return function(...)
             ---@diagnostic disable-next-line: deprecated
             local r = { next(...) }
-            ---@diagnostic disable-next-line: deprecated
-            pcall(fn, unpack({ ... }))
+            local ok, err = pcall(fn, ...)
+            if not ok then
+                log.error("advice", "after-advice errored; returning next's result anyway", {
+                    error = tostring(err),
+                })
+            end
             ---@diagnostic disable-next-line: deprecated
             return unpack(r)
         end

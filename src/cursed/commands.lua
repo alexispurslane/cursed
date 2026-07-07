@@ -4674,8 +4674,12 @@ local function run_replace(view, editor, regex)
             editor:read_from_minibuffer({
                 prompt = label .. query .. " with: ",
                 on_submit = function(replacement)
+                    local mv = editor:current_view()
+                    if not mv then
+                        return
+                    end
                     apply_replace(
-                        view,
+                        mv,
                         editor,
                         query,
                         replacement,

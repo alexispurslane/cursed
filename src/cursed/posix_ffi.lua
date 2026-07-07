@@ -136,6 +136,7 @@ int fts_set(FTS *ftsp, FTSENT *f, int options);
 -- Constants
 ----------------------------------------------------------------------------------------------------
 
+local X_OK = 1
 local O_RDONLY = 0
 local O_WRONLY = 1
 local O_CREAT = 0x0200
@@ -236,6 +237,7 @@ return {
     O_WRONLY = O_WRONLY,
     O_CREAT = O_CREAT,
     O_TRUNC = O_TRUNC,
+    X_OK = X_OK,
     -- select(2) helpers
     fd_set_new = fd_set_new,
     fd_set_set = fd_set_set,

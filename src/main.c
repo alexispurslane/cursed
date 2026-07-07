@@ -121,141 +121,44 @@ static const char *find_module(const char *name, size_t *out_len)
 
 /* ── IO lane thread ──────────────────────────────────────────────── */
 
-struct IOLaneArgs {
-    lua_State *L;
+/* ── Lane thread (single entry for all worker lanes) ─────────────── */
+
+struct LaneThreadArgs {
+    lua_State  *L;
+    const char *module;  /* e.g. "cursed.io_lane" */
 };
 
-static void *io_lane_thread(void *arg)
+static void *lane_thread(void *arg)
 {
-    struct IOLaneArgs *io_args = (struct IOLaneArgs *)arg;
-    lua_State *L = io_args->L;
-    free(io_args);
+    struct LaneThreadArgs *args = (struct LaneThreadArgs *)arg;
+    lua_State *L = args->L;
+    const char *module = args->module;
+    free(args);
 
     size_t mod_len = 0;
-    const char *mod_bc = find_module("cursed.io_lane", &mod_len);
+    const char *mod_bc = find_module(module, &mod_len);
 
     if (mod_bc == NULL) {
-        fprintf(stderr, "cursed: io_lane module not found\n");
+        fprintf(stderr, "cursed: %s module not found\n", module);
         return NULL;
     }
 
-    int status = luaL_loadbuffer(L, mod_bc, mod_len, "cursed.io_lane");
+    int status = luaL_loadbuffer(L, mod_bc, mod_len, module);
     if (status != LUA_OK) {
-        fprintf(stderr, "cursed: io_lane: failed to load bytecode: %s\n",
-                lua_tostring(L, -1));
+        fprintf(stderr, "cursed: %s: failed to load bytecode: %s\n",
+                module, lua_tostring(L, -1));
         return NULL;
     }
 
     status = lua_pcall(L, 0, 0, 0);
     if (status != LUA_OK) {
-        fprintf(stderr, "cursed: io_lane: runtime error: %s\n",
-                lua_tostring(L, -1));
+        fprintf(stderr, "cursed: %s: runtime error: %s\n",
+                module, lua_tostring(L, -1));
         return NULL;
     }
 
     return NULL;
 }
-
-/* ── Highlight lane thread ───────────────────────────────────────── */
-
-static void *highlight_lane_thread(void *arg)
-{
-    struct IOLaneArgs *hl_args = (struct IOLaneArgs *)arg;
-    lua_State *L = hl_args->L;
-    free(hl_args);
-
-    size_t mod_len = 0;
-    const char *mod_bc = find_module("cursed.highlight_lane", &mod_len);
-
-    if (mod_bc == NULL) {
-        fprintf(stderr, "cursed: highlight_lane module not found\n");
-        return NULL;
-    }
-
-    int status = luaL_loadbuffer(L, mod_bc, mod_len, "cursed.highlight_lane");
-    if (status != LUA_OK) {
-        fprintf(stderr, "cursed: highlight_lane: failed to load bytecode: %s\n",
-                lua_tostring(L, -1));
-        return NULL;
-    }
-
-    status = lua_pcall(L, 0, 0, 0);
-    if (status != LUA_OK) {
-        fprintf(stderr, "cursed: highlight_lane: runtime error: %s\n",
-                lua_tostring(L, -1));
-        return NULL;
-    }
-
-    return NULL;
-}
-
-/* ── LSP lane thread ──────────────────────────────────────────────── */
-
-static void *lsp_lane_thread(void *arg)
-{
-    struct IOLaneArgs *lsp_args = (struct IOLaneArgs *)arg;
-    lua_State *L = lsp_args->L;
-    free(lsp_args);
-
-    size_t mod_len = 0;
-    const char *mod_bc = find_module("cursed.lsp_lane", &mod_len);
-
-    if (mod_bc == NULL) {
-        fprintf(stderr, "cursed: lsp_lane module not found\n");
-        return NULL;
-    }
-
-    int status = luaL_loadbuffer(L, mod_bc, mod_len, "cursed.lsp_lane");
-    if (status != LUA_OK) {
-        fprintf(stderr, "cursed: lsp_lane: failed to load bytecode: %s\n",
-                lua_tostring(L, -1));
-        return NULL;
-    }
-
-    status = lua_pcall(L, 0, 0, 0);
-    if (status != LUA_OK) {
-        fprintf(stderr, "cursed: lsp_lane: runtime error: %s\n",
-                lua_tostring(L, -1));
-        return NULL;
-    }
-
-    return NULL;
-}
-
-/* ── Proc lane thread ─────────────────────────────────────────────── */
-
-static void *proc_lane_thread(void *arg)
-{
-    struct IOLaneArgs *proc_args = (struct IOLaneArgs *)arg;
-    lua_State *L = proc_args->L;
-    free(proc_args);
-
-    size_t mod_len = 0;
-    const char *mod_bc = find_module("cursed.proc_lane", &mod_len);
-
-    if (mod_bc == NULL) {
-        fprintf(stderr, "cursed: proc_lane module not found\n");
-        return NULL;
-    }
-
-    int status = luaL_loadbuffer(L, mod_bc, mod_len, "cursed.proc_lane");
-    if (status != LUA_OK) {
-        fprintf(stderr, "cursed: proc_lane: failed to load bytecode: %s\n",
-                lua_tostring(L, -1));
-        return NULL;
-    }
-
-    status = lua_pcall(L, 0, 0, 0);
-    if (status != LUA_OK) {
-        fprintf(stderr, "cursed: proc_lane: runtime error: %s\n",
-                lua_tostring(L, -1));
-        return NULL;
-    }
-
-    return NULL;
-}
-
-/* ── Run main lane ───────────────────────────────────────────────── */
 
 static int run_main(lua_State *L)
 {
@@ -302,11 +205,12 @@ int main(int argc, char *argv[])
     /* IO lane doesn't get argv — it loads files on request from main */
     setup_lane_globals(io_L, 0, NULL);
 
-    struct IOLaneArgs *io_args = malloc(sizeof(*io_args));
+    struct LaneThreadArgs *io_args = malloc(sizeof(*io_args));
     io_args->L = io_L;
+    io_args->module = "cursed.io_lane";
 
     pthread_t io_thread;
-    int rc = pthread_create(&io_thread, NULL, io_lane_thread, io_args);
+    int rc = pthread_create(&io_thread, NULL, lane_thread, io_args);
     if (rc != 0) {
         fprintf(stderr, "cursed: failed to create IO lane thread\n");
         lua_close(io_L);
@@ -325,11 +229,12 @@ int main(int argc, char *argv[])
     }
     setup_lane_globals(hl_L, 0, NULL);
 
-    struct IOLaneArgs *hl_args = malloc(sizeof(*hl_args));
+    struct LaneThreadArgs *hl_args = malloc(sizeof(*hl_args));
     hl_args->L = hl_L;
+    hl_args->module = "cursed.highlight_lane";
 
     pthread_t hl_thread;
-    rc = pthread_create(&hl_thread, NULL, highlight_lane_thread, hl_args);
+    rc = pthread_create(&hl_thread, NULL, lane_thread, hl_args);
     if (rc != 0) {
         fprintf(stderr, "cursed: failed to create highlight lane thread\n");
         lua_close(hl_L);
@@ -355,11 +260,12 @@ int main(int argc, char *argv[])
     }
     setup_lane_globals(lsp_L, 0, NULL);
 
-    struct IOLaneArgs *lsp_args = malloc(sizeof(*lsp_args));
+    struct LaneThreadArgs *lsp_args = malloc(sizeof(*lsp_args));
     lsp_args->L = lsp_L;
+    lsp_args->module = "cursed.lsp_lane";
 
     pthread_t lsp_thread;
-    rc = pthread_create(&lsp_thread, NULL, lsp_lane_thread, lsp_args);
+    rc = pthread_create(&lsp_thread, NULL, lane_thread, lsp_args);
     if (rc != 0) {
         fprintf(stderr, "cursed: failed to create LSP lane thread\n");
         lua_close(lsp_L);
@@ -392,11 +298,12 @@ int main(int argc, char *argv[])
     }
     setup_lane_globals(proc_L, 0, NULL);
 
-    struct IOLaneArgs *proc_args = malloc(sizeof(*proc_args));
+    struct LaneThreadArgs *proc_args = malloc(sizeof(*proc_args));
     proc_args->L = proc_L;
+    proc_args->module = "cursed.proc_lane";
 
     pthread_t proc_thread;
-    rc = pthread_create(&proc_thread, NULL, proc_lane_thread, proc_args);
+    rc = pthread_create(&proc_thread, NULL, lane_thread, proc_args);
     if (rc != 0) {
         fprintf(stderr, "cursed: failed to create proc lane thread\n");
         lua_close(proc_L);

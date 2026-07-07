@@ -58,6 +58,26 @@ function SharedState:push(ring, msg)
 end
 
 --- Pop a message from a ring buffer.
+---
+--- Ownership of `ptr` depends on the message type. The table below
+--- documents what each type carries and who frees it:
+---
+---   MSG_FILE_LOADED    ptr = uint8_t*  (mmap'd data)   — main takes ownership (Buffer.from_mmap)
+---   MSG_FILE_ERROR     ptr = char*     (malloc'd str)  — main calls ffi.C.free after ffi.string
+---   MSG_FILE_SAVED     ptr = char*     (malloc'd str)  — main calls ffi.C.free after ffi.string
+---   MSG_FILE_INSERTED  arg only                         — no ptr
+---   MSG_HL_SPANS       ptr = HlSpansHdr* (malloc'd)    — view takes ownership or ffi.C.free
+---   MSG_LSP_HANDSHAKE  ptr = LspHandshake* (malloc'd)  — lsp_client.apply_handshake takes ownership
+---   MSG_LSP_RESPONSE   ptr = LspResponse* (malloc'd)   — lsp_client.apply_response takes ownership
+---   MSG_LSP_NOTIFICATION ptr = LspNotification* (malloc'd) — lsp_client.apply_notification takes ownership
+---   MSG_PROC_OUTPUT    ptr = ProcOutput* (malloc'd)    — drain_proc_inbox frees ptr + out
+---   MSG_PROC_EXIT      ptr = ProcExit* (malloc'd)      — drain_proc_inbox calls ffi.C.free
+---
+--- Messages pushed via `push()` with a Lua string for `ptr` use
+--- GC-managed ffi.new buffers (no manual free needed). All other
+--- ptr values are malloc'd C heap and MUST be freed or ownership
+--- transferred by the handler — there is no GC finalizer on the
+--- returned msg table.
 ---@param ring any RingBuf pointer
 ---@return Msg?
 function SharedState:pop(ring)
@@ -89,7 +109,6 @@ function SharedState:stop()
     -- Send an explicit shutdown message through each lane's outbox.
     -- ring_push triggers EVFILT_USER on the consumer's kqueue,
     -- waking it so it can exit.
-    self:push(self._ptr.outbox_io, { type = shared_ffi.MSG_SHUTDOWN })
     self:push(self._ptr.outbox_io, { type = shared_ffi.MSG_SHUTDOWN })
     self:push(self._ptr.outbox_hl, { type = shared_ffi.MSG_SHUTDOWN })
     self:push(self._ptr.outbox_lsp, { type = shared_ffi.MSG_SHUTDOWN })
@@ -290,6 +309,7 @@ return {
     MSG_LSP_DOC_SYNC = shared_ffi.MSG_LSP_DOC_SYNC,
     MSG_LSP_RESPONSE = shared_ffi.MSG_LSP_RESPONSE,
     MSG_LSP_NOTIFICATION = shared_ffi.MSG_LSP_NOTIFICATION,
+    MSG_LSP_SERVER_REQUEST = shared_ffi.MSG_LSP_SERVER_REQUEST,
     MSG_PROC_SPAWN = shared_ffi.MSG_PROC_SPAWN,
     MSG_PROC_STDIN = shared_ffi.MSG_PROC_STDIN,
     MSG_PROC_KILL = shared_ffi.MSG_PROC_KILL,

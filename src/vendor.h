@@ -18,7 +18,11 @@ const TSLanguage *tree_sitter_json(void);
 const TSLanguage *tree_sitter_lua(void);
 const TSLanguage *tree_sitter_python(void);
 const TSLanguage *tree_sitter_rust(void);
+const TSLanguage *tree_sitter_markdown(void);
+const TSLanguage *tree_sitter_markdown_inline(void);
 const TSLanguage *tree_sitter_toml(void);
+const TSLanguage *tree_sitter_tsx(void);
+const TSLanguage *tree_sitter_typescript(void);
 const TSLanguage *tree_sitter_yaml(void);
 
 /* termbox2 — header-only, compiled via termbox2_impl.c with TB_IMPL */

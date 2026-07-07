@@ -1204,6 +1204,57 @@ function M.apply_notification(ptr)
     return method, params, cid
 end
 
+--- Parse a server-initiated request from the lane (MSG_LSP_SERVER_REQUEST).
+--- Returns `(method, params, request_id, client_id)` or nil on failure.
+--- The lane allocated + pushed the struct; main frees it here.
+---@param ptr any struct LspServerRequest*
+---@return string|nil method
+---@return table|nil params
+---@return integer|nil id JSON-RPC request id (echo in response)
+---@return integer|nil client_id
+function M.apply_server_request(ptr)
+    if ptr == nil then
+        return nil
+    end
+    local req = ffi.cast("struct LspServerRequest *", ptr)
+    local cid = tonumber(req.client_id)
+    ---@cast cid integer
+    local rid = tonumber(req.id)
+    ---@cast rid integer
+    local mlen = tonumber(req.method_len)
+    ---@cast mlen integer
+    local doc = req.doc
+    local val = req.params_val
+    local base = ffi.cast("char *", ptr) + ffi.sizeof("struct LspServerRequest")
+    local method = (mlen > 0) and ffi.string(base, mlen) or ""
+    ffi.C.free(ptr)
+
+    local params = nil
+    if doc ~= nil and val ~= nil then
+        local ok, p = pcall(json.val_to_lua, val)
+        if ok then
+            params = p
+        else
+            log.warn("lsp", "server_request val_to_lua failed", {
+                method = method,
+                error = tostring(p),
+            })
+        end
+    end
+    json.free_doc(doc)
+    return method, params, rid, cid
+end
+
+--- Send a JSON-RPC response to a server-initiated request.
+--- Constructs {"jsonrpc": "2.0", id, result} and enqueues it
+--- on the LSP lane's outbox so the lane writes it to the socket.
+---@param client_id integer
+---@param id integer the request id from apply_server_request
+---@param result table the response result object
+function M.respond(client_id, id, result)
+    enqueue_send("__response", result, id, client_id)
+end
+
 --- Store diagnostics from a parsed `textDocument/publishDiagnostics`
 --- notification. Subscribed to (in editor_listeners.lua) as the handler
 --- for the `"lsp_notification:textDocument/publishDiagnostics"` event —

@@ -11,11 +11,11 @@
 
 | Area | Score | Lines | Key weaknesses |
 |------|:-----:|:-----:|----------------|
-| C Core (main.c, shared_state.h, buffer.h, FFI bindings) | **6/10** | ~3,500 | ABI mismatch, struct-tearing UB, copy-paste thread functions |
-| Core Editor (editor.lua, view.lua, buffer.lua, commands.lua, main.lua) | **5/10** | ~18,000 | 750-line render(), 4,765-line commands.lua (60% copy-paste), 850-line event loop |
-| LSP & Threading (lsp_*.lua, proc_*.lua, highlight_lane.lua, io_lane.lua, editor_listeners.lua) | **4/10** | ~5,200 | 64KB memory leak per server exit, dead code from incomplete refactor, 500-line closures |
-| UI & Input (minibuffer.lua, completion_menu.lua, whichkey.lua, overlay.lua, completers.lua, etc.) | **3/10** | ~8,000 | ~300 lines duplicate rendering, nil-comparison crash, profiled function twin |
-| Infrastructure (utf8.lua, ts.lua, advice.lua, shared.lua, config.lua, clipboard.lua, etc.) | **5/10** | ~7,500 | Silent error swallowing, double shutdown push, nil deref in clipboard, extreme verbosity |
+| C Core (main.c, shared_state.h, buffer.h, FFI bindings) | **6.5/10** | ~3,500 | ABI fixed, struct-tearing fixed, thread functions consolidated |
+| Core Editor (editor.lua, view.lua, buffer.lua, commands.lua, main.lua) | **5.5/10** | ~18,000 | Drain functions consolidated, run_replace stale-closure fixed, 750-line render() still monolithic |
+| LSP & Threading (lsp_*.lua, proc_*.lua, highlight_lane.lua, io_lane.lua, editor_listeners.lua) | **5/10** | ~5,200 | read_buf leak fixed, waitpid logging added, applyEdit relay added, 500-line closures still open |
+| UI & Input (minibuffer.lua, completion_menu.lua, whichkey.lua, overlay.lua, completers.lua, etc.) | **4/10** | ~8,000 | Completion rendering extracted, nil-comparison crash fixed, ~180 lines duplicate code removed |
+| Infrastructure (utf8.lua, ts.lua, advice.lua, shared.lua, config.lua, clipboard.lua, etc.) | **6/10** | ~7,500 | Error logging added to advice, nil deref fixed in clipboard, shutdown push fixed, ownership documented |
 
 ---
 
@@ -39,7 +39,7 @@ Each issue has a unique number (prefixed by the severity letter: C = Critical, H
 
 # Critical Issues
 
-### C01 [CRITICAL] `struct LspResponse` — C header and FFI are incompatible
+### C01 [CRITICAL] `struct LspResponse` — **FIXED** — C header and FFI are incompatible
 **Files:** `shared_state.h:474` / `shared_ffi.lua:183`
 
 **C header layout:**
@@ -70,7 +70,7 @@ total: 26 bytes → padded to 32
 
 ---
 
-### C02 [CRITICAL] `ring_pop` reads `entries[]` without atomic load — struct-tearing UB
+### C02 [CRITICAL] `ring_pop` reads `entries[]` without atomic load — **FIXED** — struct-tearing UB
 **File:** `shared_state.h:288`
 
 ```c
@@ -85,7 +85,7 @@ total: 26 bytes → padded to 32
 
 ---
 
-### C03 [CRITICAL] `_teardown_dead()` leaks `read_buf` — 64KB per LSP server crash/exit
+### C03 [CRITICAL] `_teardown_dead()` leaks `read_buf` — **FIXED** — 64KB per LSP server crash/exit
 **File:** `lsp_lane.lua:269`
 
 `ffi.C.free(client.read_buf)` only appears in `kill_client()` (line 607), NOT in `_teardown_dead()`. The common code path for server exit (EOF in `drain()`) calls `_teardown_dead()` → leaks 64KB every time.
@@ -96,7 +96,7 @@ total: 26 bytes → padded to 32
 
 ---
 
-### C04 [CRITICAL] `overlay.lua:file_to_screen()` — nil comparison crash
+### C04 [CRITICAL] `overlay.lua:file_to_screen()` — nil comparison crash — **FIXED**
 **File:** `overlay.lua:~120`
 
 ```lua
@@ -112,7 +112,7 @@ if sy < 0 or sy > g.max_y then  -- sy can be nil!
 
 ---
 
-### C05 [CRITICAL] `shared_tree_publish` eviction — `victim_gen` starts at 0
+### C05 [CRITICAL] `shared_tree_publish` eviction — `victim_gen` starts at 0 — **FIXED**
 **File:** `shared_state.h:312`
 
 ```c
@@ -127,7 +127,7 @@ If a tree is published with `gen == 0` (e.g., the initial cold parse for a view)
 
 ---
 
-### C06 [CRITICAL] `find_executable` never checks X_OK
+### C06 [CRITICAL] `find_executable` never checks X_OK — **FIXED**
 **File:** `lsp_lane.lua:432-441`
 
 ```lua
@@ -144,7 +144,7 @@ local f = io.open(candidate, "r")  -- just checks readable!
 
 # High Issues
 
-### H07 [HIGH] `shared.lua` pushes `MSG_SHUTDOWN` to `outbox_io` twice — one should go to a different inbox
+### H07 [HIGH] `shared.lua` pushes `MSG_SHUTDOWN` to `outbox_io` twice — **FIXED** — one should go to a different inbox
 **File:** `shared.lua:62-68`
 
 ```lua
@@ -161,7 +161,7 @@ Two consecutive pushes to `outbox_io`; the IO lane's inbox never receives a shut
 
 ---
 
-### H08 [HIGH] Missing tree-sitter parser symbols in `vendor.h`
+### H08 [HIGH] Missing tree-sitter parser symbols in `vendor.h` — **FIXED**
 **File:** `vendor.h:10-20`
 
 `tree_sitter_markdown`, `tree_sitter_markdown_inline`, `tree_sitter_tsx`, and `tree_sitter_typescript` are referenced in `treesitter_ffi.lua` but never declared in `vendor.h`. With linker garbage collection (`--gc-sections`), these symbols could be stripped.
@@ -199,7 +199,7 @@ followed by a call to the corresponding motion. Forward/backward motion pairs di
 
 ---
 
-### H11 [HIGH] `main.lua` event loop is 850+ lines with 4 duplicated drain functions
+### H11 [HIGH] `main.lua` event loop is 850+ lines with 4 duplicated drain functions — **FIXED**
 **File:** `main.lua:900-1759`
 
 `drain_inbox`, `drain_hl_inbox`, `drain_lsp_inbox`, `drain_proc_inbox` share the identical `while msg ~= nil do editor.event_system:emit(...) end` loop structure. Message-type dispatch could be a single generic drain function with a routing table.
@@ -221,7 +221,7 @@ Diagnostic squiggle overlay (~90 lines), hover popup (~190 lines), code action g
 
 ---
 
-### H13 [HIGH] Massive rendering duplication: `minibuffer.lua` × `completion_menu.lua`
+### H13 [HIGH] Massive rendering duplication: `minibuffer.lua` × `completion_menu.lua` — **FIXED**
 **Files:** `minibuffer.lua`, `completion_menu.lua`
 
 Both files independently reimplement:
@@ -238,7 +238,7 @@ Both files independently reimplement:
 
 ---
 
-### H14 [HIGH] Four lane thread functions are copy-paste in C
+### H14 [HIGH] Four lane thread functions are copy-paste in C — **FIXED**
 **File:** `main.c:105-198`
 
 `io_lane_thread`, `highlight_lane_thread`, `lsp_lane_thread`, `proc_lane_thread` are 20-line functions differing only in the module name string. Plus 5× repetitive error cleanup cascades in `main()` (~200 lines).
@@ -249,7 +249,7 @@ Both files independently reimplement:
 
 ---
 
-### H15 [HIGH] `advice.lua` silently swallows errors in `before`/`after` combinators
+### H15 [HIGH] `advice.lua` silently swallows errors in `before`/`after` combinators — **FIXED**
 **File:** `advice.lua:109-128`
 
 ```lua
@@ -265,7 +265,7 @@ return next(...)
 
 ---
 
-### H16 [HIGH] `clipboard.detect_backend()` nil dereference
+### H16 [HIGH] `clipboard.detect_backend()` nil dereference — **FIXED**
 **File:** `clipboard.lua:22`
 
 ```lua
@@ -280,7 +280,7 @@ local uname = io.popen("uname -s 2>/dev/null"):read("*l") or ""
 
 ---
 
-### H17 [HIGH] `reap_if_done` silently masks all waitpid errors
+### H17 [HIGH] `reap_if_done` silently masks all waitpid errors — **FIXED**
 **File:** `proc_lane.lua:166-172`
 
 ```lua
@@ -300,7 +300,7 @@ ECHILD, EINTR, EINVAL all produce `KIND_EXITED, 0` with no logging.
 
 ---
 
-### H18 [HIGH] `run_replace` uses stale `view` closure across minibuffer yields
+### H18 [HIGH] `run_replace` uses stale `view` closure across minibuffer yields — **FIXED**
 **File:** `commands.lua:4620-4680`
 
 `run_replace` captures `view` at invocation time, but `read_from_minibuffer` yields to the event loop. If the user switches buffers between the query and replacement prompts, the replacement runs on the stale buffer.
@@ -311,7 +311,7 @@ ECHILD, EINTR, EINVAL all produce `KIND_EXITED, 0` with no logging.
 
 ---
 
-### H19 [HIGH] `SharedState:pop()` returns raw `ptr` cdata with no ownership semantics
+### H19 [HIGH] `SharedState:pop()` returns raw `ptr` cdata with no ownership semantics — **FIXED**
 **File:** `shared.lua:42-55`
 
 ```lua
@@ -352,7 +352,7 @@ Mixes LSP completion (async bridging), symbol navigation (document + workspace),
 
 ---
 
-### H22 [HIGH] No `workspace/applyEdit` inbound handler
+### H22 [HIGH] No `workspace/applyEdit` inbound handler — **FIXED**
 **File:** `lsp_lane.lua` (inbound dispatch)
 
 The client supports `workspace/executeCommand` via `request_execute_command`, but there is no inbound request handler for `workspace/applyEdit`. If the server sends `applyEdit` back, it will be logged and silently dropped.
@@ -480,7 +480,7 @@ Defined, then `cid` is obtained, then these closures are NEVER used. Ghosts of t
 
 ---
 
-### M31 [MEDIUM] `utf8.lua` `LV_lo`/`LV_hi` mislabeled
+### M31 [MEDIUM] `utf8.lua` `LV_lo`/`LV_hi` mislabeled — **FIXED**
 **File:** `utf8.lua:280-281`
 
 ```lua

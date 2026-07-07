@@ -24,7 +24,6 @@ so the agent can pick up context across sessions.
 
 ## Gotchas & Errors
 
-- The "indented split" failure was my test's wrong cursor column (I passed 11 instead of 10).
 - A fixed-string block opener can't express `</tag>` where the tag name varies.
 - Let me add a debug log inside the render loop to inspect `total_sub` and the cached cursor state right before the broken render:
 - (no output)
@@ -32,9 +31,4 @@ so the agent can pick up context across sessions.
 - Lua tables can't have `nil` values — `{ p, nil }` creates a table with **one** element, so `path_argv[1]` is left **uninitialized garbage** instead of NULL.
 - Initializing ...                                                                                >=================== 01/69                                                        — Fix: The primary fix: after `on_submit` populates candidates, the primary cursor now jumps to the first pending cursor.
 - Without this, the cursor could be at a position that doesn't match any candidate, making `_promote_candidate_at_primary` fail silently.
-
-## Heavily Read
-
-- src/cursed/commands.lua (5 reads) — Let me read the candidate navigation/promote infrastructure and the multicursor 
-- src/cursed/editor.lua (4 reads) — Now let me implement. First, refactor the promote logic in editor.lua to add an 
-- src/main.lua (6 reads) — Let me read the full TUI setup and the headless branch to restructure cleanly:
+- error: unexpected argument '--no-color' found

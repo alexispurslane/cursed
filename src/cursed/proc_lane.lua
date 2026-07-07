@@ -211,6 +211,10 @@ local function reap_if_done(proc)
     end
     if rv < 0 then
         -- ECHILD (already reaped?) — treat as exited 0 so main retires the id.
+        log.warn("proc", "waitpid failed", {
+            pid = proc.pid,
+            errno = kq_ffi.errno(),
+        })
         proc.reported = true
         send_exit(proc, KIND_EXITED, 0)
         forget_proc(proc)

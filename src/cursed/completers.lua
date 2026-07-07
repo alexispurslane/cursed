@@ -1339,14 +1339,14 @@ end
 -- Module export
 ----------------------------------------------------------------------------------------------------
 
--- Re-export the completion-item helpers (canonical home is minibuffer.lua)
--- for callers that reach them via the completers module. Resolved lazily
--- on first use to avoid a require cycle at module-load time.
+-- Re-export the completion-item helpers (canonical home is
+-- completion_render.lua) for callers that reach them via the completers
+-- module. Resolved lazily on first use to avoid a require cycle.
 completers.comp_text = function(item)
-    return require("cursed.minibuffer").comp_text(item)
+    return require("cursed.completion_render").comp_text(item)
 end
 completers.comp_meta = function(item)
-    return require("cursed.minibuffer").comp_meta(item)
+    return require("cursed.completion_render").comp_meta(item)
 end
 
 return completers

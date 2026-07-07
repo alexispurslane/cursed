@@ -41,6 +41,7 @@ local bit = require("bit")
 local tb = require("cursed.tb")
 local ColorScheme = require("cursed.colorscheme")
 local completers = require("cursed.completers")
+local crender = require("cursed.completion_render")
 local log = require("cursed.log")
 local profile = require("cursed.profile")
 
@@ -59,122 +60,6 @@ local function ui(name)
         return tb.color_default
     end
     return scheme:color(name)
-end
-
-----------------------------------------------------------------------------------------------------
--- Cell-width / truncation + match-highlight helpers.
--- (Compact local copies; the editor keeps its own for the minibuffer.
--- Keeping them here makes the popup self-contained and avoids a require
--- cycle on the editor.)
-----------------------------------------------------------------------------------------------------
-
---- Display width of `s` in terminal cells: codepoint count. Assumes no
---- double-wide CJK (true for cursed's chrome).
----@param s string
----@return integer
-local function cell_len(s)
-    local _, n = s:gsub("[^\128-\191]", "")
-    return n
-end
-
---- Truncate `s` to at most `max` display cells, never splitting a
---- multibyte codepoint.
----@param s string
----@param max integer max cells
----@return string
-local function truncate_cells(s, max)
-    if max <= 0 then
-        return ""
-    end
-    local cells = 0
-    local byte_end = 0
-    local i = 1
-    while i <= #s do
-        local b = s:byte(i)
-        local len = b < 0x80 and 1 or b < 0xE0 and 2 or b < 0xF0 and 3 or 4
-        if cells + 1 > max then
-            break
-        end
-        byte_end = i + len - 1
-        cells = cells + 1
-        i = i + len
-    end
-    return s:sub(1, byte_end)
-end
-
---- Set of byte positions in `display` covered by the first occurrence
---- of each whitespace-separated term of `query`. Drives match-
---- highlighting in the list (matched chars pop, unmatched recede).
----@param display string visible (already-truncated) item text
----@param query string the prefix/word being completed
----@return table set of byte-index -> true (1-based, inclusive)
-local function match_byte_set(display, query)
-    local set = {}
-    if not query or query == "" then
-        return set
-    end
-    local lower = display:lower()
-    for term in query:lower():gmatch("%S+") do
-        local i, j = lower:find(term, 1, true)
-        if i then
-            for b = i, j do
-                set[b] = true
-            end
-        end
-    end
-    return set
-end
-
---- Print one completion-text row with matched substrings (per
---- `match_byte_set`) drawn in a distinct fg + style so the user can see
---- WHY each candidate matched. Splits into contiguous matched /
---- unmatched byte-runs and prints each with its own fg, advancing by
---- cell width so multi-byte chrome stays aligned. `mset` nil → single
---- unmatch-fg pass (no highlighting).
----@param fp function float-print sink (x, y, text, fg, bg)
----@param cx integer screen col
----@param cy integer screen row
----@param text string
----@param matched_fg integer
----@param unmatch_fg integer
----@param bg_p integer
----@param mset table|nil
----@param matched_style integer|nil additional style bits OR'd onto matched fg
-local function print_highlighted(
-    fp,
-    cx,
-    cy,
-    text,
-    matched_fg,
-    unmatch_fg,
-    bg_p,
-    mset,
-    matched_style
-)
-    local n = #text
-    if n == 0 then
-        return
-    end
-    local sx = cx
-    local run_start = 1
-    local cur = (mset ~= nil) and (mset[1] or false) or false
-    for i = 2, n + 1 do
-        local m = (mset ~= nil) and (mset[i] or false) or false
-        if m ~= cur or i == n + 1 then
-            local seg_end = i - 1
-            if seg_end >= run_start then
-                local sub = text:sub(run_start, seg_end)
-                local fg = cur and matched_fg or unmatch_fg
-                if cur and matched_style then
-                    fg = bit.bor(fg, matched_style)
-                end
-                fp(sx, cy, sub, fg, bg_p)
-                sx = sx + cell_len(sub)
-            end
-            run_start = i
-            cur = m
-        end
-    end
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -828,14 +713,14 @@ function CompletionMenu:_render(editor)
     local has_meta = false
     local max_meta = 0
     for i = 1, n do
-        local tlen = cell_len(completers.comp_text(self._items[self._scroll + i]))
+        local tlen = crender.cell_len(crender.comp_text(self._items[self._scroll + i]))
         if tlen > max_text then
             max_text = tlen
         end
-        local meta = completers.comp_meta(self._items[self._scroll + i])
+        local meta = crender.comp_meta(self._items[self._scroll + i])
         if meta then
             has_meta = true
-            local mlen = cell_len(meta)
+            local mlen = crender.cell_len(meta)
             if mlen > max_meta then
                 max_meta = mlen
             end
@@ -877,13 +762,8 @@ function CompletionMenu:_render(editor)
 
     local bg = ui("popup_bg")
     local border_fg = bit.bor(ui("minibuffer_border"), tb.bold)
-    local cur_fg = ui("cursor_fg")
-    local cur_bg = ui("cursor_bg")
-    local norm_fg = ui("minibuffer_prompt")
     local meta_fg = ui("minibuffer_metadata")
-    local bright_fg = ui("minibuffer_text")
     local dim_fg = ui("completion_dim")
-    local accent_fg = norm_fg
 
     local function fp(x, y, text, fg, b)
         ov:put_float(x, y, text, fg, b)
@@ -898,73 +778,34 @@ function CompletionMenu:_render(editor)
     fp(box_x, box_y, "╭" .. string.rep("─", box_w - 2) .. "╮", border_fg, bg)
     fp(box_x, box_y + box_h - 1, "╰" .. string.rep("─", box_w - 2) .. "╯", border_fg, bg)
 
-    local list_x = box_x + 1
-    local list_y = box_y + 1
     local list_w = interior
     if needs_sb then
         list_w = list_w - 1
     end
 
-    -- Metadata column = longest text + 2-space gap (only when meta present).
-    local meta_col = has_meta and (max_text + 2) or nil
-    local show_meta = has_meta and (meta_col + 4 <= list_w)
-
-    local selected = self._selected
-    for i = 1, n do
-        local ci = self._scroll + i
-        local row = list_y + i - 1
-        local item = self._items[ci]
-        local text = truncate_cells(completers.comp_text(item), list_w)
-        local meta = show_meta and completers.comp_meta(item) or nil
-        if ci == selected then
-            -- Full-width reverse-video selection bar.
-            fp(list_x, row, string.rep(" ", list_w), cur_fg, cur_bg)
-            local mset = match_byte_set(text, query)
-            if next(mset) then
-                print_highlighted(fp, list_x, row, text, accent_fg, cur_fg, cur_bg, mset, tb.bold)
-            else
-                fp(list_x, row, text, cur_fg, cur_bg)
-            end
-            if meta and meta_col + cell_len(meta) <= list_w then
-                fp(list_x + meta_col, row, meta, cur_fg, cur_bg)
-            end
-        else
-            local mset = match_byte_set(text, query)
-            if next(mset) then
-                print_highlighted(fp, list_x, row, text, bright_fg, dim_fg, bg, mset, tb.bold)
-            else
-                fp(list_x, row, text, norm_fg, bg)
-            end
-            if meta and meta_col + cell_len(meta) <= list_w then
-                fp(list_x + meta_col, row, meta, meta_fg, bg)
-            end
-        end
-    end
-
-    -- Scrollbar: 1-col gutter on the far right of the interior.
-    if needs_sb then
-        local sb_col = list_x + interior - 1
-        local track_fg = ui("scrollbar_track")
-        local thumb_fg = ui("scrollbar_thumb")
-        local scrollable = math.max(1, total - n)
-        local thumb_size = math.max(1, math.floor(n * n / total))
-        local thumb_top = math.floor(self._scroll / scrollable * (n - thumb_size))
-        if thumb_top < 0 then
-            thumb_top = 0
-        elseif thumb_top > n - thumb_size then
-            thumb_top = n - thumb_size
-        end
-        for i = 0, n - 1 do
-            local on_thumb = i >= thumb_top and i < thumb_top + thumb_size
-            fp(
-                sb_col,
-                list_y + i,
-                on_thumb and "█" or "│",
-                on_thumb and thumb_fg or track_fg,
-                bg
-            )
-        end
-    end
+    crender.paint_candidate_list(
+        fp,
+        box_x + 1,
+        box_y + 1,
+        list_w,
+        self._items,
+        self._selected,
+        self._scroll,
+        mv,
+        query,
+        bg,
+        {
+            cursor_fg = ui("cursor_fg"),
+            cursor_bg = ui("cursor_bg"),
+            norm_fg = ui("minibuffer_prompt"),
+            meta_fg = meta_fg,
+            bright_fg = ui("minibuffer_text"),
+            dim_fg = dim_fg,
+            accent_fg = ui("minibuffer_prompt"),
+            track_fg = ui("scrollbar_track"),
+            thumb_fg = ui("scrollbar_thumb"),
+        }
+    )
 end
 
 ----------------------------------------------------------------------------------------------------

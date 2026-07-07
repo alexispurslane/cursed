@@ -1021,7 +1021,7 @@ local ZWJ = 0x200D
 local BOM = 0xFEFF
 local L_lo, L_hi = 0x1100, 0x115F
 local V_lo, V_hi = 0x1160, 0x11A7
-local LV_lo, LV_hi = 0xA960, 0xA97F -- Hangul Jamo Extended-A (L)
+local L_EXT_A_lo, L_EXT_A_hi = 0xA960, 0xA97F -- Hangul Jamo Extended-A (Leading Jamo / L)
 local T_lo, T_hi = 0x11A8, 0x11FF
 local LVT_lo, LVT_hi = 0xAC00, 0xD7A3
 local RI_lo, RI_hi = 0x1F1E6, 0x1F1FF
@@ -1048,7 +1048,7 @@ function utf8.grapheme_type(cp)
     if cp >= V_lo and cp <= V_hi then
         return "V"
     end
-    if cp >= LV_lo and cp <= LV_hi then
+    if cp >= L_EXT_A_lo and cp <= L_EXT_A_hi then
         return "L"
     end
     if cp >= T_lo and cp <= T_hi then

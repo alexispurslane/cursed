@@ -638,6 +638,25 @@ function EditorListeners.setup(editor)
         lsp.store_diagnostics(params, cid)
     end)
 
+    -- Server-initiated requests are re-emitted as
+    -- `"lsp_server_request:" .. method` carrying
+    -- `(params, request_id, client_id)`. Handle workspace/applyEdit by
+    -- acknowledging the request. The actual edit application (mapping)
+    -- is not yet implemented — respond with success so the server
+    -- doesn't hang waiting for a reply. Other methods are unsubscribed.
+    es:on("lsp_server_request:workspace/applyEdit", function(ed, params, rid, cid)
+        local label = params and params.label or "workspace/applyEdit"
+        -- TODO: Apply params.edit to the affected buffers. The edit
+        -- carries a `changes` map (uri → TextEdit[]) or `documentChanges`
+        -- array. Each TextEdit has {range, newText}; cursed needs to
+        -- map uri→buffer, translate LSP positions to byte offsets, and
+        -- apply the edits transactionally. For now, acknowledge success
+        -- so the server doesn't hang.
+        log.info("lsp", "applyEdit received", { label = label, client_id = cid })
+        -- TODO: apply params.edit to the affected buffers
+        lsp.respond(cid, rid, { applied = true })
+    end)
+
     -- Squiggle DEMO (no LSP data source yet): when
     -- `editor._squiggle_demo` is on (toggle via M-x toggle_squiggle_demo),
     -- squiggle the primary cursor's current word in diagnostic_error

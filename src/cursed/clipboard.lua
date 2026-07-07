@@ -17,7 +17,8 @@ local clipboard = {}
 --- Returns { paste = "cmd", copy = "cmd" } or nil.
 ---@return { paste: string, copy: string }|nil
 local function detect_backend()
-    local uname = io.popen("uname -s 2>/dev/null"):read("*l") or ""
+    local f = io.popen("uname -s 2>/dev/null")
+    local uname = f and f:read("*l") or ""
 
     if uname == "Darwin" then
         return { paste = "pbpaste", copy = "pbcopy" }

@@ -23,15 +23,15 @@ local Buffer = require("cursed.buffer").Buffer
 local bit = require("bit")
 local tb = require("cursed.tb")
 local ColorScheme = require("cursed.colorscheme")
-local completers = require("cursed.completers")
+local crender = require("cursed.completion_render")
+local cell_len = crender.cell_len
+local truncate_cells = crender.truncate_cells
+local match_byte_set = crender.match_byte_set
+local print_highlighted = crender.print_highlighted
+local comp_text = crender.comp_text
+local comp_meta = crender.comp_meta
 
 local COMP_MAX_VISIBLE = 5
-
-----------------------------------------------------------------------------------------------------
--- UI color + cell-width / truncation / match-highlight helpers.
--- Compact local copies (mirroring completion_menu.lua) so this module
--- is self-contained and doesn't reach into the editor's privates.
-----------------------------------------------------------------------------------------------------
 
 --- Resolve a UI chrome color from the active colorscheme, falling back
 --- to the terminal default during early startup (no scheme loaded yet).
@@ -43,143 +43,6 @@ local function ui(name)
         return tb.color_default
     end
     return scheme:color(name)
-end
-
---- Display width of `s` in terminal cells: codepoint count. Assumes no
---- double-wide CJK (true for cursed's chrome).
----@param s string
----@return integer
-local function cell_len(s)
-    local _, n = s:gsub("[^\128-\191]", "")
-    return n
-end
-
---- Truncate `s` to at most `max` display cells, never splitting a
---- multibyte codepoint.
----@param s string
----@param max integer max cells
----@return string
-local function truncate_cells(s, max)
-    if max <= 0 then
-        return ""
-    end
-    local cells = 0
-    local byte_end = 0
-    local i = 1
-    while i <= #s do
-        local b = s:byte(i)
-        local len = b < 0x80 and 1 or b < 0xE0 and 2 or b < 0xF0 and 3 or 4
-        if cells + 1 > max then
-            break
-        end
-        byte_end = i + len - 1
-        cells = cells + 1
-        i = i + len
-    end
-    return s:sub(1, byte_end)
-end
-
-----------------------------------------------------------------------------------------------------
--- Completion item helpers (backward compatible)
-----------------------------------------------------------------------------------------------------
-
---- A completion item is either a bare `string` (legacy) or a table
---- `{ text = string, metadata = string? }` (new). These helpers normalize
---- access so completers may return either shape.
-
---- Extract the display text from a completion item.
----@param item string|{text: string, metadata: string?}
----@return string
-local function comp_text(item)
-    if type(item) == "table" then
-        return item.text or ""
-    end
-    return item
-end
-
---- Extract the metadata string from a completion item (nil if absent).
----@param item string|{text: string, metadata: string?}
----@return string|nil
-local function comp_meta(item)
-    if type(item) == "table" then
-        return item.metadata
-    end
-    return nil
-end
-
---- Set of byte positions in `display` covered by the first occurrence
---- of each whitespace-separated term of `query`. Drives match-
---- highlighting in the list (matched chars pop, unmatched recede).
----@param display string visible (already-truncated) item text
----@param query string the prefix/word being completed
----@return table set of byte-index -> true (1-based, inclusive)
-local function match_byte_set(display, query)
-    local set = {}
-    if not query or query == "" then
-        return set
-    end
-    local lower = display:lower()
-    for term in query:lower():gmatch("%S+") do
-        local i, j = lower:find(term, 1, true)
-        if i then
-            for b = i, j do
-                set[b] = true
-            end
-        end
-    end
-    return set
-end
-
---- Print one completion-text row with matched substrings (per
---- `match_byte_set`) drawn in a distinct fg + style so the user can see
---- WHY each candidate matched. Splits into contiguous matched /
---- unmatched byte-runs and prints each with its own fg, advancing by
---- cell width so multi-byte chrome stays aligned. `mset` nil → single
---- unmatch-fg pass (no highlighting).
----@param fp function float-print sink (x, y, text, fg, bg)
----@param cx integer screen col
----@param cy integer screen row
----@param text string
----@param matched_fg integer
----@param unmatch_fg integer
----@param bg_p integer
----@param mset table|nil
----@param matched_style integer|nil additional style bits OR'd onto matched fg
-local function print_highlighted(
-    fp,
-    cx,
-    cy,
-    text,
-    matched_fg,
-    unmatch_fg,
-    bg_p,
-    mset,
-    matched_style
-)
-    local n = #text
-    if n == 0 then
-        return
-    end
-    local sx = cx
-    local run_start = 1
-    local cur = (mset ~= nil) and (mset[1] or false) or false
-    for i = 2, n + 1 do
-        local m = (mset ~= nil) and (mset[i] or false) or false
-        if m ~= cur or i == n + 1 then
-            local seg_end = i - 1
-            if seg_end >= run_start then
-                local sub = text:sub(run_start, seg_end)
-                local fg = cur and matched_fg or unmatch_fg
-                if cur and matched_style then
-                    fg = bit.bor(fg, matched_style)
-                end
-                fp(sx, cy, sub, fg, bg_p)
-                sx = sx + cell_len(sub)
-            end
-            run_start = i
-            cur = m
-        end
-    end
 end
 
 ---@class Minibuffer
@@ -878,92 +741,30 @@ end
 ---@param bg integer surrounding bg color
 ---@param fp function float-print sink (x, y, text, fg, bg)
 function Minibuffer:_paint_completions(x, y, width, max_visible, bg, fp)
-    local completions = self._completions
-    local total = #completions
-    if total == 0 then
-        return
-    end
-    local selected = self._comp_index or 0
-    local scroll = self._comp_scroll or 0
-    local n = math.min(total - scroll, max_visible)
-    if n <= 0 then
-        return
-    end
-    -- Reserve a scrollbar gutter on the far right only when the list
-    -- actually overflows; otherwise the full width is usable.
-    local needs_sb = total > max_visible
-    local list_w = needs_sb and (width - 1) or width
-    local cur_fg = ui("cursor_fg")
-    local cur_bg = ui("cursor_bg")
-    local norm_fg = ui("minibuffer_prompt")
     local meta_fg = ui("minibuffer_metadata")
-    local bright_fg = ui("minibuffer_text")
-    local dim_fg = meta_fg
-    local accent_fg = norm_fg
-    local query = self:view_text()
-
-    -- Metadata column: longest displayed text + 2-space gap.
-    local max_text = 0
-    for i = 1, n do
-        local tlen = cell_len(comp_text(completions[scroll + i]))
-        if tlen > max_text then
-            max_text = tlen
-        end
-    end
-    local meta_col = max_text + 2
-    local show_meta = meta_col + 4 <= list_w
-
-    for i = 1, n do
-        local ci = scroll + i
-        local row = y + i - 1
-        local item = completions[ci]
-        local text = truncate_cells(comp_text(item), list_w)
-        local meta = show_meta and comp_meta(item) or nil
-        if ci == selected then
-            -- Full-width reverse-video bar: fill the row with the
-            -- selection bg first, then print text + meta on top.
-            fp(x, row, string.rep(" ", list_w), cur_fg, cur_bg)
-            local mset = match_byte_set(text, query)
-            if next(mset) then
-                print_highlighted(fp, x, row, text, accent_fg, cur_fg, cur_bg, mset, tb.bold)
-            else
-                fp(x, row, text, cur_fg, cur_bg)
-            end
-            if meta and meta_col + cell_len(meta) <= list_w then
-                fp(x + meta_col, row, meta, cur_fg, cur_bg)
-            end
-        else
-            local mset = match_byte_set(text, query)
-            if next(mset) then
-                print_highlighted(fp, x, row, text, bright_fg, dim_fg, bg, mset, tb.bold)
-            else
-                fp(x, row, text, norm_fg, bg)
-            end
-            if meta and meta_col + cell_len(meta) <= list_w then
-                fp(x + meta_col, row, meta, meta_fg, bg)
-            end
-        end
-    end
-
-    -- Scrollbar: a 1-column gutter on the far right. Track = dim │,
-    -- thumb = █ over the slice of the list currently in view.
-    if needs_sb then
-        local sb_col = x + width - 1
-        local track_fg = ui("scrollbar_track")
-        local thumb_fg = ui("scrollbar_thumb")
-        local scrollable = math.max(1, total - n)
-        local thumb_size = math.max(1, math.floor(n * n / total))
-        local thumb_top = math.floor(scroll / scrollable * (n - thumb_size))
-        if thumb_top < 0 then
-            thumb_top = 0
-        elseif thumb_top > n - thumb_size then
-            thumb_top = n - thumb_size
-        end
-        for i = 0, n - 1 do
-            local on_thumb = i >= thumb_top and i < thumb_top + thumb_size
-            fp(sb_col, y + i, on_thumb and "█" or "│", on_thumb and thumb_fg or track_fg, bg)
-        end
-    end
+    crender.paint_candidate_list(
+        fp,
+        x,
+        y,
+        width,
+        self._completions,
+        self._comp_index or 0,
+        self._comp_scroll or 0,
+        max_visible,
+        self:view_text(),
+        bg,
+        {
+            cursor_fg = ui("cursor_fg"),
+            cursor_bg = ui("cursor_bg"),
+            norm_fg = ui("minibuffer_prompt"),
+            meta_fg = meta_fg,
+            bright_fg = ui("minibuffer_text"),
+            dim_fg = meta_fg,
+            accent_fg = ui("minibuffer_prompt"),
+            track_fg = ui("scrollbar_track"),
+            thumb_fg = ui("scrollbar_thumb"),
+        }
+    )
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -972,6 +773,6 @@ end
 
 return {
     Minibuffer = Minibuffer,
-    comp_text = comp_text,
-    comp_meta = comp_meta,
+    comp_text = crender.comp_text,
+    comp_meta = crender.comp_meta,
 }
