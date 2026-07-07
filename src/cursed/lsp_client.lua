@@ -664,6 +664,51 @@ function M.request_definition(client_id, uri, position)
 end
 
 ----------------------------------------------------------------------------------------------------
+-- Rename (textDocument/rename)
+--
+-- Same request/response pattern as definition/hover/codeAction: mint a
+-- main-owned request id, enqueue textDocument/rename to the lane, route
+-- the reply back via the generic MSG_LSP_RESPONSE path. The result is a
+-- WorkspaceEdit ({ changes?, documentChanges? }) or null, re-emitted on
+-- the editor event bus as `"lsp_response:" .. id` carrying
+-- `(result, is_error, client_id)`. The caller applies the WorkspaceEdit
+-- via Editor:apply_workspace_edit (which backgrounds-opens any not-open
+-- target docs, so a rename touching N files is complete).
+--
+-- We do NOT advertise textDocument.rename.prepareSupport in initialize
+-- (capabilities is `{}`), so servers accept a direct rename without a
+-- preceding textDocument/prepareRename. If/when we declare prepareSupport,
+-- add request_prepare_rename + a prepare→rename two-step so the server can
+-- validate the position + supply a placeholder name.
+----------------------------------------------------------------------------------------------------
+
+--- Request textDocument/rename at `position` for `new_name` on the server
+--- bound to `client_id`. `position` is `{ line = L, character = C }` with
+--- L a 0-based line and C a 0-based UTF-16 code-unit offset. `new_name` is
+--- the symbol's new identifier. Returns the request id; subscribe to
+--- `"lsp_response:" .. id` to receive `(result, is_error, client_id)` where
+--- `result` is a WorkspaceEdit or nil for null. No-op + returns nil if not
+--- ready.
+--- @param client_id integer
+--- @param uri string file:// URI
+--- @param position {line:integer,character:integer} LSP position of the symbol
+--- @param new_name string the new identifier for the symbol
+--- @return integer|nil id the request id, or nil if not ready
+function M.request_rename(client_id, uri, position, new_name)
+    if not M.is_ready(client_id) then
+        log.info("lsp", "rename request skipped (not ready)", { client_id = client_id, uri = uri })
+        return nil
+    end
+    local id = M.mint_request_id()
+    enqueue_send("textDocument/rename", {
+        textDocument = { uri = uri },
+        position = position,
+        newName = new_name,
+    }, id, client_id)
+    return id
+end
+
+----------------------------------------------------------------------------------------------------
 -- Code actions (textDocument/codeAction)
 --
 -- Same request/response pattern as definition/hover/completion: mint a

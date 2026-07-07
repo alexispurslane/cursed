@@ -65,6 +65,9 @@ local IH = require("cursed.input_hook")
 ---@field _scroll_guard_col integer|nil primary-cursor col last auto-scrolled for; nil = force next
 ---@field file_loaded boolean whether the initial file has been loaded
 ---@field _pending_goto {line:integer,char:integer}|nil deferred LSP jump (Editor:jump_to_location) applied on file_loaded
+---@field _pending_apply_edits table[]|nil parked LSP TextEdit[] (Editor:apply_workspace_edit) applied on file_loaded for a background-opened target
+---@field _pending_apply_uri string|nil the uri whose edits are parked in _pending_apply_edits (for the done continuation)
+---@field _pending_apply_done fun(ok:boolean)|nil continuation run by _drain_pending_apply_edits to record touched/skipped + fire apply_workspace_edit's on_complete
 ---@field _major_modes MajorModeInstance[] active major mode instances (ordered, later overrides earlier)
 ---@field tab_width integer visual width of a tab stop
 ---@field expand_tab boolean if true, Tab inserts spaces instead of \t

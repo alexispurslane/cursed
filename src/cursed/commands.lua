@@ -2222,16 +2222,21 @@ commands.code_actions = function(view, editor)
                     return
                 end
                 if action.edit ~= nil then
-                    local r = editor:apply_workspace_edit(action.edit)
-                    local n = #r.touched
-                    if n > 0 then
-                        editor.status_message = ("applied (%d doc%s)"):format(
-                            n,
-                            n == 1 and "" or "s"
-                        )
-                    else
-                        editor.status_message = "code action made no in-buffer edits"
-                    end
+                    -- apply_workspace_edit is async when the edit targets
+                    -- a file not open yet (background-opens it); the
+                    -- callback fires synchronously when every target was
+                    -- already open, and sets the status message either way.
+                    editor:apply_workspace_edit(action.edit, function(done)
+                        local n = #done.touched
+                        if n > 0 then
+                            editor.status_message = ("applied (%d doc%s)"):format(
+                                n,
+                                n == 1 and "" or "s"
+                            )
+                        else
+                            editor.status_message = "code action made no in-buffer edits"
+                        end
+                    end)
                 elseif action.command ~= nil then
                     -- `command` may be a server-side command id (string)
                     -- per the Command shape, OR for a CodeAction it's a
@@ -3949,6 +3954,105 @@ local function find_word_before(line_text, c)
         pos = e + 1
     end
     return found_s, found_e
+end
+
+--- Rename the LSP symbol at the cursor (textDocument/rename).
+---
+--- emacs `lsp-rename`-style: prompts for the new name in the minibuffer
+--- (pre-filled with the word at the cursor so the most common case is
+--- edit-the-suffix + Enter), sends textDocument/rename to the buffer's
+--- bound server at the cursor's LSP position, and applies the returned
+--- WorkspaceEdit via Editor:apply_workspace_edit. That apply path
+--- backgrounds-opens any target documents not currently open (so a
+--- rename touching files the user never opened is complete) +
+--- didChange-syncs each mutated doc; the status message + the
+--- "renamed (N docs)" verdict arrive in its on_complete (which fires
+--- synchronously when every target was already open, or after the last
+--- background open settles).
+---
+--- Async: the rename round-trips through the lane; the response callback
+--- fires from main's drain_lsp_inbox when it lands. The cursor position
+--- is captured at command invocation (the main view is quiescent while
+--- the minibuffer owns input, so it can't move before submit); the
+--- UTF-16 char is recomputed at submit time against the (unchanged) line.
+--- Bail + message when no server / not ready. We don't advertise
+--- prepareSupport, so no prepareRename two-step; a server that can't
+--- rename at the position returns an error → "rename failed: server error".
+commands.lsp_rename = function(view, editor)
+    local buf = view and view.buffer
+    local cid = buf and buf.lsp_client_id
+    local uri = buf and buf.lsp_uri
+    if cid == nil or uri == nil then
+        editor.status_message = "no language server for this buffer"
+        return
+    end
+    if not lsp.is_ready(cid) then
+        editor.status_message = "language server not ready"
+        return
+    end
+    -- Capture the cursor (0-based line + byte col) at invocation: the
+    -- minibuffer owns input while the prompt is up, so the main view's
+    -- cursor can't move before on_submit.
+    local p = view:p()
+    local line_text = buf:line_text(p.line) or ""
+    -- Default name = the word at the cursor (identifier chars). Good
+    -- enough as a pre-fill for the common edit-the-suffix case; LSP
+    -- symbols can include more punctuation but the user edits anyway.
+    local default_name = ""
+    local ws, we = find_word_at(line_text, p.col)
+    if ws ~= nil then
+        default_name = line_text:sub(ws, we)
+    end
+    editor:read_from_minibuffer({
+        prompt = "Rename symbol: ",
+        initial = default_name,
+        on_submit = function(new_name)
+            if new_name == nil or #new_name == 0 then
+                editor.status_message = "rename cancelled (empty name)"
+                return
+            end
+            -- Recompute the UTF-16 char at submit time (line unchanged,
+            -- but cheap + robust if anything shifted).
+            local text = buf:line_text(p.line) or ""
+            local char = utf8.byte_to_utf16_col(text, p.col)
+            editor.status_message = "renaming…"
+            local id = lsp.request_rename(cid, uri, { line = p.line, character = char }, new_name)
+            if id == nil then
+                editor.status_message = "language server not ready"
+                return
+            end
+            lsp.on_response(editor, id, function(_ed, result, is_error)
+                if is_error then
+                    editor.status_message = "rename failed: server error"
+                    return
+                end
+                if result == nil then
+                    editor.status_message = "nothing to rename at cursor"
+                    return
+                end
+                -- result is a WorkspaceEdit; apply across open +
+                -- background-opened docs. on_complete fires synchronously
+                -- (all-open) or after the last background open settles.
+                editor:apply_workspace_edit(result, function(r)
+                    local n = #r.touched
+                    if n > 0 then
+                        editor.status_message = ('renamed "%s" (%d doc%s)'):format(
+                            new_name,
+                            n,
+                            n == 1 and "" or "s"
+                        )
+                    elseif #r.skipped > 0 then
+                        editor.status_message = ('rename "%s": no open docs (%d skipped)'):format(
+                            new_name,
+                            #r.skipped
+                        )
+                    else
+                        editor.status_message = "rename made no in-buffer edits"
+                    end
+                end)
+            end)
+        end,
+    })
 end
 
 --- Transpose the words around (or before) point.

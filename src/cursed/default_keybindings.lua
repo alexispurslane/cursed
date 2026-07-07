@@ -105,10 +105,12 @@ return {
     -- user/major-mode chords); the bare `ctrl-c` leaf is intentionally
     -- unbound so the prefix can extend:
     --   ctrl-c a       → code actions
+    --   ctrl-c r       → rename symbol at cursor (textDocument/rename)
     --   ctrl-c s       → start the language server for this buffer's mode
     --   ctrl-c k       → kill the language server serving this buffer
     --   ctrl-c ctrl-r  → restart (kill + re-spawn) the language server
     ["ctrl-c a"] = "code_actions",
+    ["ctrl-c r"] = "lsp_rename",
     ["ctrl-c s"] = "lsp_start",
     ["ctrl-c k"] = "lsp_kill",
     ["ctrl-c ctrl-r"] = "lsp_restart",

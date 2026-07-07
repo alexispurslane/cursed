@@ -958,6 +958,36 @@ function Editor:open_file(filepath)
     ss:push(ss._ptr.outbox_io, { type = shared.MSG_FILE_LOAD, ptr = expanded })
 end
 
+--- Open a file into a NEW view WITHOUT focusing it — no `active_view`
+--- change, no view_focus/buffer_focus, the previously focused view
+--- keeps rendering. Used by workspace edit application so a rename /
+--- fix-all can mutate files the user never opened: the background view
+--- loads asynchronously, fires mode_enter (→ didOpen) on load just like
+--- a focused open, and `view._pending_apply_edits` carries the edits to
+--- apply once `file_loaded` lands. The user can switch to it later; it's
+--- a real View in `self.views` (Emacs-style background visit).
+--- Returns the new (still-loading) view, or nil if `filepath` is a dir.
+---@param filepath string raw path from the edit's file:// URI
+---@return View? view
+function Editor:open_file_background(filepath)
+    local expanded = find_file.expand_path(filepath)
+    if find_file.is_directory(expanded) then
+        self.status_message = "cannot open directory: " .. filepath
+        return nil
+    end
+    local buf = Buffer.new()
+    buf:set_filepath(expanded)
+    local view = View.new(buf)
+    view.editor = self
+    view.margin = self.margin
+    table.insert(self.views, view)
+    self.event_system:emit("view_open", view)
+    log.debug("editor", "open_file_background begin", { path = expanded })
+    local ss = shared.SharedState.from_global()
+    ss:push(ss._ptr.outbox_io, { type = shared.MSG_FILE_LOAD, ptr = expanded })
+    return view
+end
+
 ----------------------------------------------------------------------------------------------------
 -- LSP Location navigation
 --
@@ -1131,19 +1161,29 @@ end
 ---------------------------------------------------------------------------------------------------
 -- Workspace edit application (applyEdit, client-side)
 --
--- A CodeAction's `.edit` is a WorkspaceEdit whose shape per the spec is:
+-- A CodeAction's `.edit` (or a workspace/applyEdit request's `params.edit`)
+-- is a WorkspaceEdit whose shape per the spec is:
 --   { changes?: { [uri]: TextEdit[] },
 --     documentChanges?: (TextDocumentEdit | CreateFile | RenameFile | DeleteFile)[] }
 -- We resolve each uri's edits to the open view/buffer that backs it (if any)
 -- and apply them as ONE undo group via Buffer:apply_lsp_edits. Edits on
 -- already-open docs are the common case (organize imports, refactor,
--- extract). Edits targeting unopened or externally-created files are
--- skipped here (no LSP-side file write/read wiring yet); the caller is
--- told which uris were touched vs skipped so the status message is
--- honest. After mutation each affected view gets the same clamp /
--- wrap-cache invalidate / highlighter cold-requery resync the `format`
--- command + undo path use, plus a didChange so the server's view of the
--- document tracks ours.
+-- extract). Edits targeting NOT-YET-OPEN docs are NOT skipped: the file
+-- is background-opened into a new (unfocused, Emacs-style) view via
+-- Editor:open_file_background and the edits are parked on
+-- `view._pending_apply_edits` until the IO lane lands the text; the
+-- `file_loaded` listener then applies + didChange-syncs them. This is
+-- what makes renames complete (a rename touches files the user never
+-- opened). Resource operations (CreateFile/RenameFile/DeleteFile) ARE
+-- reported as skipped — we don't write files from LSP edits yet. After
+-- mutation each affected view gets the same clamp / wrap-cache invalidate
+-- / highlighter cold-requery resync the `format` command + undo path
+-- use, plus a didChange so the server's view of the document tracks ours.
+-- Because background file loads are ASYNCHRONOUS, apply_workspace_edit is
+-- inherently async when any target was unopened: callers needing the
+-- final touched/skipped verdict (the workspace/applyEdit response) pass
+-- an `on_complete` callback, fired exactly once when all edits settle
+-- (synchronously when nothing needed a background open).
 ---------------------------------------------------------------------------------------------------
 
 --- Find the open view whose buffer backs `uri` (lsp_uri match). Returns
@@ -1182,18 +1222,33 @@ end
 --- both `changes` (uri → TextEdit[] map) and `documentChanges` (array of
 --- `TextDocumentEdit`; resource operations CreateFile/RenameFile/DeleteFile
 --- are reported as skipped via `skips` since we don't write files from
---- LSP edits yet). Edits are applied as one undo group per affected
---- buffer via Buffer:apply_lsp_edits (which sorts + applies right-to-left
---- so coordinates stay valid), then each affected view is resync'd + the
---- text is didChange-synced back to its bound server.
---- @param ws_edit table WorkspaceEdit `{ changes?, documentChanges? }`
---- @return {touched:string[], skipped:string[]} touched uris applied, skipped uris/kinds
-function Editor:apply_workspace_edit(ws_edit)
+--- LSP edits yet). Edits whose target document is ALREADY open are applied
+--- synchronously as one undo group per buffer via Buffer:apply_lsp_edits
+--- (sorts + applies right-to-left so coords stay valid), then resync'd +
+--- didChange-synced back to the bound server. Edits whose target is NOT
+--- open are applied to a freshly background-opened view (Editor:
+--- open_file_background — no focus steal, Emacs-style): the edits are
+--- parked on `view._pending_apply_edits` and applied by the `file_loaded`
+--- listener (as Editor:_drain_pending_apply_edits) once the IO lane lands
+--- the text, then sync'd the same way. Because file loads are async (IO
+--- lane), this entrypoint is INHERENTLY ASYNC when any target is unopened:
+--- `on_complete(result)` fires once every pending open has loaded + been
+--- mutated (or immediately, synchronously, when every target was already
+--- open / the edit was a no-op). Callers needing the final touched/skipped
+--- verdict (the workspace/applyEdit response) MUST pass on_complete.
+---@param ws_edit table WorkspaceEdit `{ changes?, documentChanges? }`
+---@param on_complete? fun(result:{touched:string[], skipped:string[]}) fires exactly once when all edits are settled; synchronous when nothing needed a background open
+---@return {touched:string[], skipped:string[]} touched/skipped SO FAR — the complete verdict (including background opens) arrives via on_complete
+function Editor:apply_workspace_edit(ws_edit, on_complete)
     local lsp = require("cursed.lsp_client")
     local touched = {}
     local skipped = {}
+    local result = { touched = touched, skipped = skipped }
     if type(ws_edit) ~= "table" then
-        return { touched = touched, skipped = skipped }
+        if on_complete ~= nil then
+            on_complete(result)
+        end
+        return result
     end
 
     -- Collect (uri → TextEdit[]) pairs from both shapes, then apply each
@@ -1236,33 +1291,149 @@ function Editor:apply_workspace_edit(ws_edit)
         end
     end
 
-    -- Apply each uri's edits to its open view's buffer. Mutations to
-    -- documents we have open are the supported case; edit targets we
-    -- don't have a buffer for are skipped (reported).
-    for uri, edits in pairs(per_uri) do
-        local view = self:view_for_lsp_uri(uri)
-        if view == nil or view.buffer == nil then
-            skipped[#skipped + 1] = uri
-        else
-            local buf = view.buffer
-            buf:apply_lsp_edits(edits)
-            resync_after_external_edit(view)
-            -- Sync the (now-mutated) text back to the server so its view
-            -- stays in lock-step; mirrors `format`'s post-apply didChange.
-            -- Pass buf.lsp_client_id directly inline so LLS keeps the
-            -- `~= nil` narrowing from the if-guard (an intermediate local
-            -- would widen back to integer|nil).
-            if buf.lsp_client_id ~= nil and buf.lsp_uri ~= nil then
-                local v = buf.lsp_version or 0
-                lsp.sync_change(buf.lsp_client_id, buf.lsp_uri, v, function()
-                    return buf:write_text_direct()
-                end)
+    -- Apply one uri's edits to an ALREADY-OPEN view's buffer: one undo
+    -- group via Buffer:apply_lsp_edits (right-to-left so coords stay
+    -- valid), resync, then didChange-sync the mutated text back to the
+    -- doc's bound server so its view tracks ours. Shared by the
+    -- synchronous (open-document) path here and the deferred
+    -- (background-open) path in _drain_pending_apply_edits.
+    local function apply_to_view(view, edits)
+        local buf = view.buffer
+        if buf == nil then
+            return false
+        end
+        buf:apply_lsp_edits(edits)
+        resync_after_external_edit(view)
+        -- Sync the (now-mutated) text back to the server. Pass
+        -- buf.lsp_client_id directly inline so LLS keeps the `~= nil`
+        -- narrowing from the if-guard (an intermediate local would widen
+        -- back to integer|nil). The doc owns its bound client (chosen at
+        -- mode_enter by the file's language); for a rename every affected
+        -- doc belongs to the requesting server, so this is correct.
+        if buf.lsp_client_id ~= nil and buf.lsp_uri ~= nil then
+            local v = buf.lsp_version or 0
+            lsp.sync_change(buf.lsp_client_id, buf.lsp_uri, v, function()
+                return buf:write_text_direct()
+            end)
+        end
+        return true
+    end
+
+    -- Pending background opens: each one parks its edits on the new view
+    -- (`view._pending_apply_edits` + a `done` continuation) and decrements
+    -- `pending`; `finish` fires `on_complete` exactly once when the last
+    -- settle lands — OR synchronously here when nothing needed a load.
+    local pending = 0
+    local settled = false
+    local function finish()
+        if settled then
+            return
+        end
+        if pending == 0 then
+            settled = true
+            if on_complete ~= nil then
+                on_complete(result)
             end
-            touched[#touched + 1] = uri
         end
     end
 
-    return { touched = touched, skipped = skipped }
+    -- URI → absolute path for the background-open path.
+    local function uri_to_path(uri)
+        return uri:gsub("^file://localhost", ""):gsub("^file://", "")
+    end
+
+    for uri, edits in pairs(per_uri) do
+        local view = self:view_for_lsp_uri(uri)
+        if view ~= nil and view.buffer ~= nil then
+            -- Already open: apply synchronously now.
+            if apply_to_view(view, edits) then
+                touched[#touched + 1] = uri
+            else
+                skipped[#skipped + 1] = uri
+            end
+        else
+            -- Not open: background-visit the file and defer the apply
+            -- until `file_loaded` lands (mode_enter will have bound
+            -- lsp_client_id/uri + didOpen'd the original text by then).
+            local path = uri_to_path(uri)
+            local new_view = self:open_file_background(path)
+            if new_view == nil then
+                skipped[#skipped + 1] = uri
+            else
+                pending = pending + 1
+                new_view._pending_apply_edits = edits
+                new_view._pending_apply_uri = uri
+                -- `done(ok)` records the uri as touched (ok) or skipped
+                -- (!ok) and decrements `pending`; `finish` fires
+                -- `on_complete` exactly once when the last slot settles.
+                -- Not-OK settles come from _drain_pending_apply_edits's
+                -- error path (file_load_error / buffer vanished mid-load).
+                new_view._pending_apply_done = function(ok)
+                    if ok then
+                        touched[#touched + 1] = uri
+                    else
+                        skipped[#skipped + 1] = uri
+                    end
+                    pending = pending - 1
+                    finish()
+                end
+            end
+        end
+    end
+
+    -- Everything that was already open has settled; finish synchronously
+    -- unless background opens are still in flight (those call finish from
+    -- their done continuations / _drain_pending_apply_edits).
+    finish()
+    return result
+end
+
+--- Drain a background-opened view's parked workspace edits once its file
+--- has loaded. Parked by Editor:apply_workspace_edit on
+--- `view._pending_apply_edits` (+ `_pending_apply_uri` /
+--- `_pending_apply_done`); fired from the editor_listeners `file_loaded`
+--- handler after the goto (if any) is placed. Applies the edits as one
+--- undo group, resyncs the view, didChange-syncs the mutated text to
+--- the doc's bound server (already didOpen'd during this load's
+--- mode_enter), then runs the `done(true)` continuation so
+--- apply_workspace_edit's on_complete fires + the LSP applyEdit request
+--- can be answered. The `ok` arg (default true) is set false by the
+--- load-failure path (file_load_error: file missing / mmap error):
+--- then no apply runs and `done(false)` records the uri as skipped so the
+--- verdict stays honest + the request never hangs. No-op when nothing
+--- is parked (clears the fields unconditionally so a replay/edge
+--- doesn't double-apply).
+---@param view View
+---@param ok? boolean default true; false = load failed, skip the apply
+function Editor:_drain_pending_apply_edits(view, ok)
+    if ok == nil then
+        ok = true
+    end
+    local edits = view._pending_apply_edits
+    if edits == nil then
+        return
+    end
+    local done = view._pending_apply_done
+    view._pending_apply_edits = nil
+    view._pending_apply_uri = nil
+    view._pending_apply_done = nil
+    local lsp = require("cursed.lsp_client")
+    local buf = view.buffer
+    if ok and buf ~= nil then
+        buf:apply_lsp_edits(edits)
+        resync_after_external_edit(view)
+        if buf.lsp_client_id ~= nil and buf.lsp_uri ~= nil then
+            local v = buf.lsp_version or 0
+            lsp.sync_change(buf.lsp_client_id, buf.lsp_uri, v, function()
+                return buf:write_text_direct()
+            end)
+        end
+    else
+        ok = false -- buffer vanished mid-load / load failed → skip
+    end
+    if done ~= nil then
+        done(ok)
+    end
 end
 
 --- Insert a file's contents at the cursor (async via IO lane).

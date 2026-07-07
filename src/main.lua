@@ -151,6 +151,11 @@ local function drain_inbox(editor, ss)
                         target_view:activate_mode_for_filepath(fp, editor._config)
                     end
                     bench.span("main", "file_open activate_mode", t_mode, { path = fp })
+                    -- Empty (0-byte) file: the placeholder buffer from
+                    -- open_file / open_file_background is a valid empty
+                    -- buffer, so emit file_loaded just like the non-empty
+                    -- branch so deferred goto + workspace-edit drains run.
+                    editor.event_system:emit("file_loaded", target_view, target_view.buffer)
                 end
             end
         end,
@@ -159,6 +164,22 @@ local function drain_inbox(editor, ss)
             ffi.C.free(msg.ptr)
             editor.status_message = err_str
             log.error("main", "file load error", { error = err_str })
+            -- The view that didn't load stays file_loaded=false; find it
+            -- and emit file_load_error so editor_listeners can finish any
+            -- parked workspace-edit apply (as skipped, so the LSP
+            -- applyEdit request doesn't hang) + remove the zombie view so
+            -- it doesn't steal the NEXT file load's data via the
+            -- first-not-loaded match above.
+            local failed_view = nil
+            for _, v in ipairs(editor.views) do
+                if not v.file_loaded then
+                    failed_view = v
+                    break
+                end
+            end
+            if failed_view ~= nil then
+                editor.event_system:emit("file_load_error", failed_view, err_str)
+            end
         end,
         [shared.MSG_FILE_SAVED] = function(msg)
             local saved_filepath = ffi.string(msg.ptr or "")

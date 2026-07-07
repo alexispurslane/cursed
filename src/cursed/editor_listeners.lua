@@ -592,40 +592,74 @@ function EditorListeners.setup(editor)
     -- text). Fires once on the `file_loaded` event the load path emits,
     -- converts the LSP UTF-16 char to a byte col against the now-loaded
     -- line, clamps to bounds, and forces a scroll-into-view.
-    es:on("file_loaded", function(_ed, view, _buf)
+    --
+    -- ALSO drains a background-opened view's parked workspace edits
+    -- (`view._pending_apply_edits`, parked by Editor:apply_workspace_edit
+    -- when a workspace/applyEdit's target file wasn't already open).
+    -- The two pending slots are independent: a goto (jump_to_location)
+    -- and an apply (workspace/applyEdit) don't both park on one view, but
+    -- either path may miss its target being already loaded, so both are
+    -- checked here and no-op cleanly when absent.
+    es:on("file_loaded", function(ed, view, _buf)
         local g = view and view._pending_goto
-        if g == nil then
+        if g ~= nil then
+            view._pending_goto = nil
+            local lc = view:line_count()
+            local li = g.line or 0
+            if li < 0 then
+                li = 0
+            elseif li >= lc then
+                li = math.max(0, lc - 1)
+            end
+            local text = view.buffer:line_text(li) or ""
+            local byte_col = utf16_to_byte_col(text, g.char or 0)
+            local clen = view:content_len(li)
+            if byte_col > clen then
+                byte_col = clen
+            end
+            view:set_single_cursor(li, byte_col)
+            view._scroll_guard_line = nil
+            view._scroll_guard_col = nil
+            -- Zero-flash highlight resync (mirrors undo/redo/format): the
+            -- fresh file's highlighter is cold at load, and the jumped-to
+            -- location is far from line 0, so cold-requery synchronously at
+            -- the cursor's byte so the FIRST render after load shows correct
+            -- syntax instead of a flash of plain text as viewport buckets
+            -- fill asynchronously. No-op when no highlighter mode is active.
+            view:clamp_cursor()
+            view:invalidate_wrap_cache()
+            local starts = view:_hl_line_starts()
+            local cur = view:p()
+            local byte = (starts[cur.line + 1] or 0) + cur.col
+            view:_hl_cold_requery(byte)
+        end
+        -- Background-opened workspace edits: apply + sync now that the
+        -- file is loaded (mode_enter already didOpen'd the original text
+        -- during this load, so didChange-sync the mutation it applies).
+        if view and view._pending_apply_edits ~= nil then
+            ed:_drain_pending_apply_edits(view)
+        end
+    end)
+
+    -- A background file open failed (MSG_FILE_ERROR): the view stays
+    -- file_loaded=false and would otherwise (a) hang any LSP
+    -- workspace/applyEdit waiting on its parked edits and (b) steal the
+    -- NEXT file load's data via main's first-not-loaded match. Finish
+    -- the parked apply as skipped (done(false) releases the pending slot
+    -- + on_complete so the applyEdit response still ships), then close
+    -- the zombie view so it's removed from self.views. No-op when the
+    -- failed open wasn't a workspace-edit target (no parked edits → just
+    -- close the empty stub view).
+    es:on("file_load_error", function(ed, view, err_str)
+        if view == nil then
             return
         end
-        view._pending_goto = nil
-        local lc = view:line_count()
-        local li = g.line or 0
-        if li < 0 then
-            li = 0
-        elseif li >= lc then
-            li = math.max(0, lc - 1)
+        if view._pending_apply_edits ~= nil then
+            ed:_drain_pending_apply_edits(view, false)
+        else
+            log.warn("event", "file_load_error", { error = tostring(err_str) })
         end
-        local text = view.buffer:line_text(li) or ""
-        local byte_col = utf16_to_byte_col(text, g.char or 0)
-        local clen = view:content_len(li)
-        if byte_col > clen then
-            byte_col = clen
-        end
-        view:set_single_cursor(li, byte_col)
-        view._scroll_guard_line = nil
-        view._scroll_guard_col = nil
-        -- Zero-flash highlight resync (mirrors undo/redo/format): the
-        -- fresh file's highlighter is cold at load, and the jumped-to
-        -- location is far from line 0, so cold-requery synchronously at
-        -- the cursor's byte so the FIRST render after load shows correct
-        -- syntax instead of a flash of plain text as viewport buckets
-        -- fill asynchronously. No-op when no highlighter mode is active.
-        view:clamp_cursor()
-        view:invalidate_wrap_cache()
-        local starts = view:_hl_line_starts()
-        local cur = view:p()
-        local byte = (starts[cur.line + 1] or 0) + cur.col
-        view:_hl_cold_requery(byte)
+        ed:close_view(view)
     end)
 
     -- LSP inbound notifications are re-emitted on the event bus by
@@ -641,20 +675,57 @@ function EditorListeners.setup(editor)
     -- Server-initiated requests are re-emitted as
     -- `"lsp_server_request:" .. method` carrying
     -- `(params, request_id, client_id)`. Handle workspace/applyEdit by
-    -- acknowledging the request. The actual edit application (mapping)
-    -- is not yet implemented — respond with success so the server
-    -- doesn't hang waiting for a reply. Other methods are unsubscribed.
+    -- applying params.edit via Editor:apply_workspace_edit (uri→buffer,
+    -- one undo group per doc, post-apply resync + didChange sync). For
+    -- targets not already open, the edit is applied to a freshly
+    -- background-opened (unfocused, Emacs-style) view whose file loads
+    -- async via the IO lane — so apply_workspace_edit is INHERENTLY
+    -- ASYNC when any target is unopened: the LSP response (with the
+    -- real `applied` verdict) + the status message are produced in the
+    -- `on_complete` callback once every pending open settles (or
+    -- synchronously when every target was already open / it's a
+    -- no-op). Other methods are unsubscribed.
     es:on("lsp_server_request:workspace/applyEdit", function(ed, params, rid, cid)
-        local label = params and params.label or "workspace/applyEdit"
-        -- TODO: Apply params.edit to the affected buffers. The edit
-        -- carries a `changes` map (uri → TextEdit[]) or `documentChanges`
-        -- array. Each TextEdit has {range, newText}; cursed needs to
-        -- map uri→buffer, translate LSP positions to byte offsets, and
-        -- apply the edits transactionally. For now, acknowledge success
-        -- so the server doesn't hang.
+        local label = (params and params.label) or "workspace/applyEdit"
+        local ws_edit = params and params.edit
         log.info("lsp", "applyEdit received", { label = label, client_id = cid })
-        -- TODO: apply params.edit to the affected buffers
-        lsp.respond(cid, rid, { applied = true })
+        if ws_edit == nil then
+            ed.status_message = "applyEdit: no edit payload"
+            log.warn("lsp", "applyEdit had no edit payload", { client_id = cid })
+            lsp.respond(cid, rid, { applied = false })
+            return
+        end
+        -- on_complete fires exactly once: synchronously here when every
+        -- target document was already open (pending == 0 immediately), or
+        -- after the last background-opened file loads + is mutated.
+        ed:apply_workspace_edit(ws_edit, function(r)
+            local n_touched = #r.touched
+            local n_skipped = #r.skipped
+            if n_touched > 0 then
+                ed.status_message = ('applied "%s" (%d doc%s)'):format(
+                    label,
+                    n_touched,
+                    n_touched == 1 and "" or "s"
+                )
+            elseif n_skipped > 0 then
+                ed.status_message = ('applyEdit "%s": no open docs (%d skipped)'):format(
+                    label,
+                    n_skipped
+                )
+            else
+                ed.status_message = ('applyEdit "%s": nothing to apply'):format(label)
+            end
+            log.info("lsp", "applyEdit settled", {
+                label = label,
+                touched = n_touched,
+                skipped = n_skipped,
+                client_id = cid,
+            })
+            -- Per spec `applied` is a whole-edit verdict: true iff at
+            -- least one document was actually mutated. Background-opened
+            -- files that were opened + mutated count as touched.
+            lsp.respond(cid, rid, { applied = n_touched > 0 })
+        end)
     end)
 
     -- Squiggle DEMO (no LSP data source yet): when
