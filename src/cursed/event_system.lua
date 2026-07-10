@@ -39,6 +39,24 @@ function EventSystem.new(editor)
     }, EventSystem)
 end
 
+--- Register a handler that only fires when the currently focused view
+--- has a mode with the given name. Returns the wrapper so it can be
+--- removed later via `off`.
+---@param mode_name string mode name to scope to
+---@param name string event name
+---@param fn fun(view: View, editor: Editor, ...) handler (receives view as first arg instead of editor)
+---@return function wrapper (pass to off to remove)
+function EventSystem:on_mode(mode_name, name, fn)
+    local wrapper = function(editor, ...)
+        local view = editor:focused_view()
+        local mode = view and view:top_mode()
+        if mode and mode.name == mode_name then
+            fn(view, editor, ...)
+        end
+    end
+    return self:on(name, wrapper)
+end
+
 --- Register a handler for an event.
 --- Handlers are called as `fn(editor, ...)` in registration order.
 ---@param name string event name

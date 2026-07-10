@@ -142,6 +142,7 @@ local O_RDONLY = 0
 local O_WRONLY = 1
 local O_CREAT = 0x0200
 local O_TRUNC = 0x0400
+local O_EXCL = 0x0800 -- exclusive create (fail if file exists)
 local PROT_READ = 0x01
 local PROT_WRITE = 0x02
 local MAP_PRIVATE = 0x0002
@@ -238,6 +239,7 @@ return {
     O_WRONLY = O_WRONLY,
     O_CREAT = O_CREAT,
     O_TRUNC = O_TRUNC,
+    O_EXCL = O_EXCL,
     X_OK = X_OK,
     -- select(2) helpers
     fd_set_new = fd_set_new,

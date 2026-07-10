@@ -11,20 +11,19 @@ so the agent can pick up context across sessions.
 
 ## Key Decisions
 
-- Could mitigate by keeping the array for O(1) prefix access and only using BIT for update paths, rebuilding the array from BIT when convenient.
-- when the user is in the minibuffer crafting a search, we should only find the first instance, jumping there so they can see it; only when they hit enter should the search be turned into candidate cursors at every match.
-- add_cursor_candidate doesn't seem to only activate the candidates within the region --- it seems to always do all of them
-- In `ring_pop`, the original code was:
-- Let me use Python for this C refactor.
-- we should open the buffers that aren't open, at least temporarily, to do those edits.
-- lsp_rename` right after the `find_word_*` helpers so it can use `find_word_at` as an upvalue.
-- lsp_version then
-- Merge into a single function that optionally handles the NULL-exe_name case.
-- we have a fair amount of LSP capabilities at this point, we should probably advertise all of them
+- when we expand _fm_dir, we should jump the cursor, if it was in the header to begin with, to the end of _fm_dir
+- when the user deletes the trailing slash on _fm_dir, we should allow that, so it's easier to delete past into the directory name behind it
+- I'll use 24-29 for the FILE ops.
+- alright, now let's use those methods for all existing file ops in the editor that didn't already use the io lane
+- We agreed earlier to defer MSG_FILE_READ_BUFFER (a structured success reply) until we settled the response-model pattern, and the same gap exists here for writes.
+- I think we should have the file io lane wrapper (on the main thread) store a module-global file op counter, not just slap it on Editor
+- We agreed earlier that this gap exists, and deferred adding `MSG_FILE_READ_BUFFER` until we settle the response-model pattern.
+- , the architecture should already have that, and we should make it happen.
+- Actually the LOOP at `_take_file_op` is already keyed by req_id; if it's the same as the FIFO head, we should remove from FIFO too.
+- Let me fix — only call `editor:open_file` if there's no current view, OR refactor to set the existing view's filepath + push with req_id.
 
 ## Gotchas & Errors
 
-- /bin/bash: line 26: luajit: command not found
 - Command aborted
 - Good idea in principle — but I can't actually launch subagents from here.
 - Could not find the exact text in /Users/alexispurslane/Development/scratch/cursed/src/cursed/modes/lua.lua. The old text must match exactly including all whitespace and newlines.
@@ -32,10 +31,14 @@ so the agent can pick up context across sessions.
 - (no output)
 - Validation failed for tool "edit": — Fix: Let me fix this in two separate calls — first fix `_paint_run`, then fix its call site:
 - Could not find the exact text in /Users/alexispurslane/Development/scratch/cursed/src/cursed/editor.lua. The old text must match exactly including all whitespace and newlines.
+- Found 2 occurrences of the text in /Users/alexispurslane/Development/scratch/cursed/src/cursed/file_manager.lua. The text must be unique. Please provide more context to make it uni
 
 ## Heavily Read
 
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/editor_listeners.lua (5 reads) — Let me start by reading the file to understand the current structure.
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/editor.lua (23 reads) — Let me trace how each consumer activates/deactivates to find the right push/remo
-- /Users/alexispurslane/Development/scratch/cursed/src/main.lua (5 reads) — It's in `main.lua`, not `editor.lua`. Let me read it:
-- /Users/alexispurslane/Development/scratch/cursed/src/cursed/keybind.lua (3 reads) — The `Trie.build()` and `Trie:lookup()` already exist and work. What's missing is
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/editor.lua (17 reads) — Three big chunks — let me plan them out before writing code. I'll batch-read wha
+- /Users/alexispurslane/Development/scratch/cursed/src/shared_state.h (3 reads) — Free values: 17 is taken (LSP_NOTIFICATION), 18-22 taken (PROC), 23 taken (LSP_S
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/io_lane.lua (19 reads) — OK so the C header has number gaps (5,6,7 reserved and SHUTDOWN uses 5; FILE_INS
+- /Users/alexispurslane/Development/scratch/cursed/src/main.lua (26 reads) — Now wire `MSG_FILE_DIRLIST_RESP` into main.lua's `drain_inbox`, and rewire `MSG_
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/shared_ffi.lua (4 reads) — Task #1 is still in progress. Let me finish it: the C header now has the new con
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/shared.lua (5 reads) — Ok. Moving the counter to a module-global. Let me find where to put it — probabl
+- /Users/alexispurslane/Development/scratch/cursed/src/cursed/buffer.lua (7 reads) — `Buffer.from_mmap` requires the data to be mmap'd (the GC guard calls `munmap`).

@@ -1,0 +1,80 @@
+file-manager mode, async file-op system, event-bus-driven IO replies
+
+Introduce a file-manager major mode for browsing directories, and
+rewire all filesystem operations — load, save, delete, create,
+mkdir, chmod, rename, dirlist, and write — through the IO lane with
+a request-id correlation scheme that routes replies via the event
+bus instead of view-first-not-loaded matching.  This eliminates the
+brittle "first unloaded view" heuristic, enables callers outside
+the View lifecycle (headless eval, user scripts) to await file ops,
+and opens the door to concurrent file operations.
+
+- **File manager mode** (src/cursed/file_manager.lua, new):
+  `open_directory(editor, path)` creates a non-file-backed view with
+  a header line (resolved dir + fzy query) and a filtered item list.
+  Supports live fzy filtering, arrow-/Ctrl-np navigation, Tab
+  completion (unique prefix → dir entry, single fzy match → open),
+  backspace to trim query / go to parent, and Escape/q to close.
+  Directories opened from the CLI or :open now launch the file
+  manager instead of showing an error.
+
+- **IO lane protocol — new MSG_FILE_* constants** (shared_state.h):
+  MSG_FILE_DELETE (24), MSG_FILE_CREATE (25), MSG_FILE_MKDIR (26),
+  MSG_FILE_CHMOD (27), MSG_FILE_RENAME (28), MSG_FILE_DIRLIST (29),
+  MSG_FILE_DIRLIST_RESP (30), MSG_FILE_WRITE (31),
+  MSG_FILE_LOADED_V2 (32).  Full C-struct payloads (FileMoveReq,
+  FileDirEntry, FileDirListResp, FileWriteReq, FileLoadReply)
+  defined in shared_ffi.lua.
+
+- **Request-id correlation** (shared.lua, editor.lua):
+  Module-global `next_file_op_id()` counter mints stable ids.
+  Every MSG_FILE_* carries arg=req_id; the IO lane echoes it back
+  in MSG_FILE_ERROR / MSG_FILE_DIRLIST_RESP / MSG_FILE_LOADED_V2.
+  Main subscribes a one-shot `"file_op:<req_id>"` event-bus handler
+  that self-unsubscribes on first delivery.
+
+- **MSG_FILE_LOADED_V2 reply** (io_lane.lua, main.lua):
+  Replaces the old arg=file_size, ptr=mmap_ptr convention with a
+  single malloc'd FileLoadReply struct carrying req_id, file_size,
+  and mmap_ptr.  Main frees the struct after extraction.  Empty
+  files produce a reply with mmap_ptr=nil.  The MSG_FILE_LOADED
+  legacy handler is completely removed from drain_inbox.
+
+- **New Editor methods** (editor.lua):
+  `read_into_buffer(path, on_done)` — load a file into a Buffer
+  without attaching to any view (supports headless eval).
+  `delete_file`, `create_file`, `mkdir`, `chmod`, `rename`,
+  `dirlist` — async filesystem primitives with on_done callbacks.
+  `save_buffer_to_file(buffer, path, on_done)` — persist any
+  Buffer's piece-table content via MSG_FILE_WRITE.
+  `write_string_to_file(str, path, on_done)` — convenience wrapper
+  around save_buffer_to_file.
+  `confirm(msg, on_yes, on_no)` — y/n minibuffer prompt for
+  destructive operations.
+
+- **Buffer utilities** (buffer.lua):
+  `Buffer.from_owned_bytes(ptr, len)` — create a Buffer from
+  malloc-owned bytes (GC frees instead of munmaps).
+  `Buffer.from_string(s)` — convenience for write_string_to_file.
+  `Buffer:serialize_to_bytes()` — serialize piece-table content
+  into a single malloc'd buffer (use free, not munmap, on cleanup).
+  `_owns_heap` flag on the Buffer class to distinguish heap-owned
+  orig data from mmap'd orig data in the GC finalizer.
+
+- **Headless drain loop** (main.lua):
+  After eval, busy-wait up to 100 iterations draining all inboxes
+  until _pending_ops_count reaches zero before shutdown.  Renames
+  `build_headless_editor()` return value to avoid shadowing globals.
+
+- **CLI directory handling** (main.lua):
+  `cursed .` or any directory arg closes the placeholder view and
+  opens the file manager instead.  Missing files are created via
+  MSG_FILE_CREATE on the IO lane (not io.open) — the lane processes
+  CREATE then LOAD in order, so MSG_FILE_LOADED sees the real file.
+
+- **Event bus** (event_system.lua):
+  `EventSystem:on_mode(mode_name, name, fn)` registers a handler
+  that only fires when the focused view has a mode with the given
+  name (used by file manager keybindings).
+
+- **posix_ffi.lua**: Exports O_EXCL for exclusive-create open(2).

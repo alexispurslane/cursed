@@ -81,95 +81,44 @@ end
 
 local function drain_inbox(editor, ss)
     drain_generic(ss, ss._ptr.inbox_io, editor, {
-        [shared.MSG_FILE_LOADED] = function(msg)
-            local orig_data = msg.ptr
-            local orig_len = tonumber(msg.arg or 0)
-            ---@cast orig_len integer
-
-            log.info(
-                "main",
-                "file loaded from inbox",
-                { len = orig_len, has_ptr = tostring(orig_data ~= nil) }
-            )
-
-            if orig_data ~= nil and orig_len > 0 then
-                local bench = require("cursed.bench")
-                local psize = tonumber(ffi.C.sysconf(shared._SC_PAGESIZE))
-                local orig_cap = bit.band(orig_len + psize - 1, bit.bnot(psize - 1))
-
-                local t_mmap = bench.now_us()
-                local buf = Buffer.from_mmap(orig_data, orig_len, orig_cap)
-                bench.span("main", "file_open build_lines", t_mmap, { len = orig_len })
-                -- Find the view waiting for this file load (file_loaded == false)
-                local target_view = nil
-                for _, v in ipairs(editor.views) do
-                    if not v.file_loaded then
-                        target_view = v
-                        break
-                    end
-                end
-                if target_view then
-                    local fp = target_view.buffer:filepath()
-                    target_view:set_buffer(buf, { loaded = true })
-                    if fp then
-                        buf:set_filepath(fp)
-                    end
-                    target_view.file_loaded = true
-                    -- Activate major mode based on filepath
-                    local t_mode = bench.now_us()
-                    if editor._config and fp then
-                        target_view:activate_mode_for_filepath(fp, editor._config)
-                    end
-                    bench.span("main", "file_open activate_mode", t_mode, { path = fp })
-                    editor.event_system:emit("file_loaded", target_view, buf)
-                    -- Total wall time from Editor:open_file() to here
-                    if target_view._bench_open_t0 then
-                        bench.span(
-                            "main",
-                            "file_open TOTAL",
-                            target_view._bench_open_t0,
-                            { path = fp, len = orig_len }
-                        )
-                        target_view._bench_open_t0 = nil
-                    end
-                end
-            else
-                local target_view = nil
-                for _, v in ipairs(editor.views) do
-                    if not v.file_loaded then
-                        target_view = v
-                        break
-                    end
-                end
-                if target_view then
-                    local bench = require("cursed.bench")
-                    target_view.file_loaded = true
-                    -- Activate major mode based on filepath
-                    local fp = target_view.buffer:filepath()
-                    local t_mode = bench.now_us()
-                    if editor._config and fp then
-                        target_view:activate_mode_for_filepath(fp, editor._config)
-                    end
-                    bench.span("main", "file_open activate_mode", t_mode, { path = fp })
-                    -- Empty (0-byte) file: the placeholder buffer from
-                    -- open_file / open_file_background is a valid empty
-                    -- buffer, so emit file_loaded just like the non-empty
-                    -- branch so deferred goto + workspace-edit drains run.
-                    editor.event_system:emit("file_loaded", target_view, target_view.buffer)
-                end
+        [shared.MSG_FILE_LOADED_V2] = function(msg)
+            -- Read the FileLoadReply struct: req_id, file_size, mmap_ptr.
+            -- Main frees the struct after extracting and emits to the
+            -- event bus; callers subscribe one-shot "file_op:<req_id>"
+            -- handlers that self-unsubscribe on first delivery.
+            if msg.ptr == nil then
+                return
             end
+            local hdr = ffi.cast("struct FileLoadReply *", msg.ptr)
+            local req_id = tonumber(hdr.req_id) or 0
+            ---@cast req_id integer
+            local file_size = tonumber(hdr.file_size) or 0
+            local mmap_ptr = hdr.mmap_ptr
+            ffi.C.free(msg.ptr)
+
+            log.info("main", "file loaded v2", { req_id = req_id, size = file_size })
+
+            editor.event_system:emit("file_op:" .. req_id, {
+                mmap = mmap_ptr,
+                size = file_size,
+            })
         end,
         [shared.MSG_FILE_ERROR] = function(msg)
-            local err_str = ffi.string(msg.ptr or "")
-            ffi.C.free(msg.ptr)
+            -- File-op errors carry a req_id in arg and dispatch through
+            -- the event bus ("file_op:<req_id>" with { err = ... }).
+            -- Legacy load errors (req_id=0) fall through to the old path.
+            local req_id = tonumber(msg.arg)
+            local err_str = msg.ptr ~= nil and ffi.string(msg.ptr) or "<no message>"
+            if msg.ptr ~= nil then
+                ffi.C.free(msg.ptr)
+            end
+            if req_id and req_id ~= 0 then
+                editor.event_system:emit("file_op:" .. req_id, { err = err_str })
+                return
+            end
+            -- Legacy load error without req_id.
             editor.status_message = err_str
             log.error("main", "file load error", { error = err_str })
-            -- The view that didn't load stays file_loaded=false; find it
-            -- and emit file_load_error so editor_listeners can finish any
-            -- parked workspace-edit apply (as skipped, so the LSP
-            -- applyEdit request doesn't hang) + remove the zombie view so
-            -- it doesn't steal the NEXT file load's data via the
-            -- first-not-loaded match above.
             local failed_view = nil
             for _, v in ipairs(editor.views) do
                 if not v.file_loaded then
@@ -181,14 +130,50 @@ local function drain_inbox(editor, ss)
                 editor.event_system:emit("file_load_error", failed_view, err_str)
             end
         end,
+        [shared.MSG_FILE_DIRLIST_RESP] = function(msg)
+            local req_id = tonumber(msg.arg) or 0
+            ---@cast req_id integer
+            if msg.ptr == nil then
+                editor.event_system:emit(
+                    "file_op:" .. req_id,
+                    { err = "null pointer in dirlist reply" }
+                )
+                return
+            end
+            local hdr = ffi.cast("struct FileDirListResp *", msg.ptr)
+            local count = tonumber(hdr.count) or 0
+            local entries = {}
+            if count > 0 then
+                local header_size = ffi.sizeof("struct FileDirListResp")
+                local entry_size = ffi.sizeof("struct FileDirEntry")
+                local cursor = (ffi.cast("uint8_t *", msg.ptr)) + header_size
+                for _ = 1, count do
+                    local entry_ptr = ffi.cast("struct FileDirEntry *", cursor)
+                    local nlen = tonumber(entry_ptr.name_len) or 0
+                    local name = ffi.string((ffi.cast("char *", cursor)) + entry_size, nlen)
+                    entries[#entries + 1] = {
+                        name = name,
+                        is_dir = tonumber(entry_ptr.is_dir) == 1,
+                    }
+                    cursor = cursor + entry_size + nlen
+                end
+            end
+            ffi.C.free(msg.ptr)
+            editor.event_system:emit("file_op:" .. req_id, { entries = entries })
+        end,
         [shared.MSG_FILE_SAVED] = function(msg)
             local saved_filepath = ffi.string(msg.ptr or "")
             ffi.C.free(msg.ptr)
             editor.status_message = "Wrote " .. saved_filepath
         end,
         [shared.MSG_FILE_INSERTED] = function(msg)
-            local len = tonumber(msg.arg or 0)
-            ---@cast len integer
+            -- arg is req_id (echoed by the IO lane from MSG_INSERT_FILE).
+            -- Emit to event bus so the one-shot handler self-cleans.
+            local req_id = tonumber(msg.arg) or 0
+            ---@cast req_id integer
+            if req_id ~= 0 then
+                editor.event_system:emit("file_op:" .. req_id, {})
+            end
             -- Re-calculate line geometry for the current view's buffer
             -- after a do_insert_file request completes.
             local cv = editor:current_view()
@@ -196,7 +181,7 @@ local function drain_inbox(editor, ss)
                 cv.buffer:build_lines()
                 cv:invalidate_cached_text()
                 cv.pending_cursors = {}
-                cv:update_cached_text(cv.buffer, len)
+                cv:update_cached_text(cv.buffer, 0)
             end
         end,
     })
@@ -897,8 +882,25 @@ local function main()
         -- the same Editor/View/Buffer/command APIs as the TUI path
         -- without taking over the terminal. Exposed as _G.editor / _G.view
         -- (a bare `editor` in the eval chunk resolves to _G.editor).
-        build_headless_editor()
+        local editor_headless = build_headless_editor()
         local rc = run_headless(parsed)
+        -- Drain the inbox once after eval so that any async file-op
+        -- replies (MSG_FILE_LOADED for read_into_buffer,
+        -- MSG_FILE_ERROR for failing ops) are consumed before we shut
+        -- down the lanes. Busy-wait up to 100µs worth of retries
+        -- (the IO lane processes in microseconds, so a few iterations
+        -- with a yield are enough).
+        local ss_headless = require("cursed.shared").SharedState.from_global()
+        for _ = 1, 100 do
+            drain_inbox(editor_headless, ss_headless)
+            drain_hl_inbox(editor_headless, ss_headless)
+            drain_lsp_inbox(editor_headless, ss_headless)
+            drain_proc_inbox(editor_headless, ss_headless)
+            local count = editor_headless._pending_ops_count or 0
+            if count == 0 then
+                break
+            end
+        end
         -- Signal the worker lanes to stop. ss:stop() sets running=false
         -- AND pushes MSG_SHUTDOWN to each lane's outbox (ring_push
         -- triggers EVFILT_USER on the parked kevent, so each lane wakes,
@@ -906,9 +908,7 @@ local function main()
         -- pthread_join's a clean exit instead of deadlocking (the lanes
         -- are parked in kevent(); without the wake, join would block).
         pcall(function()
-            local shared = require("cursed.shared")
-            local ss = shared.SharedState.from_global()
-            ss:stop()
+            ss_headless:stop()
         end)
         return rc
     end
@@ -1153,18 +1153,56 @@ local function main()
         -- No file given on the command line: open a random temporary
         -- text file so the user edits a real on-disk file they can save.
         -- os.tmpname() returns a unique path without creating it; we
-        -- create it empty and load it through the normal IO lane so the
-        -- watchdog arms/clears like any other file (it loads instantly).
+        -- create it empty via the IO lane's MSG_FILE_CREATE so the
+        -- file actually exists before MSG_FILE_LOAD races the load.
+        -- The IO lane processes both ops in order (CRE THEN LOAD), so
+        -- the resulting MSG_FILE_LOADED will mmap an empty file.
         local tmp_path = os.tmpname() .. ".txt"
-        local nf = io.open(tmp_path, "wb")
-        if nf then
-            nf:close()
-        end
+        editor:create_file(tmp_path)
         view.buffer:set_filepath(tmp_path)
         view._bench_open_t0 = require("cursed.bench").now_us()
-        ss:push(ss._ptr.outbox_io, { type = shared.MSG_FILE_LOAD, ptr = tmp_path })
+        -- Push FILE_LOAD with a req_id so the load reply routes
+        -- through the event bus. Re-uses the existing empty view
+        -- rather than allocating a new one via open_file.
+        local req_id = editor:_next_file_op_id()
+        editor._pending_ops_count = (editor._pending_ops_count or 0) + 1
+        local event_name = "file_op:" .. req_id
+        local handler
+        handler = editor.event_system:on(event_name, function(_, payload)
+            editor.event_system:off(event_name, handler)
+            editor._pending_ops_count = editor._pending_ops_count - 1
+            if payload.err then
+                editor.status_message = payload.err
+                return
+            end
+            local mmap_ptr = payload.mmap
+            local file_size = payload.size
+            ---@cast file_size integer
+            local bench = require("cursed.bench")
+            if mmap_ptr == nil then
+                view.file_loaded = true
+                editor.event_system:emit("file_loaded", view, view.buffer)
+            else
+                local psize = tonumber(ffi.C.sysconf(shared._SC_PAGESIZE)) or 4096
+                local cap = file_size > 0 and bit.band(file_size + psize - 1, bit.bnot(psize - 1))
+                    or psize
+                local loaded_buf = Buffer.from_mmap(mmap_ptr, file_size, cap)
+                view:set_buffer(loaded_buf, { loaded = true })
+                loaded_buf:set_filepath(tmp_path)
+                view.file_loaded = true
+                editor.event_system:emit("file_loaded", view, loaded_buf)
+                if view._bench_open_t0 then
+                    bench.span("main", "file_open TOTAL", view._bench_open_t0, { path = tmp_path })
+                    view._bench_open_t0 = nil
+                end
+            end
+        end)
+        ss:push(ss._ptr.outbox_io, {
+            type = shared.MSG_FILE_LOAD,
+            arg = req_id,
+            ptr = tmp_path,
+        })
         log.info("main", "no file; opened temp", { path = tmp_path })
-        log.info("main", "pushing FILE_LOAD", { path = tmp_path })
     else
         local arg_seen = 0
         for i = 1, #arg do
@@ -1197,8 +1235,14 @@ local function main()
                 local expanded = find_file.expand_path(filepath)
 
                 if find_file.is_directory(expanded) then
-                    editor.status_message = "cannot open directory: " .. filepath
-                    cur_view.file_loaded = true
+                    -- Open the directory in the file manager instead of the placeholder view.
+                    editor:close_view(cur_view)
+                    local fm = require("cursed.file_manager")
+                    fm.open_directory(editor, expanded)
+                    -- Fix up first_file_view_index since we removed a view
+                    if first_file_view_index and first_file_view_index > #editor.views then
+                        first_file_view_index = #editor.views
+                    end
                     log.info("main", "cli path is a directory", { path = filepath })
                 else
                     -- If the file doesn't exist, create an empty one so
@@ -1207,29 +1251,74 @@ local function main()
                     -- surface the error.
                     local f = io.open(expanded, "rb")
                     if f == nil then
-                        local ok_cre, err_cre = pcall(function()
-                            local nf = io.open(expanded, "wb")
-                            if nf then
-                                nf:close()
+                        -- File doesn't exist yet — create it on the IO
+                        -- lane. The lane processes CREATE then LOAD in
+                        -- order, so MSG_FILE_LOADED will see the empty
+                        -- file. On create failure nothing else dies:
+                        -- the subsequent LOAD pushes MSG_FILE_ERROR
+                        -- and the view gets an error message.
+                        editor:create_file(expanded, function(ok, err)
+                            if ok then
+                                log.info("main", "created missing file", { path = expanded })
                             else
-                                error("could not create file", 0)
+                                log.warn("main", "could not create missing file", {
+                                    path = expanded,
+                                    error = err,
+                                })
                             end
                         end)
-                        if ok_cre then
-                            log.info("main", "created missing file", { path = expanded })
-                        else
-                            log.error("main", "could not create missing file", {
-                                path = expanded,
-                                error = tostring(err_cre),
-                            })
-                        end
                     else
                         f:close()
                     end
 
                     cur_view.buffer:set_filepath(expanded)
                     cur_view._bench_open_t0 = require("cursed.bench").now_us()
-                    ss:push(ss._ptr.outbox_io, { type = shared.MSG_FILE_LOAD, ptr = expanded })
+                    -- Req_id-correlated load so the lane's reply
+                    -- routes through the event bus.
+                    local req_id2 = editor:_next_file_op_id()
+                    editor._pending_ops_count = (editor._pending_ops_count or 0) + 1
+                    local event_name = "file_op:" .. req_id2
+                    local handler
+                    handler = editor.event_system:on(event_name, function(_, payload)
+                        editor.event_system:off(event_name, handler)
+                        editor._pending_ops_count = editor._pending_ops_count - 1
+                        if payload.err then
+                            editor.status_message = payload.err
+                            return
+                        end
+                        local mmap_ptr = payload.mmap
+                        local file_size = payload.size
+                        ---@cast file_size integer
+                        local bench = require("cursed.bench")
+                        if mmap_ptr == nil then
+                            cur_view.file_loaded = true
+                            editor.event_system:emit("file_loaded", cur_view, cur_view.buffer)
+                        else
+                            local psize = tonumber(ffi.C.sysconf(shared._SC_PAGESIZE)) or 4096
+                            local cap = file_size > 0
+                                    and bit.band(file_size + psize - 1, bit.bnot(psize - 1))
+                                or psize
+                            local loaded_buf = Buffer.from_mmap(mmap_ptr, file_size, cap)
+                            cur_view:set_buffer(loaded_buf, { loaded = true })
+                            loaded_buf:set_filepath(expanded)
+                            cur_view.file_loaded = true
+                            editor.event_system:emit("file_loaded", cur_view, loaded_buf)
+                            if cur_view._bench_open_t0 then
+                                bench.span(
+                                    "main",
+                                    "file_open TOTAL",
+                                    cur_view._bench_open_t0,
+                                    { path = expanded }
+                                )
+                                cur_view._bench_open_t0 = nil
+                            end
+                        end
+                    end)
+                    ss:push(ss._ptr.outbox_io, {
+                        type = shared.MSG_FILE_LOAD,
+                        arg = req_id2,
+                        ptr = expanded,
+                    })
                     log.info("main", "pushing FILE_LOAD", { path = expanded })
                 end
 

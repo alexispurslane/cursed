@@ -333,4 +333,5 @@ return {
     fuzzy_find_file_completer = fuzzy_find_file_completer,
     is_directory = is_directory,
     expand_path = expand_path,
+    list_dir = list_dir,
 }

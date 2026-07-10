@@ -274,6 +274,55 @@ struct ProcExit {
     uint8_t  _pad[3];
     uint32_t code;
 };
+
+/* ── File-op payloads (mirror shared_state.h) ──────────────────── */
+
+/* MSG_FILE_RENAME (main → IO): struct followed by two path byte
+ * runs. Lane frees the struct + its variant payload. The lanes treat
+ * the payloads as opaque blobs and just memcpy them into the syscall;
+ * main does the source → destination mapping to the same buffer. */
+struct FileMoveReq {
+    uint32_t src_len;
+    uint32_t dst_len;
+    /* followed by src_len bytes, then dst_len bytes */
+};
+
+/* Directory listing entry: a packed name with an is_dir flag. */
+struct FileDirEntry {
+    uint8_t  is_dir;     /* 1=directory, 0=regular file (or other) */
+    uint8_t  _pad[3];
+    uint32_t name_len;
+    /* followed by name_len bytes (NOT NUL-terminated) */
+};
+
+/* MSG_FILE_DIRLIST_RESP (IO → main): header followed by count entries.
+ * Lane malloc's the whole buffer (header + entries packed inline) and
+ * passes ownership to main, which walks once to copy entries out then
+ * ffi.C.free's the pointer. */
+struct FileDirListResp {
+    uint32_t count;
+    /* followed by count × struct FileDirEntry (each with its own
+     * name run after the struct) */
+};
+
+/* MSG_FILE_WRITE (main → IO): write a heap byte buffer to a filepath.
+ * Lane mallocs the struct and copies `src_len` data bytes + filepath
+ * bytes inline (no mmap). After writing, lane frees its malloc. */
+struct FileWriteReq {
+    uint32_t src_len;
+    uint32_t filepath_len;
+    /* followed by src_len bytes (data), then filepath_len bytes (path) */
+};
+
+/* MSG_FILE_LOADED_V2 (IO → main): a small malloc'd struct carrying
+ * req_id, file_size, and the mmap pointer. Main reads the struct,
+ * passes `{mmap_ptr, file_size}` to the on_done callback, then frees
+ * the struct. Eliminates the need for main to re-stat the file. */
+struct FileLoadReply {
+    uint32_t req_id;
+    uint32_t file_size;
+    void    *mmap_ptr;
+};
 ]])
 
 ----------------------------------------------------------------------------------------------------
@@ -305,6 +354,16 @@ local MSG_PROC_STDIN = 19 -- main → proc: ptr = struct ProcStdinReq*
 local MSG_PROC_KILL = 20 -- main → proc: ptr = struct ProcKillReq*
 local MSG_PROC_OUTPUT = 21 -- proc → main: ptr = struct ProcOutput*
 local MSG_PROC_EXIT = 22 -- proc → main: ptr = struct ProcExit*
+
+local MSG_FILE_DELETE = 24 -- main → IO: ptr = filepath; arg = req_id
+local MSG_FILE_CREATE = 25 -- main → IO: ptr = filepath; arg = req_id
+local MSG_FILE_MKDIR = 26 -- main → IO: ptr = filepath; arg = req_id
+local MSG_FILE_CHMOD = 27 -- main → IO: ptr = filepath; arg = req_id (mode is in arg2-style half; we pack into arg)
+local MSG_FILE_RENAME = 28 -- main → IO: ptr = struct FileMoveReq*; arg = req_id
+local MSG_FILE_DIRLIST = 29 -- main → IO: ptr = filepath; arg = req_id
+local MSG_FILE_DIRLIST_RESP = 30 -- IO → main: ptr = struct FileDirListResp*; arg = req_id
+local MSG_FILE_WRITE = 31 -- main → IO: ptr = struct FileWriteReq*; arg = req_id
+local MSG_FILE_LOADED_V2 = 32 -- IO → main: ptr = struct FileLoadReply* (main frees after reading)
 
 local LSP_STATUS_SPAWNING = 0
 local LSP_STATUS_READY = 1
@@ -346,6 +405,15 @@ return {
     MSG_PROC_KILL = MSG_PROC_KILL,
     MSG_PROC_OUTPUT = MSG_PROC_OUTPUT,
     MSG_PROC_EXIT = MSG_PROC_EXIT,
+    MSG_FILE_DELETE = MSG_FILE_DELETE,
+    MSG_FILE_CREATE = MSG_FILE_CREATE,
+    MSG_FILE_MKDIR = MSG_FILE_MKDIR,
+    MSG_FILE_CHMOD = MSG_FILE_CHMOD,
+    MSG_FILE_RENAME = MSG_FILE_RENAME,
+    MSG_FILE_DIRLIST = MSG_FILE_DIRLIST,
+    MSG_FILE_DIRLIST_RESP = MSG_FILE_DIRLIST_RESP,
+    MSG_FILE_WRITE = MSG_FILE_WRITE,
+    MSG_FILE_LOADED_V2 = MSG_FILE_LOADED_V2,
     LSP_STATUS_SPAWNING = LSP_STATUS_SPAWNING,
     LSP_STATUS_READY = LSP_STATUS_READY,
     LSP_STATUS_DEAD = LSP_STATUS_DEAD,

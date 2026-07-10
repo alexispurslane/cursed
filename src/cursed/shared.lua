@@ -289,8 +289,25 @@ function SharedState:release_tree(view_id)
     shared_ffi.C.shared_tree_release(self._ptr, view_id)
 end
 
+--- Module-level monotonic counter for main→IO file op request ids.
+--- NOT tied to any single Editor instance — the IO lane echoes the
+--- same id back via MSG_FILE_ERROR / MSG_FILE_DIRLIST_RESP, so any
+--- caller (or user code pushing through editor:on_done) can correlate
+--- the reply even if the original editor instance was replaced.
+local _file_op_seq = 0
+
+--- Mint the next request id for a main→IO file op (delete / create /
+--- mkdir / chmod / rename / dirlist / write). Returns a stable integer
+--- suitable for use as Msg.arg and for matching the reply from drain.
+---@return integer
+local function next_file_op_id()
+    _file_op_seq = _file_op_seq + 1
+    return _file_op_seq
+end
+
 return {
     SharedState = SharedState,
+    next_file_op_id = next_file_op_id,
     MSG_FILE_LOAD = shared_ffi.MSG_FILE_LOAD,
     MSG_FILE_LOADED = shared_ffi.MSG_FILE_LOADED,
     MSG_FILE_ERROR = shared_ffi.MSG_FILE_ERROR,
@@ -315,6 +332,15 @@ return {
     MSG_PROC_KILL = shared_ffi.MSG_PROC_KILL,
     MSG_PROC_OUTPUT = shared_ffi.MSG_PROC_OUTPUT,
     MSG_PROC_EXIT = shared_ffi.MSG_PROC_EXIT,
+    MSG_FILE_DELETE = shared_ffi.MSG_FILE_DELETE,
+    MSG_FILE_CREATE = shared_ffi.MSG_FILE_CREATE,
+    MSG_FILE_MKDIR = shared_ffi.MSG_FILE_MKDIR,
+    MSG_FILE_CHMOD = shared_ffi.MSG_FILE_CHMOD,
+    MSG_FILE_RENAME = shared_ffi.MSG_FILE_RENAME,
+    MSG_FILE_DIRLIST = shared_ffi.MSG_FILE_DIRLIST,
+    MSG_FILE_DIRLIST_RESP = shared_ffi.MSG_FILE_DIRLIST_RESP,
+    MSG_FILE_WRITE = shared_ffi.MSG_FILE_WRITE,
+    MSG_FILE_LOADED_V2 = shared_ffi.MSG_FILE_LOADED_V2,
     LSP_STATUS_SPAWNING = shared_ffi.LSP_STATUS_SPAWNING,
     LSP_STATUS_READY = shared_ffi.LSP_STATUS_READY,
     LSP_STATUS_DEAD = shared_ffi.LSP_STATUS_DEAD,

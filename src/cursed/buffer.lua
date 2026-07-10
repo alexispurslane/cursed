@@ -20,6 +20,7 @@ local gc = require("cursed.gc")
 ---@class Buffer
 ---@field _ptr any struct Buffer *
 ---@field _munmapped boolean true after explicit munmap; prevents GC double-free
+---@field _owns_heap boolean|nil set by Buffer.from_owned_bytes: GC free's instead of munmap'ing the orig data
 ---@field lsp_client_id integer|nil LSP client bound to this buffer (set by the mode_enter doc-sync listener)
 ---@field lsp_uri string|nil file:// URI relayed to the server via didOpen/didChange/didClose
 ---@field lsp_language_id string|nil LSP languageId (e.g. "lua") sent on didOpen
@@ -53,7 +54,11 @@ local function buffer_cleanup(self)
         c.munmap(p.redo.data, p.redo.cap)
     end
     if p.orig.data ~= nil and p.orig.cap > 0 and not self._munmapped then
-        c.munmap(p.orig.data, p.orig.cap)
+        if self._owns_heap then
+            c.free(p.orig.data)
+        else
+            c.munmap(p.orig.data, p.orig.cap)
+        end
     end
     c.free(p.filepath)
     c.free(p)
@@ -122,6 +127,31 @@ function Buffer.from_mmap(data, len, cap)
     return self
 end
 
+--- Create a Buffer from malloc-owned bytes (NOT mmap'd).
+---
+--- Like from_mmap, but transfers ownership of a malloc'd region: the
+--- GC finalizer will `free` (not munmap) it on cleanup. Use when the
+--- bytes did not come from mmap — e.g. content from a string the
+--- editor serialized, or bytes copied out of a non-mmap source.
+--- The `cap` equals `len` since the region is heap-allocated to size.
+---@param data userdata malloc'd byte pointer (NOT mmap'd)
+---@param len integer byte length
+---@return Buffer
+function Buffer.from_owned_bytes(data, len)
+    local self = Buffer.new()
+    local b = self._ptr
+
+    b.orig.data = ffi.cast("uint8_t *", data)
+    b.orig.len = len
+    b.orig.cap = len
+
+    self._munmapped = false
+    self._owns_heap = true
+    self:build_lines_from_orig()
+
+    return self
+end
+
 ----------------------------------------------------------------------------------------------------
 -- OrigBuf access
 ----------------------------------------------------------------------------------------------------
@@ -149,7 +179,11 @@ end
 function Buffer:munmap_orig()
     local o = self._ptr.orig
     if o.cap > 0 and o.data ~= nil then
-        c.munmap(o.data, o.cap)
+        if self._owns_heap then
+            c.free(o.data)
+        else
+            c.munmap(o.data, o.cap)
+        end
     end
     self._munmapped = true
     o.data = nil
@@ -1156,6 +1190,82 @@ function Buffer:serialize_to_mmap()
     end
 
     return data, total_len, cap
+end
+
+--- Serialize the Buffer contents into a single malloc'd byte buffer.
+---
+--- Like serialize_to_mmap, but uses c.malloc (NOT mmap) so the result
+--- is safe to free(2) — useful for shipping to the IO lane
+--- (MSG_FILE_WRITE) which expects a free-able pointer, NOT mmap'd.
+--- Ownership: caller must ffi.C.free the returned ptr.
+---@return userdata ptr malloc'd data ptr
+---@return integer len byte length of data
+function Buffer:serialize_to_bytes()
+    local b = self._ptr
+    local count = tonumber(b.count)
+    ---@cast count integer
+
+    local total_len = 0
+    for i = 0, count - 1 do
+        local line = b.lines[i]
+        local pc = tonumber(line.count)
+        ---@cast pc integer
+        for j = 0, pc - 1 do
+            total_len = total_len + tonumber(line.pieces[j].len)
+        end
+    end
+
+    if total_len == 0 then
+        -- malloc(0) is implementation-defined — return a small sentinel.
+        local data = c.calloc(1, 1)
+        return data, 0
+    end
+
+    local data = c.malloc(total_len)
+    if data == nil then
+        error("cursed: failed to malloc for serialize_to_bytes", 2)
+    end
+    local write_ptr = ffi.cast("uint8_t *", data)
+
+    local offset = 0
+    for i = 0, count - 1 do
+        local line = b.lines[i]
+        local pc = tonumber(line.count)
+        ---@cast pc integer
+        for j = 0, pc - 1 do
+            local p = line.pieces[j]
+            local p_len = tonumber(p.len)
+            ---@cast p_len integer
+            if p_len > 0 then
+                local src
+                if p.buf_id == 0 then
+                    src = b.orig.data + p.off
+                else
+                    src = b.add.data + p.off
+                end
+                ffi.copy(write_ptr + offset, src, p_len)
+                offset = offset + p_len
+            end
+        end
+    end
+
+    return data, total_len
+end
+
+--- Create a Buffer from a single string (malloc-backed, no mmap).
+---
+--- Convenience for write_string_to_file and similar: takes ownership
+--- of a malloc'd copy of `s`, builds a Buffer whose orig buf holds it.
+--- GC frees the bytes after the Buffer is dropped.
+---@param s string input text (any bytes — treated as opaque)
+---@return Buffer
+function Buffer.from_string(s)
+    local len = #s
+    local ptr = c.malloc(len == 0 and 1 or len)
+    if len > 0 then
+        ffi.copy(ffi.cast("char *", ptr), s, len)
+    end
+    return Buffer.from_owned_bytes(ptr, len)
 end
 
 ----------------------------------------------------------------------------------------------------

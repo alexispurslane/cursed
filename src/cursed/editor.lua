@@ -462,6 +462,7 @@ function Editor.new(term)
         _digit_active = false,
         _digit_value = 0,
         _digit_negative = false,
+        _pending_ops_count = 0, -- tracked for headless drain loop; event bus handles callbacks
         _last_was_kill = false,
         _kill_called = false,
         _printable_fn = nil,
@@ -955,23 +956,73 @@ function Editor:open_file(filepath)
 
     local expanded = find_file.expand_path(filepath)
 
-    -- Refuse to open directories
+    -- Open directories in the file manager
     if find_file.is_directory(expanded) then
-        self.status_message = "cannot open directory: " .. filepath
+        local fm = require("cursed.file_manager")
+        fm.open_directory(self, expanded)
         return
     end
 
     local buf = Buffer.new()
     buf:set_filepath(expanded)
     local view = View.new(buf)
-    view._bench_open_t0 = t0 -- start of the whole open pipeline (main lane)
+    view._bench_open_t0 = t0
     self:add_view(view)
 
     log.debug("editor", "open_file begin", { path = expanded })
 
-    -- Request IO lane to load the file
+    local editor = self
+    local req_id = self:_next_file_op_id()
+    self._pending_ops_count = (self._pending_ops_count or 0) + 1
+    local event_name = "file_op:" .. req_id
+    local handler
+    handler = self.event_system:on(event_name, function(_, payload)
+        self.event_system:off(event_name, handler)
+        self._pending_ops_count = self._pending_ops_count - 1
+        if payload.err then
+            editor.status_message = payload.err
+            return
+        end
+        local mmap_ptr = payload.mmap
+        local file_size = payload.size
+        ---@cast file_size integer
+        local fp = view.buffer:filepath()
+        if mmap_ptr == nil then
+            -- Empty file: the placeholder buffer in `view` is valid.
+            view.file_loaded = true
+            if editor._config and fp then
+                view:activate_mode_for_filepath(fp, editor._config)
+            end
+            editor.event_system:emit("file_loaded", view, view.buffer)
+        else
+            local psize = tonumber(ffi.C.sysconf(require("cursed.shared")._SC_PAGESIZE)) or 4096
+            local cap = file_size > 0 and bit.band(file_size + psize - 1, bit.bnot(psize - 1))
+                or psize
+            local loaded_buf = Buffer.from_mmap(mmap_ptr, file_size, cap)
+            view:set_buffer(loaded_buf, { loaded = true })
+            if fp then
+                loaded_buf:set_filepath(fp)
+            end
+            view.file_loaded = true
+            local t_mode = bench.now_us()
+            if editor._config and fp then
+                view:activate_mode_for_filepath(fp, editor._config)
+            end
+            bench.span("main", "file_open activate_mode", t_mode, { path = fp })
+            editor.event_system:emit("file_loaded", view, loaded_buf)
+            if view._bench_open_t0 then
+                bench.span("main", "file_open TOTAL", view._bench_open_t0, { path = fp })
+                view._bench_open_t0 = nil
+            end
+        end
+    end)
+
     local ss = shared.SharedState.from_global()
-    ss:push(ss._ptr.outbox_io, { type = shared.MSG_FILE_LOAD, ptr = expanded })
+    ss:push(ss._ptr.outbox_io, {
+        type = shared.MSG_FILE_LOAD,
+        arg = req_id,
+        ptr = expanded,
+    })
 end
 
 --- Open a file into a NEW view WITHOUT focusing it — no `active_view`
@@ -988,7 +1039,8 @@ end
 function Editor:open_file_background(filepath)
     local expanded = find_file.expand_path(filepath)
     if find_file.is_directory(expanded) then
-        self.status_message = "cannot open directory: " .. filepath
+        local fm = require("cursed.file_manager")
+        fm.open_directory(self, expanded)
         return nil
     end
     local buf = Buffer.new()
@@ -999,8 +1051,52 @@ function Editor:open_file_background(filepath)
     table.insert(self.views, view)
     self.event_system:emit("view_open", view)
     log.debug("editor", "open_file_background begin", { path = expanded })
+
+    local editor = self
+    local req_id = self:_next_file_op_id()
+    self._pending_ops_count = (self._pending_ops_count or 0) + 1
+    local event_name = "file_op:" .. req_id
+    local handler
+    handler = self.event_system:on(event_name, function(_, payload)
+        self.event_system:off(event_name, handler)
+        self._pending_ops_count = self._pending_ops_count - 1
+        if payload.err then
+            editor.status_message = payload.err
+            return
+        end
+        local mmap_ptr = payload.mmap
+        local file_size = payload.size
+        ---@cast file_size integer
+        local fp = view.buffer:filepath()
+        if mmap_ptr == nil then
+            view.file_loaded = true
+            if editor._config and fp then
+                view:activate_mode_for_filepath(fp, editor._config)
+            end
+            editor.event_system:emit("file_loaded", view, view.buffer)
+        else
+            local psize = tonumber(ffi.C.sysconf(require("cursed.shared")._SC_PAGESIZE)) or 4096
+            local cap = file_size > 0 and bit.band(file_size + psize - 1, bit.bnot(psize - 1))
+                or psize
+            local loaded_buf = Buffer.from_mmap(mmap_ptr, file_size, cap)
+            view:set_buffer(loaded_buf, { loaded = true })
+            if fp then
+                loaded_buf:set_filepath(fp)
+            end
+            view.file_loaded = true
+            if editor._config and fp then
+                view:activate_mode_for_filepath(fp, editor._config)
+            end
+            editor.event_system:emit("file_loaded", view, loaded_buf)
+        end
+    end)
+
     local ss = shared.SharedState.from_global()
-    ss:push(ss._ptr.outbox_io, { type = shared.MSG_FILE_LOAD, ptr = expanded })
+    ss:push(ss._ptr.outbox_io, {
+        type = shared.MSG_FILE_LOAD,
+        arg = req_id,
+        ptr = expanded,
+    })
     return view
 end
 
@@ -1462,10 +1558,93 @@ function Editor:insert_file(filepath)
         return
     end
 
+    local editor = self
+    local req_id = self:_next_file_op_id()
+    -- The on_done is a no-op — MSG_INSERT_FILE doesn't return a
+    -- Buffer; the lane runs the insert synchronously-off-main and
+    -- the reply MSG_FILE_INSERTED is a separate drain path. We
+    -- register just so the req_id is tracked for error replies.
+    self._pending_ops_count = (self._pending_ops_count or 0) + 1
+    local event_name = "file_op:" .. req_id
+    local handler
+    handler = self.event_system:on(event_name, function(_, payload)
+        self.event_system:off(event_name, handler)
+        self._pending_ops_count = self._pending_ops_count - 1
+        if payload.err then
+            editor.status_message = payload.err
+        end
+    end)
+
     local ss = shared.SharedState.from_global()
-    ss:push(ss._ptr.outbox_io, { type = shared.MSG_INSERT_FILE, ptr = expanded })
+    ss:push(ss._ptr.outbox_io, {
+        type = shared.MSG_INSERT_FILE,
+        arg = req_id,
+        ptr = expanded,
+    })
 end
 
+--- Read a file and hand it off as a Buffer via a callback.
+---
+--- Reuses the existing MSG_FILE_LOAD + MSG_FILE_LOADED path: the IO
+--- lane mmap's the file and replies with the mmap ptr + the req_id we
+--- minted here. main.lua's MSG_FILE_LOADED handler looks the req_id
+--- via the event bus. For load_buf operations the handler constructs a
+--- Buffer.from_mmap and invokes on_done(buf) directly without
+--- attaching to any view. To get the raw bytes without the piece-table
+--- Buffer wrapper, follow up with Buffer:serialize_to_bytes.
+---@param filepath string absolute path to the file (already expanded)
+---@param on_done fun(buf: Buffer|nil, err: string?) called with the Buffer
+---                    on success, or (nil, err) on failure.
+function Editor:read_into_buffer(filepath, on_done)
+    local expanded = find_file.expand_path(filepath)
+
+    if find_file.is_directory(expanded) then
+        if on_done then
+            on_done(nil, "is a directory: " .. filepath)
+        end
+        return
+    end
+
+    local req_id = self:_next_file_op_id()
+    self._pending_ops_count = (self._pending_ops_count or 0) + 1
+    local event_name = "file_op:" .. req_id
+    local handler
+    handler = self.event_system:on(event_name, function(_, payload)
+        self.event_system:off(event_name, handler)
+        self._pending_ops_count = self._pending_ops_count - 1
+        if payload.err then
+            if on_done then
+                on_done(nil, payload.err)
+            end
+            return
+        end
+        local mmap_ptr = payload.mmap
+        local file_size = payload.size
+        ---@cast file_size integer
+        if mmap_ptr == nil then
+            local placeholder = Buffer.new()
+            placeholder:set_filepath(expanded)
+            if on_done then
+                on_done(placeholder, nil)
+            end
+            return
+        end
+        local psize = tonumber(ffi.C.sysconf(require("cursed.shared")._SC_PAGESIZE)) or 4096
+        local cap = file_size > 0 and bit.band(file_size + psize - 1, bit.bnot(psize - 1)) or psize
+        local buf = Buffer.from_mmap(mmap_ptr, file_size, cap)
+        buf:set_filepath(expanded)
+        if on_done then
+            on_done(buf, nil)
+        end
+    end)
+
+    local ss = shared.SharedState.from_global()
+    ss:push(ss._ptr.outbox_io, {
+        type = shared.MSG_FILE_LOAD,
+        arg = req_id,
+        ptr = expanded,
+    })
+end
 --- Save the current buffer to its filepath (async via IO lane).
 function Editor:save()
     local view = self:current_view()
@@ -1491,6 +1670,332 @@ function Editor:save_as(filepath)
     local expanded = find_file.expand_path(filepath)
     view.buffer:set_filepath(expanded)
     self:_async_save(view.buffer)
+end
+
+----------------------------------------------------------------------------------------------------
+-- Async file operations (delete / create / mkdir / chmod / rename / dirlist)
+--
+-- Each method mints a request id, registers an on_done callback in
+-- the event bus, and pushes a MSG_FILE_* to the IO lane.
+-- The IO lane pushes MSG_FILE_ERROR (with arg=req_id, ptr=malloc'd
+-- error string) on failure or MSG_FILE_DIRLIST_RESP (with arg=req_id,
+-- ptr=packed buffer) on a dirlist success. drain_inbox looks up the
+-- request by id and invokes on_done(entries_or_nil, err_or_nil).
+-- All paths expand ~ / $ENV at the same place find_file uses.
+-- Errors and the dirlist-reply heap buffer are owned by main on
+-- drain_inbox and freed in place (ffi.string → ffi.C.free).
+----------------------------------------------------------------------------------------------------
+
+--- Mint the next request id for an async file op. Delegates to
+--- shared.next_file_op_id so the counter is process-global — survives
+--- editor recreation and is stable across the headless / fork paths.
+---@return integer
+function Editor:_next_file_op_id()
+    return shared.next_file_op_id()
+end
+
+--- Delete a file via IO lane (unlink(2)).
+---@param filepath string absolute path (already expanded)
+---@param on_done fun(success: boolean, err: string?)? optional callback
+function Editor:delete_file(filepath, on_done)
+    local ss = shared.SharedState.from_global()
+    local req_id = self:_next_file_op_id()
+    if on_done then
+        self._pending_ops_count = (self._pending_ops_count or 0) + 1
+        local event_name = "file_op:" .. req_id
+        local handler
+        handler = self.event_system:on(event_name, function(_, payload)
+            self.event_system:off(event_name, handler)
+            self._pending_ops_count = self._pending_ops_count - 1
+            if payload.err then
+                on_done(false, payload.err)
+            else
+                on_done(true, nil)
+            end
+        end)
+    end
+    ss:push(ss._ptr.outbox_io, {
+        type = shared.MSG_FILE_DELETE,
+        arg = req_id,
+        ptr = filepath,
+    })
+end
+
+--- Create a new file via IO lane (O_CREAT|O_EXCL — fails if file exists).
+---@param filepath string absolute path (already expanded)
+---@param on_done fun(success: boolean, err: string?)? optional callback
+function Editor:create_file(filepath, on_done)
+    local ss = shared.SharedState.from_global()
+    local req_id = self:_next_file_op_id()
+    if on_done then
+        self._pending_ops_count = (self._pending_ops_count or 0) + 1
+        local event_name = "file_op:" .. req_id
+        local handler
+        handler = self.event_system:on(event_name, function(_, payload)
+            self.event_system:off(event_name, handler)
+            self._pending_ops_count = self._pending_ops_count - 1
+            if payload.err then
+                on_done(false, payload.err)
+            else
+                on_done(true, nil)
+            end
+        end)
+    end
+    ss:push(ss._ptr.outbox_io, {
+        type = shared.MSG_FILE_CREATE,
+        arg = req_id,
+        ptr = filepath,
+    })
+end
+
+--- Make a single directory via IO lane (mkdir(2), NOT mkdir -p).
+--- Editor code that wants -p semantics chains a sequence of calls.
+---@param dirpath string absolute directory path (already expanded)
+---@param on_done fun(success: boolean, err: string?)? optional callback
+function Editor:mkdir(dirpath, on_done)
+    local ss = shared.SharedState.from_global()
+    local req_id = self:_next_file_op_id()
+    if on_done then
+        self._pending_ops_count = (self._pending_ops_count or 0) + 1
+        local event_name = "file_op:" .. req_id
+        local handler
+        handler = self.event_system:on(event_name, function(_, payload)
+            self.event_system:off(event_name, handler)
+            self._pending_ops_count = self._pending_ops_count - 1
+            if payload.err then
+                on_done(false, payload.err)
+            else
+                on_done(true, nil)
+            end
+        end)
+    end
+    ss:push(ss._ptr.outbox_io, {
+        type = shared.MSG_FILE_MKDIR,
+        arg = req_id,
+        ptr = dirpath,
+    })
+end
+
+--- chmod(2): set the file mode bits.
+---@param filepath string absolute path (already expanded)
+---@param mode integer 9-bit mode (e.g. tonumber("0755", 8) → 493)
+---@param on_done fun(success: boolean, err: string?)? optional callback
+function Editor:chmod(filepath, mode, on_done)
+    local ss = shared.SharedState.from_global()
+    local req_id = self:_next_file_op_id()
+    if on_done then
+        self._pending_ops_count = (self._pending_ops_count or 0) + 1
+        local event_name = "file_op:" .. req_id
+        local handler
+        handler = self.event_system:on(event_name, function(_, payload)
+            self.event_system:off(event_name, handler)
+            self._pending_ops_count = self._pending_ops_count - 1
+            if payload.err then
+                on_done(false, payload.err)
+            else
+                on_done(true, nil)
+            end
+        end)
+    end
+    -- Pack mode in low 9 bits, req_id above; lane splits them back.
+    local packed = bit.bor(bit.lshift(req_id, 9), bit.band(mode, 0x1FF))
+    ss:push(ss._ptr.outbox_io, {
+        type = shared.MSG_FILE_CHMOD,
+        arg = packed,
+        ptr = filepath,
+    })
+end
+
+--- rename(2) via IO lane.
+---@param src string absolute source path (already expanded)
+---@param dst string absolute destination path (already expanded)
+---@param on_done fun(success: boolean, err: string?)? optional callback
+function Editor:rename(src, dst, on_done)
+    local ss = shared.SharedState.from_global()
+    local req_id = self:_next_file_op_id()
+    if on_done then
+        self._pending_ops_count = (self._pending_ops_count or 0) + 1
+        local event_name = "file_op:" .. req_id
+        local handler
+        handler = self.event_system:on(event_name, function(_, payload)
+            self.event_system:off(event_name, handler)
+            self._pending_ops_count = self._pending_ops_count - 1
+            if payload.err then
+                on_done(false, payload.err)
+            else
+                on_done(true, nil)
+            end
+        end)
+    end
+    -- Build a heap FileMoveReq{ src_len, dst_len, src bytes, dst bytes }.
+    local req_size = ffi.sizeof("struct FileMoveReq") + #src + #dst
+    local req = ffi.C.malloc(req_size)
+    if req == nil then
+        if on_done then
+            on_done(false, "malloc failed")
+        end
+        return
+    end
+    local hdr = ffi.cast("struct FileMoveReq *", req)
+    hdr.src_len = #src
+    hdr.dst_len = #dst
+    -- Inline src bytes at offset = sizeof(FileMoveReq)
+    local src_dst = ffi.cast("char *", req) + ffi.sizeof("struct FileMoveReq")
+    ffi.copy(src_dst, src, #src)
+    -- Inline dst bytes after that
+    ffi.copy(src_dst + #src, dst, #dst)
+
+    ss:push(ss._ptr.outbox_io, {
+        type = shared.MSG_FILE_RENAME,
+        arg = req_id,
+        ptr = req, -- lane frees on completion
+    })
+end
+
+--- List directory entries via IO lane. Reads dirlist_pack layout
+--- (FileDirListResp{count} + N × FileDirEntry with inline name bytes).
+--- Mirrors find_file.list_dir: returns `entries = { {name, is_dir}, … }`.
+--- Skips `.` and `..`. Hidden-file filtering is the editor's call.
+---@param dirpath string absolute directory path (already expanded)
+---@param on_done fun(entries: table[]?, err: string?)
+function Editor:dirlist(dirpath, on_done)
+    local ss = shared.SharedState.from_global()
+    local req_id = self:_next_file_op_id()
+    self._pending_ops_count = (self._pending_ops_count or 0) + 1
+    local event_name = "file_op:" .. req_id
+    local handler
+    handler = self.event_system:on(event_name, function(_, payload)
+        self.event_system:off(event_name, handler)
+        self._pending_ops_count = self._pending_ops_count - 1
+        if payload.err then
+            on_done(nil, payload.err)
+        else
+            on_done(payload.entries, nil)
+        end
+    end)
+    ss:push(ss._ptr.outbox_io, {
+        type = shared.MSG_FILE_DIRLIST,
+        arg = req_id,
+        ptr = dirpath,
+    })
+end
+
+--- Serialize a Buffer and write it to a file via MSG_FILE_WRITE.
+---
+--- Builds a heap-owned byte buffer via Buffer:serialize_to_bytes
+--- (caller-owned ptr + len; main ffi.C.free's after the lane write).
+--- Pushes a single MSG_FILE_WRITE that ships the bytes + the
+--- filepath; success is silent, failure pushes MSG_FILE_ERROR.
+--- Useful for "save as" prompts from non-file-backed buffers (the
+--- file manager's new entry, the picker exporting selected lines, …)
+--- or any caller that has a Buffer's piece-table content and wants
+--- to persist it.
+---@param buffer Buffer|View a Buffer (or a View from which we'll take .buffer)
+---@param filepath string absolute path (already expanded)
+---@param on_done fun(success: boolean, err: string?)? optional callback
+function Editor:save_buffer_to_file(buffer, filepath, on_done)
+    local real_buf
+    if type(buffer) == "table" and buffer.buffer ~= nil then
+        -- View
+        real_buf = buffer.buffer
+    else
+        real_buf = buffer
+    end
+    local data_ptr, data_len = real_buf:serialize_to_bytes()
+    local ss = shared.SharedState.from_global()
+    local req_id = self:_next_file_op_id()
+
+    -- Pack the request: struct{src_len, filepath_len} + src + path.
+    -- IMPORTANT: the IO lane reads bytes synchronously from the heap
+    -- FileWriteReq (no async reference to data_ptr), so we can free
+    -- data_ptr RIGHT NOW — even before the lane pop. The lane frees
+    -- its own `req` allocation after writing.
+    local req_size = ffi.sizeof("struct FileWriteReq") + data_len + #filepath
+    local req = ffi.C.malloc(req_size)
+    if req == nil then
+        ffi.C.free(data_ptr)
+        if on_done then
+            on_done(false, "malloc failed")
+        end
+        return
+    end
+    local hdr = ffi.cast("struct FileWriteReq *", req)
+    hdr.src_len = data_len
+    hdr.filepath_len = #filepath
+    local payload = ffi.cast("uint8_t *", req) + ffi.sizeof("struct FileWriteReq")
+    ffi.copy(payload, ffi.cast("uint8_t *", data_ptr), data_len)
+    ffi.copy(payload + data_len, filepath, #filepath)
+    -- data_ptr is now redundant: all bytes are in `req`.
+    ffi.C.free(data_ptr)
+
+    if on_done then
+        self._pending_ops_count = (self._pending_ops_count or 0) + 1
+        local event_name = "file_op:" .. req_id
+        local handler
+        handler = self.event_system:on(event_name, function(_, payload)
+            self.event_system:off(event_name, handler)
+            self._pending_ops_count = self._pending_ops_count - 1
+            if payload.err then
+                on_done(false, payload.err)
+            else
+                on_done(true, nil)
+            end
+        end)
+    end
+
+    ss:push(ss._ptr.outbox_io, {
+        type = shared.MSG_FILE_WRITE,
+        arg = req_id,
+        ptr = req, -- lane frees on completion (after `write_file`)
+    })
+end
+
+--- Write a string to a file via MSG_FILE_WRITE.
+---
+--- Convenience wrapper around save_buffer_to_file. Builds a heap-
+--- owned Buffer.from_string, hands it off, the lane writes and the
+--- GC frees the Buffer's bytes.
+---@param str string contents to write
+---@param filepath string absolute path (already expanded)
+---@param on_done fun(success: boolean, err: string?)? optional callback
+function Editor:write_string_to_file(str, filepath, on_done)
+    local buf = Buffer.from_string(str or "")
+    self:save_buffer_to_file(buf, filepath, on_done)
+end
+
+--- Short y/n prompt helper for destructive operations.
+---
+--- Activates the minibuffer with a y/n prompt. Empty input (just
+--- hitting Enter) is treated as "yes" to match user-set value when
+--- caller supplies one; otherwise the caller must provide on_no for
+--- the default-no case. `on_cancel` invokes on_no.
+---@param msg string the question to display (e.g. "Delete this file?")
+---@param on_yes function called with no args if the user typed 'y'
+---@param on_no function? called if the user typed anything else / Esc
+function Editor:confirm(msg, on_yes, on_no)
+    self:read_from_minibuffer({
+        prompt = msg .. " (Y/n) ",
+        on_submit = function(input)
+            local first = (input or ""):lower():sub(1, 1)
+            -- Empty submit defaults to "yes" (matches user's setting
+            -- preference). To get a default-no prompt, callers can use
+            -- the lower-level read_from_minibuffer prompt directly.
+            if first == "" or first == "y" then
+                if on_yes then
+                    on_yes()
+                end
+            else
+                if on_no then
+                    on_no()
+                end
+            end
+        end,
+        on_cancel = function()
+            if on_no then
+                on_no()
+            end
+        end,
+    })
 end
 
 --- Internal: serialize buffer to mmap and dispatch to IO lane.

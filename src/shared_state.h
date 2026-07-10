@@ -29,6 +29,29 @@
 #define MSG_FILE_SAVE   3   /* main → IO: please save file (ptr = filepath string, arg = text ptr, arg2 = text len) */
 #define MSG_FILE_SAVED   4   /* IO → main: file saved */
 
+/* ── File ops (v2) — async filesystem operations beyond load/save.
+ *
+ * Each request carries arg = main-assigned request id (looked up in
+ * editor._pending_file_ops). Lane succeeds silently — failure pushes
+ * MSG_FILE_ERROR back with the same arg, ptr = malloc'd error string
+ * (main ffi.string then ffi.C.free). Path-name IDs reuse the
+ * ptr=filepath convention (ffi.string on the lane, lane does NOT free
+ * — the lane allocates per-call only as needed for the full struct
+ * payload below). create/mkdir/chmod/rename/delete match this model.
+ * MSG_FILE_DIRLIST is the exception: it has a structured success reply
+ * (MSG_FILE_DIRLIST_RESP) carrying the entries; failure still goes
+ * through MSG_FILE_ERROR.
+ */
+#define MSG_FILE_DELETE  24  /* main → IO: ptr = filepath string; arg = req_id */
+#define MSG_FILE_CREATE  25  /* main → IO: ptr = filepath; arg = req_id (touch; ok if exists) */
+#define MSG_FILE_MKDIR   26  /* main → IO: ptr = dirpath; arg = req_id (mkdir(2), NOT mkdir -p — single-level) */
+#define MSG_FILE_CHMOD   27  /* main → IO: ptr = filepath; arg = req_id; arg2 = mode (low 9 bits) */
+#define MSG_FILE_RENAME  28  /* main → IO: ptr = struct FileMoveReq*; arg = req_id */
+#define MSG_FILE_DIRLIST 29  /* main → IO: ptr = filepath; arg = req_id; reply MSG_FILE_DIRLIST_RESP */
+#define MSG_FILE_DIRLIST_RESP 30 /* IO → main: ptr = struct FileDirListResp*; arg = req_id */
+#define MSG_FILE_WRITE 31  /* main → IO: ptr = struct FileWriteReq*; arg = req_id */
+#define MSG_FILE_LOADED_V2 32 /* IO → main: ptr = struct FileLoadReply* (malloc'd; main reads req_id, file_size, mmap_ptr then frees) */
+
 #define MSG_HL_INITIALIZE_LANGUAGE 8  /* main → hl: ptr = struct HlInitLangReq* */
 #define MSG_HL_QUERY              9  /* main → hl: ptr = struct HlQueryReq* */
 #define MSG_HL_SPANS              10 /* hl → main: ptr = struct HlSpansHdr* */
