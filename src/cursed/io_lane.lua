@@ -304,10 +304,11 @@ local function dirlist_pack(dirpath)
     if buf == nil then
         return nil, "malloc failed"
     end
-    local hdr_ptr = ffi.cast("struct FileDirListResp *", buf)
+    local buf_u8 = ffi.cast("uint8_t *", buf)
+    local hdr_ptr = ffi.cast("struct FileDirListResp *", buf_u8)
     hdr_ptr.count = count
 
-    local cursor = buf + header_size -- uint8_t* advance
+    local cursor = buf_u8 + header_size
     -- Re-walk: we need to extract names again (the dirent pointers
     -- in `entries` are now invalid because closedir invalidated them).
     DIR = ffi.C.opendir(dirpath)
@@ -335,7 +336,7 @@ local function dirlist_pack(dirpath)
             local name_dst = ffi.cast("char *", cursor) + entry_size
             ffi.copy(name_dst, name, nlen)
 
-            cursor = cursor + entry_size + nlen
+            cursor = cursor + (entry_size + nlen)
             written = written + 1
         end
         ent = ffi.C.readdir(DIR)

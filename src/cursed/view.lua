@@ -5,6 +5,7 @@
 --- It does NOT mutate the buffer. Editing goes through Buffer methods,
 
 local ffi = require("ffi")
+local async = require("cursed.async")
 local utf8 = require("cursed.utf8")
 local profile = require("cursed.profile")
 local log = require("cursed.log")
@@ -42,6 +43,7 @@ local IH = require("cursed.input_hook")
 ---@field shadow_undo integer|nil undo.count at anchor creation time (for undo-in-selection)
 ---@field shadow_redo integer|nil redo.count at anchor creation time (for undo-in-selection)
 ---@field _expand table|nil transient expand-region progression state ({mode="tree"|"textobject", ...}); nil when not expanding
+---@field _last_textobject string|nil name of the textobject that created the active selection (e.g. "word", "sexp"); nil when the selection wasn't made by a textobject or when no selection is active. Drives the neovim-style drag (drag_left/drag_right): when set, a drag swaps the selection with the adjacent unit of this textobject; when nil, the drag nudges character by character. Cleared whenever the anchor is dropped.
 
 ----------------------------------------------------------------------------------------------------
 -- View class
@@ -151,6 +153,7 @@ function View.new(buffer)
         yank_col = nil,
         shadow_undo = nil,
         shadow_redo = nil,
+        _last_textobject = nil,
     }
     return setmetatable({
         buffer = buffer,
@@ -285,6 +288,7 @@ function View:make_cursor(line, col)
         yank_col = nil,
         shadow_undo = nil,
         shadow_redo = nil,
+        _last_textobject = nil,
     }
 end
 
@@ -438,6 +442,7 @@ local function close_edit_for_motion(view)
             c.anchor_line = nil
             c.anchor_col = nil
             c.anchor_transient = nil
+            c._last_textobject = nil
             c.shadow_undo = nil
             c.shadow_redo = nil
         end
@@ -1322,7 +1327,7 @@ function View:_hl_cold_requery(fallback_byte)
     self:_hl_refresh_total_bytes()
     local lo_b, hi_b = self:_hl_viewport_margin_bucket_range(fallback_byte)
     self:_hl_dispatch(lo_b, hi_b, false, nil, true)
-    self:_hl_wait_response()
+    self:_hl_wait_async()
 end
 
 --- Compute the total document byte length and update bucket math.
@@ -2052,6 +2057,35 @@ function View:_hl_wait_response()
     end
 end
 
+--- Async variant of _hl_wait_response. Yields the calling coroutine
+--- until the highlight lane installs spans for the in-flight generation
+--- (or the query is superseded). Must be called from a coroutine context
+--- (command handler or background task). Falls back to synchronous wait
+--- if called outside a coroutine.
+---@return boolean true if spans were installed, false on timeout/error
+function View:_hl_wait_async()
+    local in_flight = self._hl_in_flight
+    if in_flight == nil then
+        return true
+    end
+    -- Circuit breaker check (same as sync path).
+    if (self._hl_sync_stalls or 0) >= HL_SYNC_STALL_LIMIT then
+        return false
+    end
+    local target_gen = in_flight.gen
+    if not self.editor or not self.editor.event_system then
+        return self:_hl_wait_response()
+    end
+    -- If we're not in a coroutine, fall back to sync wait.
+    if coroutine.running() == nil then
+        return self:_hl_wait_response()
+    end
+    local token = async.token(self.editor.event_system, "hl_done:" .. tostring(target_gen))
+    async.await(token)
+    -- When we resume, _hl_in_flight has been cleared (or superseded).
+    return true
+end
+
 --- Install spans returned by the lane into the bucket cache.
 --- The response covers a contiguous bucket range [bucket_start, bucket_end);
 --- every bucket in the range is replaced with whatever came back (spans
@@ -2118,6 +2152,10 @@ function View:_hl_install_spans(
         self._hl_pending = nil
         self:_hl_dispatch(pending.bucket_start, pending.bucket_end, pending.has_edit, pending.edit)
         ffi.C.free(msg_ptr) -- not installed; freed here (caller leaves alone)
+        -- Emit event so async waiters can wake.
+        if self.editor and self.editor.event_system then
+            self.editor.event_system:emit("hl_done:" .. tostring(gen))
+        end
         return true
     end
 
@@ -2251,6 +2289,10 @@ function View:_hl_install_spans(
     -- path re-engages (covers the case where a transient stall tripped
     -- it but the lane has since caught up).
     self._hl_sync_stalls = 0
+    -- Emit event so async waiters can wake.
+    if self.editor and self.editor.event_system then
+        self.editor.event_system:emit("hl_done:" .. tostring(gen))
+    end
     if self._hl_pending then
         local p = self._hl_pending
         ---@cast p table
@@ -3808,6 +3850,9 @@ function View:set_mark()
     -- C-space marks are sticky: they survive plain motions (which only
     -- drop a TRANSIENT shift-selection).
     c.anchor_transient = false
+    -- A manual mark is not a textobject selection: clear the drag
+    -- attribution so a subsequent drag falls back to char-by-char.
+    c._last_textobject = nil
     -- Snapshot undo/redo counts for undo-in-selection
     c.shadow_undo = tonumber(self.buffer._ptr.undo.count)
     c.shadow_redo = tonumber(self.buffer._ptr.redo.count)
@@ -3821,6 +3866,7 @@ function View:set_mark_all()
         c.anchor_line = c.line
         c.anchor_col = c.col
         c.anchor_transient = false
+        c._last_textobject = nil
         c.shadow_undo = u
         c.shadow_redo = r
     end
@@ -3832,6 +3878,7 @@ function View:unset_mark_all()
         c.anchor_line = nil
         c.anchor_col = nil
         c.anchor_transient = nil
+        c._last_textobject = nil
         c.shadow_undo = nil
         c.shadow_redo = nil
     end
@@ -3842,6 +3889,7 @@ function View:unset_mark()
     c.anchor_line = nil
     c.anchor_col = nil
     c.anchor_transient = nil
+    c._last_textobject = nil
     c.shadow_undo = nil
     c.shadow_redo = nil
 end
@@ -5208,6 +5256,11 @@ function View:select_range(name, line, col)
     ---@cast el integer
     ---@cast ec integer
     self:_select_raw(sl, sc, el, ec)
+    -- Record the textobject that made this selection so the drag
+    -- commands (drag_left/drag_right) know whether to bound over
+    -- adjacent units of this textobject. `_select_raw` calls set_mark
+    -- which would clear it, so set it AFTER.
+    self:p()._last_textobject = name
     return true
 end
 
@@ -5227,7 +5280,7 @@ end
 -- returned as a 0-based half-open [opener, end-of-closer) range — i.e.
 -- it INCLUDES the delimiters. nil when `pt` is not inside any pair.
 --
--- These power mark_sexp / kill_sexp / copy_sexp / transpose_sexp /
+-- These power mark_sexp / kill_sexp / copy_sexp / forward_sexp /
 -- forward_sexp / backward_sexp / down_list / up_list, and (because the
 -- pair set is passed in) each major mode can drive its own sexp
 -- definition without touching these primitives.
@@ -5814,7 +5867,7 @@ end
 
 --- Find the previous closer at depth 0 strictly before (li, col),
 --- scanning backward. Returns (cl, cc, clen) or nil. Used by
---- backward-sexp and transpose-sexp to locate the previous pair.
+--- backward-sexp and the drag commands to locate the previous pair.
 ---@param li integer
 ---@param col integer
 ---@param open_of table|nil

@@ -3,7 +3,7 @@
 -- Each builder returns a plain Lua closure of the signature
 --   fn(view, line, col, dir) -> (sl, sc, el, ec, boundary_len) | nil
 -- used by View:select_range / View:move_word and the mark/kill/copy/
--- transpose commands built on top of them. `dir` is optional:
+-- drag commands built on top of them. `dir` is optional:
 --   nil/0 = at-point / select (next forward when between units),
 --   >0    = forward-adjacent (for forward motion),
 --   <0    = backward-adjacent (for backward motion).
@@ -59,7 +59,7 @@ end
 -- it and forward_sexp steps into it); <0 -> the previous pair backward
 -- (so backward_sexp steps back into it). Returns all-nil only at the
 -- true end/start of document. The sexp commands (mark/kill/copy/
--- transpose/forward/backward/down/up) consume this range only — they
+-- drag/forward/backward/down/up) consume this range only — they
 -- no longer touch the matching primitives or recover the pair set.
 ---@param pairs table list of {opener:string, closer:string}
 ---@return function fn
@@ -105,7 +105,7 @@ end
 -- end byte).
 --
 -- This composes with every command built on textobjects: mark,
--- move_word, kill, copy, transpose, and the expand-region ladder (a
+-- move_word, kill, copy, drag, and the expand-region ladder (a
 -- `ts` entry is a plain function, so `_textobject_fn` returns it
 -- unchanged).
 --

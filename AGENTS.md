@@ -7,7 +7,6 @@
 - Annotate public module surfaces (exported classes, key functions). Internal FFI plumbing doesn't need annotations — `any` propagates freely through lua-language-server.
 - No unused locals, no implicit globals, no shadowed names, no ignored return values.
 - Immutable patterns preferred. Discriminated-union-style tables for state variants.
-- Format with stylua before committing: `just fmt`.
 - Always use `return nil, errormsg` style errors for recoverable errors.
 - `error(msg, 2)` is acceptable for invariant violations (e.g. null FFI pointers, init failures).
 - Factory methods on classes (`Tree.new`, `Parser.new`) own the `wrap_gc` + `setmetatable` dance. Callers pass raw FFI pointers.
@@ -33,5 +32,6 @@
 ## After Every Change
 
 Run `just check`. It must pass with exit code 0.
+
 
 

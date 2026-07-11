@@ -352,6 +352,7 @@ return {
     O_RDONLY = pffi.O_RDONLY,
     O_WRONLY = pffi.O_WRONLY,
     O_CREAT = pffi.O_CREAT,
+    O_EXCL = pffi.O_EXCL,
     O_TRUNC = pffi.O_TRUNC,
     PROT_READ = pffi.PROT_READ,
     PROT_WRITE = pffi.PROT_WRITE,

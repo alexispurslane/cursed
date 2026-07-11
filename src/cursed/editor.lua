@@ -22,19 +22,20 @@ local OverlayManager = require("cursed.overlay")
 local CompletionMenu = require("cursed.completion_menu")
 local log = require("cursed.log")
 local profile = require("cursed.profile")
+local async = require("cursed.async")
 
 --- Cached space-fill buffer: avoids per-frame string.rep allocations
 --- in the render path. Grown lazily to the widest request seen.
 local _spaces = ""
 
 local function spaces(n)
-    if n <= 0 then
-        return ""
-    end
-    if n > #_spaces then
-        _spaces = string.rep(" ", n)
-    end
-    return string.sub(_spaces, 1, n)
+	if n <= 0 then
+		return ""
+	end
+	if n > #_spaces then
+		_spaces = string.rep(" ", n)
+	end
+	return string.sub(_spaces, 1, n)
 end
 
 --- Resolve a UI chrome color from the active colorscheme.
@@ -46,11 +47,11 @@ end
 --- @param name string  UI concept key in CONCEPT_SLOTS
 --- @return integer color
 local function ui(name)
-    local scheme = ColorScheme.active
-    if scheme == nil then
-        return tb.color_default
-    end
-    return scheme:color(name)
+	local scheme = ColorScheme.active
+	if scheme == nil then
+		return tb.color_default
+	end
+	return scheme:color(name)
 end
 
 --- Blend a truecolor attr (`TB_TRUECOLOR` int 0xRRGGBB, possibly OR'd
@@ -65,20 +66,20 @@ end
 ---@param factor integer 0..255; 0 = color unchanged, 255 = fully target
 ---@return integer
 local function blend(color, target, factor)
-    -- Strip style bits (everything ≥ 0x01000000) before blending.
-    local style = bit.band(color, 0xFF000000)
-    local c = bit.band(color, 0xFFFFFF)
-    local tr = bit.rshift(target, 16)
-    local tg = bit.band(bit.rshift(target, 8), 0xFF)
-    local tb_ = bit.band(target, 0xFF)
-    local r = bit.band(bit.rshift(c, 16), 0xFF)
-    local g = bit.band(bit.rshift(c, 8), 0xFF)
-    local b = bit.band(c, 0xFF)
-    local inv = 255 - factor
-    r = bit.rshift(r * inv + tr * factor, 8)
-    g = bit.rshift(g * inv + tg * factor, 8)
-    b = bit.rshift(b * inv + tb_ * factor, 8)
-    return bit.bor(bit.bor(bit.bor(bit.lshift(r, 16), bit.lshift(g, 8)), b), style)
+	-- Strip style bits (everything ≥ 0x01000000) before blending.
+	local style = bit.band(color, 0xFF000000)
+	local c = bit.band(color, 0xFFFFFF)
+	local tr = bit.rshift(target, 16)
+	local tg = bit.band(bit.rshift(target, 8), 0xFF)
+	local tb_ = bit.band(target, 0xFF)
+	local r = bit.band(bit.rshift(c, 16), 0xFF)
+	local g = bit.band(bit.rshift(c, 8), 0xFF)
+	local b = bit.band(c, 0xFF)
+	local inv = 255 - factor
+	r = bit.rshift(r * inv + tr * factor, 8)
+	g = bit.rshift(g * inv + tg * factor, 8)
+	b = bit.rshift(b * inv + tb_ * factor, 8)
+	return bit.bor(bit.bor(bit.bor(bit.lshift(r, 16), bit.lshift(g, 8)), b), style)
 end
 
 --- Matched-substring byte set for completion highlighting. Mirrors the
@@ -90,20 +91,20 @@ end
 ---@param query string current minibuffer input
 ---@return table set of byte-index -> true (1-based, inclusive)
 local function match_byte_set(display, query)
-    local set = {}
-    if not query or query == "" then
-        return set
-    end
-    local lower = display:lower()
-    for term in query:lower():gmatch("%S+") do
-        local i, j = lower:find(term, 1, true)
-        if i then
-            for b = i, j do
-                set[b] = true
-            end
-        end
-    end
-    return set
+	local set = {}
+	if not query or query == "" then
+		return set
+	end
+	local lower = display:lower()
+	for term in query:lower():gmatch("%S+") do
+		local i, j = lower:find(term, 1, true)
+		if i then
+			for b = i, j do
+				set[b] = true
+			end
+		end
+	end
+	return set
 end
 --- but termbox x/y are CELL columns — so any modeline math involving
 --- unicode glyphs (◆ ▤ ⌖ ◣ ◢ …, all 1 cell but ≥2 bytes) must use this
@@ -112,8 +113,8 @@ end
 ---@param s string
 ---@return integer cells
 local function cell_len(s)
-    local _, n = s:gsub("[^\128-\191]", "")
-    return n
+	local _, n = s:gsub("[^\128-\191]", "")
+	return n
 end
 
 --- Truncate `s` to at most `max` display cells, never splitting a
@@ -122,18 +123,18 @@ end
 ---@param max integer max cells
 ---@return string
 local function truncate_cells(s, max)
-    if cell_len(s) <= max then
-        return s
-    end
-    local out, n = {}, 0
-    for seq in s:gmatch("[%z\1-\127\192-\255][\128-\191]*") do
-        if n >= max then
-            break
-        end
-        out[#out + 1] = seq
-        n = n + 1
-    end
-    return table.concat(out)
+	if cell_len(s) <= max then
+		return s
+	end
+	local out, n = {}, 0
+	for seq in s:gmatch("[%z\1-\127\192-\255][\128-\191]*") do
+		if n >= max then
+			break
+		end
+		out[#out + 1] = seq
+		n = n + 1
+	end
+	return table.concat(out)
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -180,29 +181,29 @@ end
 ---@param fallback integer color int when spec/resolution fails
 ---@return integer color
 local function resolve_seg_color(spec, fallback)
-    if spec == nil then
-        return fallback
-    end
-    local scheme = ColorScheme.active
-    if scheme == nil then
-        return fallback
-    end
-    if type(spec) == "number" then
-        return scheme:slot_color(spec)
-    end
-    ---@cast spec string
-    return scheme:color(spec)
+	if spec == nil then
+		return fallback
+	end
+	local scheme = ColorScheme.active
+	if scheme == nil then
+		return fallback
+	end
+	if type(spec) == "number" then
+		return scheme:slot_color(spec)
+	end
+	---@cast spec string
+	return scheme:color(spec)
 end
 
 --- Relative luminance of a truecolor attr (0xRRGGBB, style bits ignored).
 ---@param color integer
 ---@return number 0..1
 local function luminance(color)
-    local c = bit.band(color, 0xFFFFFF)
-    local r = bit.band(bit.rshift(c, 16), 0xFF) / 255
-    local g = bit.band(bit.rshift(c, 8), 0xFF) / 255
-    local b = bit.band(c, 0xFF) / 255
-    return 0.299 * r + 0.587 * g + 0.114 * b
+	local c = bit.band(color, 0xFFFFFF)
+	local r = bit.band(bit.rshift(c, 16), 0xFF) / 255
+	local g = bit.band(bit.rshift(c, 8), 0xFF) / 255
+	local b = bit.band(c, 0xFF) / 255
+	return 0.299 * r + 0.587 * g + 0.114 * b
 end
 
 --- Auto-pick a segment's text color from its bg lightness.
@@ -213,13 +214,13 @@ end
 ---@param bg_color integer resolved bg color int
 ---@return integer text color int
 local function auto_text_color(scheme, bg_color)
-    local text_slot
-    if scheme.truecolor and luminance(bg_color) > 0.5 then
-        text_slot = 0x00 -- base00: blackest on a light bg
-    else
-        text_slot = 0x06 -- base06: bright on a dark bg
-    end
-    return scheme:slot_color(text_slot)
+	local text_slot
+	if scheme.truecolor and luminance(bg_color) > 0.5 then
+		text_slot = 0x00 -- base00: blackest on a light bg
+	else
+		text_slot = 0x06 -- base06: bright on a dark bg
+	end
+	return scheme:slot_color(text_slot)
 end
 
 --- The built-in modeline segment set: reproduces the historic segmented
@@ -228,70 +229,83 @@ end
 --- Editor.new; init.lua / M-: can reassign, reorder, or append.
 ---@type table[]
 local DEFAULT_MODELINE_SEGMENTS = {
-    {
-        bg = "modeline_mode_bg",
-        fill = false,
-        format = function(editor, view)
-            local mode_name = "fundamental"
-            if #view._major_modes > 0 then
-                mode_name = view._major_modes[#view._major_modes].name or mode_name
-            end
-            return " ◆ " .. mode_name .. " "
-        end,
-    },
-    {
-        -- LSP status: shows the language server serving the active view's
-        -- modes. Walks modes high→low precedence and surfaces the first
-        -- that declares `lsp_servers`; glyph follows the lane-relayed
-        -- status: ready=⛏ srv, spawning=⛏ srv…, dead/killed=⛏ srv✝,
-        -- missing=⛏ srv—. Reads live from the client_id-keyed registry
-        -- (status echoes from the LSP lane so exit/crash/kill reflect
-        -- immediately).
-        bg = "modeline_bg",
-        fill = false,
-        format = function(_editor, view)
-            local lsp = require("cursed.lsp_client")
-            for i = #view._major_modes, 1, -1 do
-                local names = view._major_modes[i].lsp_servers
-                if names and #names > 0 then
-                    local srv, status = lsp.server_status_for(names)
-                    if srv then
-                        local suffix = ""
-                        if status == "spawning" then
-                            suffix = "…"
-                        elseif status == "dead" or status == "killed" then
-                            suffix = "✝"
-                        elseif status == "missing" then
-                            suffix = "—"
-                        end
-                        return (" ⛏ " .. srv .. suffix .. " ")
-                    end
-                end
-            end
-            return ""
-        end,
-    },
-    {
-        bg = "modeline_bg",
-        fill = true,
-        format = function(editor, view)
-            local buf = view.buffer
-            local dirty = buf:is_dirty()
-            local modified = dirty and " ●" or ""
-            local path = buf:filepath() or "[no file]"
-            local rc = editor:read_char_status()
-            return rc or editor.status_message or ("▤ " .. path .. modified)
-        end,
-    },
-    {
-        bg = "modeline_pos_bg",
-        fill = false,
-        format = function(editor, view)
-            local line_count = view:line_count()
-            local pct = math.floor(view:p().line / math.max(1, line_count - 1) * 100)
-            return string.format(" ⌖ %d:%d  %d%% ", view:p().line + 1, view:p().col + 1, pct)
-        end,
-    },
+	{
+		bg = "modeline_mode_bg",
+		fill = false,
+		format = function(editor, view)
+			local mode_name = "fundamental"
+			if #view._major_modes > 0 then
+				mode_name = view._major_modes[#view._major_modes].name or mode_name
+			end
+			return " ◆ " .. mode_name .. " "
+		end,
+	},
+	{
+		-- LSP status: shows the language server serving the active view's
+		-- modes. Walks modes high→low precedence and surfaces the first
+		-- that declares `lsp_servers`; glyph follows the lane-relayed
+		-- status: ready=⛏ srv, spawning=⛏ srv…, dead/killed=⛏ srv✝,
+		-- missing=⛏ srv—. Reads live from the client_id-keyed registry
+		-- (status echoes from the LSP lane so exit/crash/kill reflect
+		-- immediately).
+		bg = "modeline_bg",
+		fill = false,
+		format = function(_editor, view)
+			local lsp = require("cursed.lsp_client")
+			--- Prefer the buffer's bound client_id (now that servers dedup
+			--- per (exe, workspace_dir), `exe_to_client` holds only the
+			--- last cid for an exe name and may point at a different
+			--- project root's server). Fall back to declared-mode lookup
+			--- when no client is bound yet (pre-spawn).
+			local buf = view.buffer
+			local srv, status
+			if buf and buf.lsp_client_id ~= nil then
+				srv, status = lsp.status_for_client(buf.lsp_client_id)
+			end
+			if srv == nil then
+				for i = #view._major_modes, 1, -1 do
+					local names = view._major_modes[i].lsp_servers
+					if names and #names > 0 then
+						srv, status = lsp.server_status_for(names)
+						break
+					end
+				end
+			end
+			if srv then
+				local suffix = ""
+				if status == "spawning" then
+					suffix = "…"
+				elseif status == "dead" or status == "killed" then
+					suffix = "✝"
+				elseif status == "missing" then
+					suffix = "—"
+				end
+				return (" ⛏ " .. srv .. suffix .. " ")
+			end
+			return ""
+		end,
+	},
+	{
+		bg = "modeline_bg",
+		fill = true,
+		format = function(editor, view)
+			local buf = view.buffer
+			local dirty = buf:is_dirty()
+			local modified = dirty and " ●" or ""
+			local path = buf:filepath() or "[no file]"
+			local rc = editor:read_char_status()
+			return rc or editor.status_message or ("▤ " .. path .. modified)
+		end,
+	},
+	{
+		bg = "modeline_pos_bg",
+		fill = false,
+		format = function(editor, view)
+			local line_count = view:line_count()
+			local pct = math.floor(view:p().line / math.max(1, line_count - 1) * 100)
+			return string.format(" ⌖ %d:%d  %d%% ", view:p().line + 1, view:p().col + 1, pct)
+		end,
+	},
 }
 
 ----------------------------------------------------------------------------------------------------
@@ -299,45 +313,45 @@ local DEFAULT_MODELINE_SEGMENTS = {
 ----------------------------------------------------------------------------------------------------
 
 local function pprint(val, depth)
-    depth = depth or 0
-    if depth > 4 then
-        return "..."
-    end
-    local t = type(val)
-    if t == "nil" then
-        return "nil"
-    elseif t == "boolean" then
-        return tostring(val)
-    elseif t == "number" then
-        return tostring(val)
-    elseif t == "string" then
-        if depth == 0 then
-            -- Top-level: no quotes (user typed a string expression)
-            return val
-        end
-        return string.format("%q", val)
-    elseif t == "table" then
-        local parts = {}
-        for k, v in pairs(val) do
-            local ks
-            if type(k) == "string" and k:match("^[%a_][%w_]*$") then
-                ks = k
-            else
-                ks = "[" .. pprint(k, depth + 1) .. "]"
-            end
-            parts[#parts + 1] = ks .. " = " .. pprint(v, depth + 1)
-        end
-        if #parts == 0 then
-            return "{}"
-        end
-        return "{ " .. table.concat(parts, ", ") .. " }"
-    elseif t == "function" then
-        return "<function>"
-    elseif t == "cdata" then
-        return tostring(val)
-    else
-        return "<" .. t .. ">"
-    end
+	depth = depth or 0
+	if depth > 4 then
+		return "..."
+	end
+	local t = type(val)
+	if t == "nil" then
+		return "nil"
+	elseif t == "boolean" then
+		return tostring(val)
+	elseif t == "number" then
+		return tostring(val)
+	elseif t == "string" then
+		if depth == 0 then
+			-- Top-level: no quotes (user typed a string expression)
+			return val
+		end
+		return string.format("%q", val)
+	elseif t == "table" then
+		local parts = {}
+		for k, v in pairs(val) do
+			local ks
+			if type(k) == "string" and k:match("^[%a_][%w_]*$") then
+				ks = k
+			else
+				ks = "[" .. pprint(k, depth + 1) .. "]"
+			end
+			parts[#parts + 1] = ks .. " = " .. pprint(v, depth + 1)
+		end
+		if #parts == 0 then
+			return "{}"
+		end
+		return "{ " .. table.concat(parts, ", ") .. " }"
+	elseif t == "function" then
+		return "<function>"
+	elseif t == "cdata" then
+		return tostring(val)
+	else
+		return "<" .. t .. ">"
+	end
 end
 
 ---@class Editor
@@ -419,88 +433,88 @@ Editor.__index = Editor
 ---@param term Term
 ---@return Editor
 function Editor.new(term)
-    local editor = setmetatable({
-        views = {},
-        active_view = 0,
-        term = term,
-        status_message = nil,
-        minibuffer = Minibuffer.new(),
-        completion_menu = nil, -- CompletionMenu singleton (set below)
-        _isearch_origin_line = nil,
-        _isearch_origin_col = nil,
-        _isearch_direction = 1,
-        _isearch_regex = nil,
-        _isearch_match = nil,
-        _query_ranges = nil,
-        _replace_regexp_active = nil,
-        _query_replace_template = nil,
-        _query_captures = nil,
-        _query_replacements = nil,
-        _replace_regexp_origin_line = nil,
-        _replace_regexp_origin_col = nil,
-        _eval_result = nil,
-        _quit_requested = false,
-        _background_tasks = {},
-        _exit_code = 0,
-        _blink_task = nil,
-        _hl_idle_last = nil,
-        _wake_main = function() end,
-        _universal_active = false,
-        _universal_count = 0,
-        universal_args = nil,
-        _recording = false,
-        _recorded_commands = {},
-        _recorded_mb_inputs = {},
-        _kmacros = {},
-        _mb_input_stack = {},
-        _base_trie = nil,
-        _base_keybindings = {},
-        _active_trie = nil,
-        _chord_for_command = {},
-        overlays = nil, -- OverlayManager singleton (set below)
-        modeline_segments = nil, -- segment spec list (seeded from DEFAULT_MODELINE_SEGMENTS below)
-        _digit_active = false,
-        _digit_value = 0,
-        _digit_negative = false,
-        _pending_ops_count = 0, -- tracked for headless drain loop; event bus handles callbacks
-        _last_was_kill = false,
-        _kill_called = false,
-        _printable_fn = nil,
-        _read_char_cb = nil,
-        _read_char_prompt = "",
-        _transient_handlers = {},
-        _config = nil,
-        _blink_on = true, -- caret visible (drawn) this phase
-        _last_command = nil, -- most recent dispatched command name
-        _extend = false, -- true while a `*_select` command runs (suppressed transient-anchor drop)
-        _command_before_this = nil, -- command before the most recent
-        _last_complex_command = nil, -- most recent command-with-args, for repeat-complex-command
-        _whichkey_node = nil,
-        _whichkey_prefix = nil,
-        _whichkey_page = 0,
-        gutter_sign_fns = {}, -- overrideable per-line gutter-sign callbacks (see Editor.gutter_sign_fns)
-        _code_action_lines_by_uri = {}, -- per-URI set of line numbers with available code actions
-    }, Editor)
-    editor.event_system = EventSystem.new(editor)
-    editor.overlays = OverlayManager.new(editor)
-    editor.modeline_segments = {}
-    for _, seg in ipairs(DEFAULT_MODELINE_SEGMENTS) do
-        editor.modeline_segments[#editor.modeline_segments + 1] = seg
-    end
-    -- In-buffer completion popup (parallel to the minibuffer). Default
-    -- source: buffer-word dabbrev, which dogfoods the whole loop
-    -- end-to-end without requiring LSP; swap via set_completer.
-    editor.completion_menu = CompletionMenu.new(editor)
-    editor.completion_menu:set_completer(completers.mode_dispatch(editor))
-    editor.completion_menu:setup()
-    return editor
+	local editor = setmetatable({
+		views = {},
+		active_view = 0,
+		term = term,
+		status_message = nil,
+		minibuffer = Minibuffer.new(),
+		completion_menu = nil, -- CompletionMenu singleton (set below)
+		_isearch_origin_line = nil,
+		_isearch_origin_col = nil,
+		_isearch_direction = 1,
+		_isearch_regex = nil,
+		_isearch_match = nil,
+		_query_ranges = nil,
+		_replace_regexp_active = nil,
+		_query_replace_template = nil,
+		_query_captures = nil,
+		_query_replacements = nil,
+		_replace_regexp_origin_line = nil,
+		_replace_regexp_origin_col = nil,
+		_eval_result = nil,
+		_quit_requested = false,
+		_background_tasks = {},
+		_exit_code = 0,
+		_blink_task = nil,
+		_hl_idle_last = nil,
+		_wake_main = function() end,
+		_universal_active = false,
+		_universal_count = 0,
+		universal_args = nil,
+		_recording = false,
+		_recorded_commands = {},
+		_recorded_mb_inputs = {},
+		_kmacros = {},
+		_mb_input_stack = {},
+		_base_trie = nil,
+		_base_keybindings = {},
+		_active_trie = nil,
+		_chord_for_command = {},
+		overlays = nil, -- OverlayManager singleton (set below)
+		modeline_segments = nil, -- segment spec list (seeded from DEFAULT_MODELINE_SEGMENTS below)
+		_digit_active = false,
+		_digit_value = 0,
+		_digit_negative = false,
+		_pending_ops_count = 0, -- tracked for headless drain loop; event bus handles callbacks
+		_last_was_kill = false,
+		_kill_called = false,
+		_printable_fn = nil,
+		_read_char_cb = nil,
+		_read_char_prompt = "",
+		_transient_handlers = {},
+		_config = nil,
+		_blink_on = true, -- caret visible (drawn) this phase
+		_last_command = nil, -- most recent dispatched command name
+		_extend = false, -- true while a `*_select` command runs (suppressed transient-anchor drop)
+		_command_before_this = nil, -- command before the most recent
+		_last_complex_command = nil, -- most recent command-with-args, for repeat-complex-command
+		_whichkey_node = nil,
+		_whichkey_prefix = nil,
+		_whichkey_page = 0,
+		gutter_sign_fns = {}, -- overrideable per-line gutter-sign callbacks (see Editor.gutter_sign_fns)
+		_code_action_lines_by_uri = {}, -- per-URI set of line numbers with available code actions
+	}, Editor)
+	editor.event_system = EventSystem.new(editor)
+	editor.overlays = OverlayManager.new(editor)
+	editor.modeline_segments = {}
+	for _, seg in ipairs(DEFAULT_MODELINE_SEGMENTS) do
+		editor.modeline_segments[#editor.modeline_segments + 1] = seg
+	end
+	-- In-buffer completion popup (parallel to the minibuffer). Default
+	-- source: buffer-word dabbrev, which dogfoods the whole loop
+	-- end-to-end without requiring LSP; swap via set_completer.
+	editor.completion_menu = CompletionMenu.new(editor)
+	editor.completion_menu:set_completer(completers.mode_dispatch(editor))
+	editor.completion_menu:setup()
+	return editor
 end
 
 --- Signal the main loop to exit. Sets the quit flag and wakes select()
 --- via the kqueue so it doesn't block until the next keypress.
 function Editor:request_quit()
-    self._quit_requested = true
-    self._wake_main()
+	self._quit_requested = true
+	self._wake_main()
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -517,58 +531,58 @@ local BLINK_HALF_US = 530000
 
 local now_tv = ffi.new("struct timeval[1]")
 local function now_us()
-    pffi.C.gettimeofday(now_tv, nil)
-    return tonumber(now_tv[0].tv_sec) * 1000000 + tonumber(now_tv[0].tv_usec)
+	pffi.C.gettimeofday(now_tv, nil)
+	return tonumber(now_tv[0].tv_sec) * 1000000 + tonumber(now_tv[0].tv_usec)
 end
 
 --- Schedule the next cursor-blink toggle. The task inverts `_blink_on`
 -- and reschedules itself so the caret keeps blinking until input resets
 -- it back to the "on" phase.
 function Editor:schedule_blink()
-    self._blink_task = self:schedule_after(BLINK_HALF_US, function()
-        self._blink_on = not self._blink_on
-        self:schedule_blink()
-        return true
-    end)
+	self._blink_task = self:schedule_after(BLINK_HALF_US, function()
+		self._blink_on = not self._blink_on
+		self:schedule_blink()
+		return true
+	end)
 end
 
 --- Reset the blink to the "on" phase and schedule the next toggle.
 -- Called whenever input is processed so the caret stays solid while the
 -- user is actively typing.
 function Editor:reset_blink()
-    self._blink_on = true
-    if self._blink_task then
-        self:cancel_task(self._blink_task)
-    end
-    self:schedule_blink()
+	self._blink_on = true
+	if self._blink_task then
+		self:cancel_task(self._blink_task)
+	end
+	self:schedule_blink()
 end
 
 --- Rebuild the active keybind trie by merging the active view's mode
 --- keybindings on top of the base trie. Called when the mode changes.
 function Editor:rebuild_active_trie()
-    local view = self:focused_view()
-    if view and #view._major_modes > 0 then
-        -- Merge: start from a copy of base keybindings, then overlay each mode in order
-        local merged = {}
-        for k, v in pairs(self._base_keybindings) do
-            merged[k] = v
-        end
-        for _, mode in ipairs(view._major_modes) do
-            if next(mode.keybindings) then
-                for k, v in pairs(mode.keybindings) do
-                    merged[k] = v
-                end
-            end
-        end
-        self._active_trie = keybind.Trie.build(merged)
-        -- Shortcuts shown in M-x reflect the active major mode's overrides.
-        self._chord_for_command = keybind.build_chord_for_command(merged)
-    else
-        self._active_trie = self._base_trie
-        -- Rebuild from base bindings so the map is fresh even with no modes.
-        self._chord_for_command = keybind.build_chord_for_command(self._base_keybindings)
-    end
-    self._trie_changed = true
+	local view = self:focused_view()
+	if view and #view._major_modes > 0 then
+		-- Merge: start from a copy of base keybindings, then overlay each mode in order
+		local merged = {}
+		for k, v in pairs(self._base_keybindings) do
+			merged[k] = v
+		end
+		for _, mode in ipairs(view._major_modes) do
+			if next(mode.keybindings) then
+				for k, v in pairs(mode.keybindings) do
+					merged[k] = v
+				end
+			end
+		end
+		self._active_trie = keybind.Trie.build(merged)
+		-- Shortcuts shown in M-x reflect the active major mode's overrides.
+		self._chord_for_command = keybind.build_chord_for_command(merged)
+	else
+		self._active_trie = self._base_trie
+		-- Rebuild from base bindings so the map is fresh even with no modes.
+		self._chord_for_command = keybind.build_chord_for_command(self._base_keybindings)
+	end
+	self._trie_changed = true
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -590,7 +604,7 @@ end
 --- active modes; in the no-mode branch it aliases `_base_trie`, so this
 --- must stay fresh.)
 function Editor:rebuild_base_trie()
-    self._base_trie = keybind.Trie.build(self._base_keybindings)
+	self._base_trie = keybind.Trie.build(self._base_keybindings)
 end
 
 --- Bind a key chord globally (Emacs `global-set-key`). `action` is either
@@ -601,25 +615,22 @@ end
 ---@param chord string chord specifier ("ctrl-x ctrl-s", "alt-:", "f5", …)
 ---@param action string|function command name or function
 function Editor:global_set_key(chord, action)
-    if self._base_keybindings == nil then
-        error(
-            "editor:global_set_key: keybindings not yet initialized (call after startup prime)",
-            2
-        )
-    end
-    if chord == "__printable" then
-        if type(action) == "function" then
-            self._printable_fn = action
-        end
-        return
-    end
-    local tokens, err = keybind.parse_chord(chord)
-    if not tokens then
-        error(("editor:global_set_key: bad chord %q: %s"):format(chord, err or "?"), 2)
-    end
-    self._base_keybindings[chord] = action
-    self:rebuild_base_trie()
-    self:rebuild_active_trie()
+	if self._base_keybindings == nil then
+		error("editor:global_set_key: keybindings not yet initialized (call after startup prime)", 2)
+	end
+	if chord == "__printable" then
+		if type(action) == "function" then
+			self._printable_fn = action
+		end
+		return
+	end
+	local tokens, err = keybind.parse_chord(chord)
+	if not tokens then
+		error(("editor:global_set_key: bad chord %q: %s"):format(chord, err or "?"), 2)
+	end
+	self._base_keybindings[chord] = action
+	self:rebuild_base_trie()
+	self:rebuild_active_trie()
 end
 
 --- Mirror every base keybinding whose chord begins with `from_token`
@@ -632,27 +643,27 @@ end
 ---@param from_token string first component to clone (e.g. "ctrl-x")
 ---@param to_token string    new first component (e.g. "alt-q")
 function Editor:mirror_prefix(from_token, to_token)
-    if self._base_keybindings == nil then
-        error("editor:mirror_prefix: keybindings not yet initialized", 2)
-    end
-    local mirrored = {}
-    for chord, action in pairs(self._base_keybindings) do
-        local m = keybind.mirror_chord(chord, from_token, to_token)
-        if m ~= nil then
-            mirrored[m] = action
-        end
-    end
-    -- If the bare to_token is bound as a leaf, clear it so the prefix
-    -- shows which-key continuations instead of dispatching immediately.
-    if self._base_keybindings[to_token] ~= nil then
-        self._base_keybindings[to_token] = nil
-    end
-    for chord, action in pairs(mirrored) do
-        self._base_keybindings[chord] = action
-    end
-    self:rebuild_base_trie()
-    self:rebuild_active_trie()
-    return next(mirrored) ~= nil
+	if self._base_keybindings == nil then
+		error("editor:mirror_prefix: keybindings not yet initialized", 2)
+	end
+	local mirrored = {}
+	for chord, action in pairs(self._base_keybindings) do
+		local m = keybind.mirror_chord(chord, from_token, to_token)
+		if m ~= nil then
+			mirrored[m] = action
+		end
+	end
+	-- If the bare to_token is bound as a leaf, clear it so the prefix
+	-- shows which-key continuations instead of dispatching immediately.
+	if self._base_keybindings[to_token] ~= nil then
+		self._base_keybindings[to_token] = nil
+	end
+	for chord, action in pairs(mirrored) do
+		self._base_keybindings[chord] = action
+	end
+	self:rebuild_base_trie()
+	self:rebuild_active_trie()
+	return next(mirrored) ~= nil
 end
 
 --- Bind a key chord in a specific major mode (Emacs `define-key`).
@@ -666,21 +677,21 @@ end
 ---@param chord string chord specifier
 ---@param action string|function command name or function
 function Editor:define_key(mode, chord, action)
-    local mode_obj = mode
-    if type(mode) == "string" then
-        mode_obj = self._config and self._config.modes[mode]
-        if mode_obj == nil then
-            error(("editor:define_key: unknown mode %q"):format(mode), 2)
-        end
-    end
-    local tokens, err = keybind.parse_chord(chord)
-    if not tokens then
-        error(("editor:define_key: bad chord %q: %s"):format(chord, err or "?"), 2)
-    end
-    mode_obj.keybindings = mode_obj.keybindings or {}
-    mode_obj.keybindings[chord] = action
-    mode_obj._trie = nil -- invalidate cached trie; rebuilt on next :trie()
-    self:rebuild_active_trie()
+	local mode_obj = mode
+	if type(mode) == "string" then
+		mode_obj = self._config and self._config.modes[mode]
+		if mode_obj == nil then
+			error(("editor:define_key: unknown mode %q"):format(mode), 2)
+		end
+	end
+	local tokens, err = keybind.parse_chord(chord)
+	if not tokens then
+		error(("editor:define_key: bad chord %q: %s"):format(chord, err or "?"), 2)
+	end
+	mode_obj.keybindings = mode_obj.keybindings or {}
+	mode_obj.keybindings[chord] = action
+	mode_obj._trie = nil -- invalidate cached trie; rebuilt on next :trie()
+	self:rebuild_active_trie()
 end
 
 --- Register a named command (Emacs `defun`-equivalent for the command
@@ -692,9 +703,9 @@ end
 ---@param name string command name (snake_case or with spaces)
 ---@param fn function(view, editor, ...) command implementation
 function Editor:define_command(name, fn)
-    local commands = require("cursed.commands")
-    local key = name:gsub(" ", "_"):lower()
-    commands[key] = fn
+	local commands = require("cursed.commands")
+	local key = name:gsub(" ", "_"):lower()
+	commands[key] = fn
 end
 
 --- Schedule a plain function to run incrementally on the main thread.
@@ -703,7 +714,7 @@ end
 --- from the queue; false/nil means it will be called again next time.
 ---@param fn fun(): boolean?
 function Editor:push_background_task(fn)
-    self._background_tasks[#self._background_tasks + 1] = fn
+	self._background_tasks[#self._background_tasks + 1] = fn
 end
 
 --- Schedule a function to run once at or after `deadline_us` (monotonic
@@ -714,9 +725,9 @@ end
 ---@param fn fun(): boolean?
 ---@return table handle
 function Editor:schedule_at(deadline_us, fn)
-    local task = { deadline = deadline_us, fn = fn }
-    self._background_tasks[#self._background_tasks + 1] = task
-    return task
+	local task = { deadline = deadline_us, fn = fn }
+	self._background_tasks[#self._background_tasks + 1] = task
+	return task
 end
 
 --- Schedule a function to run once after `delay_us` microseconds.
@@ -724,23 +735,23 @@ end
 ---@param fn fun(): boolean?
 ---@return table handle
 function Editor:schedule_after(delay_us, fn)
-    return self:schedule_at(now_us() + delay_us, fn)
+	return self:schedule_at(now_us() + delay_us, fn)
 end
 
 --- Remove a scheduled task from the queue by its handle.
 ---@param handle table
 function Editor:cancel_task(handle)
-    local tasks = self._background_tasks
-    local j = 1
-    for i = 1, #tasks do
-        if tasks[i] ~= handle then
-            tasks[j] = tasks[i]
-            j = j + 1
-        end
-    end
-    for i = j, #tasks do
-        tasks[i] = nil
-    end
+	local tasks = self._background_tasks
+	local j = 1
+	for i = 1, #tasks do
+		if tasks[i] ~= handle then
+			tasks[j] = tasks[i]
+			j = j + 1
+		end
+	end
+	for i = j, #tasks do
+		tasks[i] = nil
+	end
 end
 
 --- Earliest deadline among pending tasks, or `now_us()` if any plain
@@ -748,22 +759,22 @@ end
 --- the next timer is due.
 ---@return integer|nil deadline_us
 function Editor:next_task_deadline()
-    local tasks = self._background_tasks
-    if #tasks == 0 then
-        return nil
-    end
-    local deadline ---@type integer|nil
-    for _, e in ipairs(tasks) do
-        if type(e) == "table" and e.deadline ~= nil then
-            if deadline == nil or e.deadline < deadline then
-                deadline = e.deadline
-            end
-        else
-            -- Plain task: ready immediately.
-            return now_us()
-        end
-    end
-    return deadline
+	local tasks = self._background_tasks
+	if #tasks == 0 then
+		return nil
+	end
+	local deadline ---@type integer|nil
+	for _, e in ipairs(tasks) do
+		if type(e) == "table" and e.deadline ~= nil then
+			if deadline == nil or e.deadline < deadline then
+				deadline = e.deadline
+			end
+		else
+			-- Plain task: ready immediately.
+			return now_us()
+		end
+	end
+	return deadline
 end
 
 --- Execute one step of a single background task per call (round-robin).
@@ -772,36 +783,92 @@ end
 --- earliest remaining deadline so the caller can update its sleep time.
 ---@return integer|nil deadline_us
 function Editor:tick_background_tasks()
-    local tasks = self._background_tasks
-    if #tasks == 0 then
-        return nil
-    end
-    local entry = table.remove(tasks, 1)
-    local now = now_us()
-    local next_deadline ---@type integer|nil
-    local done = false
-    if type(entry) == "table" and entry.deadline ~= nil then
-        if now >= entry.deadline then
-            done = entry.fn()
-        else
-            next_deadline = entry.deadline
-        end
-    else
-        done = entry()
-    end
-    if not done then
-        tasks[#tasks + 1] = entry
-    end
-    for _, e in ipairs(tasks) do
-        if type(e) == "table" and e.deadline ~= nil then
-            if next_deadline == nil or e.deadline < next_deadline then
-                next_deadline = e.deadline
-            end
-        else
-            return now
-        end
-    end
-    return next_deadline
+	local tasks = self._background_tasks
+	if #tasks == 0 then
+		return nil
+	end
+	local entry = table.remove(tasks, 1)
+	local now = now_us()
+	local next_deadline ---@type integer|nil
+	local done = false
+
+	-- Check deadline for scheduled tasks. select() may wake early on
+	-- input before a timer's deadline has arrived; in that case the
+	-- task is re-queued WITHOUT running so timers fire at their
+	-- scheduled time (e.g. the cursor-blink toggle must not flip on
+	-- every input-driven tick, or the caret stays dark while moving).
+	local due = true
+	if type(entry) == "table" and entry.deadline ~= nil then
+		if now < entry.deadline then
+			next_deadline = entry.deadline
+			done = false
+			due = false
+		end
+	end
+
+	if due and not done then
+		-- Run (or resume) the task in a coroutine.
+		-- On first tick: wrap fn in coroutine.create.
+		-- On subsequent ticks: resume the existing coroutine.
+		if type(entry) == "table" then
+			if not entry.co then
+				local fn = entry.fn or entry[1] -- support plain function as array entry
+				if type(fn) == "function" then
+					entry.co = coroutine.create(fn)
+				else
+					-- Non-function entry: skip.
+					done = true
+				end
+			end
+			if entry.co then
+				local ok, result = coroutine.resume(entry.co)
+				local status = coroutine.status(entry.co)
+				if not ok then
+					log.error("editor", "background task error", { error = tostring(result) })
+					done = true
+				elseif status == "dead" then
+					done = result ~= false
+				else
+					-- Suspended (yielded via async.await): re-queue.
+					done = false
+				end
+			end
+		else
+			-- Plain function (legacy): wrap and run.
+			local fn = entry
+			if type(fn) == "function" then
+				local co = coroutine.create(fn)
+				local ok, result = coroutine.resume(co)
+				local status = coroutine.status(co)
+				if not ok then
+					log.error("editor", "background task error", { error = tostring(result) })
+					done = true
+				elseif status == "dead" then
+					done = result ~= false
+				else
+					-- Re-wrap as a table entry for future ticks.
+					entry = { co = co, deadline = entry.deadline }
+					done = false
+				end
+			else
+				done = true
+			end
+		end
+	end
+
+	if not done then
+		tasks[#tasks + 1] = entry
+	end
+	for _, e in ipairs(tasks) do
+		if type(e) == "table" and e.deadline ~= nil then
+			if next_deadline == nil or e.deadline < next_deadline then
+				next_deadline = e.deadline
+			end
+		else
+			return now
+		end
+	end
+	return next_deadline
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -817,22 +884,22 @@ end
 ---@param old_view View|nil
 ---@param new_view View|nil
 function Editor:_emit_focus_change(old_view, new_view)
-    if old_view == new_view then
-        return
-    end
-    local es = self.event_system
-    if old_view then
-        es:emit("view_blur", old_view)
-        if old_view.buffer then
-            es:emit("buffer_blur", old_view.buffer, old_view)
-        end
-    end
-    if new_view then
-        es:emit("view_focus", new_view)
-        if new_view.buffer then
-            es:emit("buffer_focus", new_view.buffer, new_view)
-        end
-    end
+	if old_view == new_view then
+		return
+	end
+	local es = self.event_system
+	if old_view then
+		es:emit("view_blur", old_view)
+		if old_view.buffer then
+			es:emit("buffer_blur", old_view.buffer, old_view)
+		end
+	end
+	if new_view then
+		es:emit("view_focus", new_view)
+		if new_view.buffer then
+			es:emit("buffer_focus", new_view.buffer, new_view)
+		end
+	end
 end
 
 --- Set the active view index and rebuild the keybind trie
@@ -842,19 +909,19 @@ end
 --- object actually changes.
 ---@param idx integer 1-based index into self.views
 function Editor:set_active_view(idx)
-    local old_view = self:current_view()
-    self.active_view = idx
-    self:rebuild_active_trie()
-    self:_emit_focus_change(old_view, self:current_view())
+	local old_view = self:current_view()
+	self.active_view = idx
+	self:rebuild_active_trie()
+	self:_emit_focus_change(old_view, self:current_view())
 end
 
 --- Get the active view.
 ---@return View|nil
 function Editor:current_view()
-    if self.active_view >= 1 and self.active_view <= #self.views then
-        return self.views[self.active_view]
-    end
-    return nil
+	if self.active_view >= 1 and self.active_view <= #self.views then
+		return self.views[self.active_view]
+	end
+	return nil
 end
 
 --- Add a view to the editor and make it active.
@@ -862,12 +929,12 @@ end
 --- for the new view plus view_blur/buffer_blur for the previous one).
 ---@param view View
 function Editor:add_view(view)
-    view.editor = self
-    view.margin = self.margin
-    table.insert(self.views, view)
-    --    self.active_view = #self.views
-    self:set_active_view(#self.views)
-    self.event_system:emit("view_open", view)
+	view.editor = self
+	view.margin = self.margin
+	table.insert(self.views, view)
+	--    self.active_view = #self.views
+	self:set_active_view(#self.views)
+	self.event_system:emit("view_open", view)
 end
 
 --- Close a view and fix up the active_view index.
@@ -878,42 +945,42 @@ end
 --- neighbor that takes its place.
 ---@param view View
 function Editor:close_view(view)
-    local idx = 0
-    for i, v in ipairs(self.views) do
-        if v == view then
-            idx = i
-            break
-        end
-    end
-    if idx == 0 then
-        return
-    end
-    -- If the doomed view is currently focused, blur it (and its buffer)
-    -- first so the close sequence reads blur→close→focus(neighbor).
-    if self:current_view() == view then
-        self:_emit_focus_change(view, nil)
-    end
-    local buf = view.buffer
-    if buf then
-        self.event_system:emit("buffer_close", buf, view)
-    end
-    self.event_system:emit("view_close", view)
-    -- Drop the shared parse-tree slot for this view so the table doesn't
-    -- outlive its documents (dead views don't hold a tree ref). Main held
-    -- any in-use acquired trees via its own ts_tree_copy refs, so a racing
-    -- acquire is unaffected.
-    if view._hl_view_id and view._hl_view_id ~= 0 then
-        local s = shared.SharedState.from_global()
-        s:release_tree(view._hl_view_id)
-    end
-    table.remove(self.views, idx)
-    if #self.views == 0 then
-        self:set_active_view(0)
-    elseif self.active_view > #self.views then
-        self:set_active_view(#self.views)
-    elseif idx <= self.active_view then
-        self:set_active_view(math.max(1, self.active_view - 1))
-    end
+	local idx = 0
+	for i, v in ipairs(self.views) do
+		if v == view then
+			idx = i
+			break
+		end
+	end
+	if idx == 0 then
+		return
+	end
+	-- If the doomed view is currently focused, blur it (and its buffer)
+	-- first so the close sequence reads blur→close→focus(neighbor).
+	if self:current_view() == view then
+		self:_emit_focus_change(view, nil)
+	end
+	local buf = view.buffer
+	if buf then
+		self.event_system:emit("buffer_close", buf, view)
+	end
+	self.event_system:emit("view_close", view)
+	-- Drop the shared parse-tree slot for this view so the table doesn't
+	-- outlive its documents (dead views don't hold a tree ref). Main held
+	-- any in-use acquired trees via its own ts_tree_copy refs, so a racing
+	-- acquire is unaffected.
+	if view._hl_view_id and view._hl_view_id ~= 0 then
+		local s = shared.SharedState.from_global()
+		s:release_tree(view._hl_view_id)
+	end
+	table.remove(self.views, idx)
+	if #self.views == 0 then
+		self:set_active_view(0)
+	elseif self.active_view > #self.views then
+		self:set_active_view(#self.views)
+	elseif idx <= self.active_view then
+		self:set_active_view(math.max(1, self.active_view - 1))
+	end
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -926,24 +993,24 @@ end
 
 --- Undo the last edit.
 function Editor:undo()
-    local view = self:focused_view()
-    if not view then
-        return
-    end
-    if not view:undo() then
-        self.status_message = "no further undo information"
-    end
+	local view = self:focused_view()
+	if not view then
+		return
+	end
+	if not view:undo() then
+		self.status_message = "no further undo information"
+	end
 end
 
 --- Redo the last undone edit.
 function Editor:redo()
-    local view = self:focused_view()
-    if not view then
-        return
-    end
-    if not view:redo() then
-        self.status_message = "no further redo information"
-    end
+	local view = self:focused_view()
+	if not view then
+		return
+	end
+	if not view:redo() then
+		self.status_message = "no further redo information"
+	end
 end
 
 --- Open a file in a new view.
@@ -951,78 +1018,77 @@ end
 --- and requests the IO lane to load the file contents.
 ---@param filepath string raw path from the user (may contain ~, $ENV)
 function Editor:open_file(filepath)
-    local bench = require("cursed.bench")
-    local t0 = bench.now_us()
+	local bench = require("cursed.bench")
+	local t0 = bench.now_us()
 
-    local expanded = find_file.expand_path(filepath)
+	local expanded = find_file.expand_path(filepath)
 
-    -- Open directories in the file manager
-    if find_file.is_directory(expanded) then
-        local fm = require("cursed.file_manager")
-        fm.open_directory(self, expanded)
-        return
-    end
+	-- Open directories in the file manager
+	if find_file.is_directory(expanded) then
+		local fm = require("cursed.file_manager")
+		fm.open_directory(self, expanded)
+		return
+	end
 
-    local buf = Buffer.new()
-    buf:set_filepath(expanded)
-    local view = View.new(buf)
-    view._bench_open_t0 = t0
-    self:add_view(view)
+	local buf = Buffer.new()
+	buf:set_filepath(expanded)
+	local view = View.new(buf)
+	view._bench_open_t0 = t0
+	self:add_view(view)
 
-    log.debug("editor", "open_file begin", { path = expanded })
+	log.debug("editor", "open_file begin", { path = expanded })
 
-    local editor = self
-    local req_id = self:_next_file_op_id()
-    self._pending_ops_count = (self._pending_ops_count or 0) + 1
-    local event_name = "file_op:" .. req_id
-    local handler
-    handler = self.event_system:on(event_name, function(_, payload)
-        self.event_system:off(event_name, handler)
-        self._pending_ops_count = self._pending_ops_count - 1
-        if payload.err then
-            editor.status_message = payload.err
-            return
-        end
-        local mmap_ptr = payload.mmap
-        local file_size = payload.size
-        ---@cast file_size integer
-        local fp = view.buffer:filepath()
-        if mmap_ptr == nil then
-            -- Empty file: the placeholder buffer in `view` is valid.
-            view.file_loaded = true
-            if editor._config and fp then
-                view:activate_mode_for_filepath(fp, editor._config)
-            end
-            editor.event_system:emit("file_loaded", view, view.buffer)
-        else
-            local psize = tonumber(ffi.C.sysconf(require("cursed.shared")._SC_PAGESIZE)) or 4096
-            local cap = file_size > 0 and bit.band(file_size + psize - 1, bit.bnot(psize - 1))
-                or psize
-            local loaded_buf = Buffer.from_mmap(mmap_ptr, file_size, cap)
-            view:set_buffer(loaded_buf, { loaded = true })
-            if fp then
-                loaded_buf:set_filepath(fp)
-            end
-            view.file_loaded = true
-            local t_mode = bench.now_us()
-            if editor._config and fp then
-                view:activate_mode_for_filepath(fp, editor._config)
-            end
-            bench.span("main", "file_open activate_mode", t_mode, { path = fp })
-            editor.event_system:emit("file_loaded", view, loaded_buf)
-            if view._bench_open_t0 then
-                bench.span("main", "file_open TOTAL", view._bench_open_t0, { path = fp })
-                view._bench_open_t0 = nil
-            end
-        end
-    end)
+	local editor = self
+	local req_id = self:_next_file_op_id()
+	self._pending_ops_count = (self._pending_ops_count or 0) + 1
+	local event_name = "file_op:" .. req_id
+	local handler
+	handler = self.event_system:on(event_name, function(_, payload)
+		self.event_system:off(event_name, handler)
+		self._pending_ops_count = self._pending_ops_count - 1
+		if payload.err then
+			editor.status_message = payload.err
+			return
+		end
+		local mmap_ptr = payload.mmap
+		local file_size = payload.size
+		---@cast file_size integer
+		local fp = view.buffer:filepath()
+		if mmap_ptr == nil then
+			-- Empty file: the placeholder buffer in `view` is valid.
+			view.file_loaded = true
+			if editor._config and fp then
+				view:activate_mode_for_filepath(fp, editor._config)
+			end
+			editor.event_system:emit("file_loaded", view, view.buffer)
+		else
+			local psize = tonumber(ffi.C.sysconf(require("cursed.shared")._SC_PAGESIZE)) or 4096
+			local cap = file_size > 0 and bit.band(file_size + psize - 1, bit.bnot(psize - 1)) or psize
+			local loaded_buf = Buffer.from_mmap(mmap_ptr, file_size, cap)
+			view:set_buffer(loaded_buf, { loaded = true })
+			if fp then
+				loaded_buf:set_filepath(fp)
+			end
+			view.file_loaded = true
+			local t_mode = bench.now_us()
+			if editor._config and fp then
+				view:activate_mode_for_filepath(fp, editor._config)
+			end
+			bench.span("main", "file_open activate_mode", t_mode, { path = fp })
+			editor.event_system:emit("file_loaded", view, loaded_buf)
+			if view._bench_open_t0 then
+				bench.span("main", "file_open TOTAL", view._bench_open_t0, { path = fp })
+				view._bench_open_t0 = nil
+			end
+		end
+	end)
 
-    local ss = shared.SharedState.from_global()
-    ss:push(ss._ptr.outbox_io, {
-        type = shared.MSG_FILE_LOAD,
-        arg = req_id,
-        ptr = expanded,
-    })
+	local ss = shared.SharedState.from_global()
+	ss:push(ss._ptr.outbox_io, {
+		type = shared.MSG_FILE_LOAD,
+		arg = req_id,
+		ptr = expanded,
+	})
 end
 
 --- Open a file into a NEW view WITHOUT focusing it — no `active_view`
@@ -1037,67 +1103,66 @@ end
 ---@param filepath string raw path from the edit's file:// URI
 ---@return View? view
 function Editor:open_file_background(filepath)
-    local expanded = find_file.expand_path(filepath)
-    if find_file.is_directory(expanded) then
-        local fm = require("cursed.file_manager")
-        fm.open_directory(self, expanded)
-        return nil
-    end
-    local buf = Buffer.new()
-    buf:set_filepath(expanded)
-    local view = View.new(buf)
-    view.editor = self
-    view.margin = self.margin
-    table.insert(self.views, view)
-    self.event_system:emit("view_open", view)
-    log.debug("editor", "open_file_background begin", { path = expanded })
+	local expanded = find_file.expand_path(filepath)
+	if find_file.is_directory(expanded) then
+		local fm = require("cursed.file_manager")
+		fm.open_directory(self, expanded)
+		return nil
+	end
+	local buf = Buffer.new()
+	buf:set_filepath(expanded)
+	local view = View.new(buf)
+	view.editor = self
+	view.margin = self.margin
+	table.insert(self.views, view)
+	self.event_system:emit("view_open", view)
+	log.debug("editor", "open_file_background begin", { path = expanded })
 
-    local editor = self
-    local req_id = self:_next_file_op_id()
-    self._pending_ops_count = (self._pending_ops_count or 0) + 1
-    local event_name = "file_op:" .. req_id
-    local handler
-    handler = self.event_system:on(event_name, function(_, payload)
-        self.event_system:off(event_name, handler)
-        self._pending_ops_count = self._pending_ops_count - 1
-        if payload.err then
-            editor.status_message = payload.err
-            return
-        end
-        local mmap_ptr = payload.mmap
-        local file_size = payload.size
-        ---@cast file_size integer
-        local fp = view.buffer:filepath()
-        if mmap_ptr == nil then
-            view.file_loaded = true
-            if editor._config and fp then
-                view:activate_mode_for_filepath(fp, editor._config)
-            end
-            editor.event_system:emit("file_loaded", view, view.buffer)
-        else
-            local psize = tonumber(ffi.C.sysconf(require("cursed.shared")._SC_PAGESIZE)) or 4096
-            local cap = file_size > 0 and bit.band(file_size + psize - 1, bit.bnot(psize - 1))
-                or psize
-            local loaded_buf = Buffer.from_mmap(mmap_ptr, file_size, cap)
-            view:set_buffer(loaded_buf, { loaded = true })
-            if fp then
-                loaded_buf:set_filepath(fp)
-            end
-            view.file_loaded = true
-            if editor._config and fp then
-                view:activate_mode_for_filepath(fp, editor._config)
-            end
-            editor.event_system:emit("file_loaded", view, loaded_buf)
-        end
-    end)
+	local editor = self
+	local req_id = self:_next_file_op_id()
+	self._pending_ops_count = (self._pending_ops_count or 0) + 1
+	local event_name = "file_op:" .. req_id
+	local handler
+	handler = self.event_system:on(event_name, function(_, payload)
+		self.event_system:off(event_name, handler)
+		self._pending_ops_count = self._pending_ops_count - 1
+		if payload.err then
+			editor.status_message = payload.err
+			return
+		end
+		local mmap_ptr = payload.mmap
+		local file_size = payload.size
+		---@cast file_size integer
+		local fp = view.buffer:filepath()
+		if mmap_ptr == nil then
+			view.file_loaded = true
+			if editor._config and fp then
+				view:activate_mode_for_filepath(fp, editor._config)
+			end
+			editor.event_system:emit("file_loaded", view, view.buffer)
+		else
+			local psize = tonumber(ffi.C.sysconf(require("cursed.shared")._SC_PAGESIZE)) or 4096
+			local cap = file_size > 0 and bit.band(file_size + psize - 1, bit.bnot(psize - 1)) or psize
+			local loaded_buf = Buffer.from_mmap(mmap_ptr, file_size, cap)
+			view:set_buffer(loaded_buf, { loaded = true })
+			if fp then
+				loaded_buf:set_filepath(fp)
+			end
+			view.file_loaded = true
+			if editor._config and fp then
+				view:activate_mode_for_filepath(fp, editor._config)
+			end
+			editor.event_system:emit("file_loaded", view, loaded_buf)
+		end
+	end)
 
-    local ss = shared.SharedState.from_global()
-    ss:push(ss._ptr.outbox_io, {
-        type = shared.MSG_FILE_LOAD,
-        arg = req_id,
-        ptr = expanded,
-    })
-    return view
+	local ss = shared.SharedState.from_global()
+	ss:push(ss._ptr.outbox_io, {
+		type = shared.MSG_FILE_LOAD,
+		arg = req_id,
+		ptr = expanded,
+	})
+	return view
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -1121,28 +1186,28 @@ local utf8_mod = require("cursed.utf8")
 --- @param workspace_dir string? editor workspace root
 --- @return string?
 local function abs_path(filepath, workspace_dir)
-    if filepath == nil or filepath == "" then
-        return nil
-    end
-    if filepath:sub(1, 1) == "/" then
-        return filepath
-    end
-    local base = workspace_dir or os.getenv("PWD") or "/"
-    return base .. "/" .. filepath
+	if filepath == nil or filepath == "" then
+		return nil
+	end
+	if filepath:sub(1, 1) == "/" then
+		return filepath
+	end
+	local base = workspace_dir or os.getenv("PWD") or "/"
+	return base .. "/" .. filepath
 end
 
 --- Strip a `file://` URI to an absolute path (mirrors completers).
 --- @param uri string?
 --- @return string?
 local function uri_to_path(uri)
-    if uri == nil then
-        return nil
-    end
-    local p = uri:gsub("^file://localhost", ""):gsub("^file://", "")
-    if p == "" then
-        return nil
-    end
-    return p
+	if uri == nil then
+		return nil
+	end
+	local p = uri:gsub("^file://localhost", ""):gsub("^file://", "")
+	if p == "" then
+		return nil
+	end
+	return p
 end
 
 --- Place the primary cursor at an already-loaded view's BYTE position
@@ -1155,35 +1220,35 @@ end
 --- @param line integer 0-based line index
 --- @param byte_col integer 0-based BYTE column
 local function place_cursor_byte(view, line, byte_col)
-    local lc = view:line_count()
-    local li = line or 0
-    if li < 0 then
-        li = 0
-    elseif li >= lc then
-        li = math.max(0, lc - 1)
-    end
-    local clen = view:content_len(li)
-    local col = byte_col or 0
-    if col > clen then
-        col = clen
-    end
-    view:set_single_cursor(li, col)
-    -- Force the next render's auto-scroll: nil guards mean "always scroll".
-    view._scroll_guard_line = nil
-    view._scroll_guard_col = nil
-    -- Zero-flash highlight resync (mirrors undo/redo/format): a far jump
-    -- lands the viewport in cold highlighter territory, and the lazy
-    -- per-frame viewport fill would otherwise leave the new region
-    -- plain until async bucket responses land. Cold-requerying
-    -- synchronously at the cursor's byte makes the jumped-to location
-    -- render correctly on the first frame. Safe no-op when no highlighter
-    -- mode is active (`_hl_enabled == false`).
-    view:clamp_cursor()
-    view:invalidate_wrap_cache()
-    local c = view:p()
-    local starts = view:_hl_line_starts()
-    local byte = (starts[c.line + 1] or 0) + c.col
-    view:_hl_cold_requery(byte)
+	local lc = view:line_count()
+	local li = line or 0
+	if li < 0 then
+		li = 0
+	elseif li >= lc then
+		li = math.max(0, lc - 1)
+	end
+	local clen = view:content_len(li)
+	local col = byte_col or 0
+	if col > clen then
+		col = clen
+	end
+	view:set_single_cursor(li, col)
+	-- Force the next render's auto-scroll: nil guards mean "always scroll".
+	view._scroll_guard_line = nil
+	view._scroll_guard_col = nil
+	-- Zero-flash highlight resync (mirrors undo/redo/format): a far jump
+	-- lands the viewport in cold highlighter territory, and the lazy
+	-- per-frame viewport fill would otherwise leave the new region
+	-- plain until async bucket responses land. Cold-requerying
+	-- synchronously at the cursor's byte makes the jumped-to location
+	-- render correctly on the first frame. Safe no-op when no highlighter
+	-- mode is active (`_hl_enabled == false`).
+	view:clamp_cursor()
+	view:invalidate_wrap_cache()
+	local c = view:p()
+	local starts = view:_hl_line_starts()
+	local byte = (starts[c.line + 1] or 0) + c.col
+	view:_hl_cold_requery(byte)
 end
 
 --- Place the primary cursor at an LSP position in an already-loaded
@@ -1193,17 +1258,17 @@ end
 --- @param line integer 0-based LSP line
 --- @param char integer 0-based UTF-16 code-unit offset
 local function place_cursor_lsp(view, line, char)
-    local buf = view.buffer
-    local lc = view:line_count()
-    local li = line or 0
-    if li < 0 then
-        li = 0
-    elseif li >= lc then
-        li = math.max(0, lc - 1)
-    end
-    local text = buf:line_text(li) or ""
-    local byte_col = utf8_mod.utf16_to_byte_col(text, char or 0)
-    place_cursor_byte(view, li, byte_col)
+	local buf = view.buffer
+	local lc = view:line_count()
+	local li = line or 0
+	if li < 0 then
+		li = 0
+	elseif li >= lc then
+		li = math.max(0, lc - 1)
+	end
+	local text = buf:line_text(li) or ""
+	local byte_col = utf8_mod.utf16_to_byte_col(text, char or 0)
+	place_cursor_byte(view, li, byte_col)
 end
 
 --- Jump within an already-loaded view to a tree-sitter BYTE position
@@ -1215,11 +1280,11 @@ end
 --- @param line integer? 0-based line
 --- @param byte_col integer? 0-based byte column
 function Editor:goto_byte(view, line, byte_col)
-    if view == nil or not view.file_loaded then
-        self.status_message = "target view not loaded"
-        return
-    end
-    place_cursor_byte(view, line or 0, byte_col or 0)
+	if view == nil or not view.file_loaded then
+		self.status_message = "target view not loaded"
+		return
+	end
+	place_cursor_byte(view, line or 0, byte_col or 0)
 end
 
 --- Jump to an LSP Location: URI + 0-based line + UTF-16 character.
@@ -1231,43 +1296,43 @@ end
 --- @param line integer?
 --- @param char integer?
 function Editor:jump_to_location(uri, line, char)
-    local path = uri_to_path(uri)
-    if path == nil then
-        self.status_message = "symbol has no location"
-        return
-    end
-    line = line or 0
-    char = char or 0
-    -- Find an already-open view whose buffer's resolved path matches.
-    local found_idx = nil
-    for i, v in ipairs(self.views) do
-        local fp = v.buffer and v.buffer:filepath()
-        local ap = abs_path(fp, self.workspace_dir)
-        if ap ~= nil and ap == path then
-            found_idx = i
-            break
-        end
-    end
-    if found_idx ~= nil then
-        local view = self.views[found_idx]
-        if found_idx ~= self.active_view then
-            self:set_active_view(found_idx)
-        end
-        -- Only place the cursor when the file is actually loaded; if
-        -- the same path was just queued (file_loaded == false), defer.
-        if view.file_loaded then
-            place_cursor_lsp(view, line, char)
-        else
-            view._pending_goto = { line = line, char = char }
-        end
-        return
-    end
-    -- Not open: open it and defer cursor placement until it loads.
-    self:open_file(path)
-    local new_view = self.views[#self.views]
-    if new_view ~= nil then
-        new_view._pending_goto = { line = line, char = char }
-    end
+	local path = uri_to_path(uri)
+	if path == nil then
+		self.status_message = "symbol has no location"
+		return
+	end
+	line = line or 0
+	char = char or 0
+	-- Find an already-open view whose buffer's resolved path matches.
+	local found_idx = nil
+	for i, v in ipairs(self.views) do
+		local fp = v.buffer and v.buffer:filepath()
+		local ap = abs_path(fp, self.workspace_dir)
+		if ap ~= nil and ap == path then
+			found_idx = i
+			break
+		end
+	end
+	if found_idx ~= nil then
+		local view = self.views[found_idx]
+		if found_idx ~= self.active_view then
+			self:set_active_view(found_idx)
+		end
+		-- Only place the cursor when the file is actually loaded; if
+		-- the same path was just queued (file_loaded == false), defer.
+		if view.file_loaded then
+			place_cursor_lsp(view, line, char)
+		else
+			view._pending_goto = { line = line, char = char }
+		end
+		return
+	end
+	-- Not open: open it and defer cursor placement until it loads.
+	self:open_file(path)
+	local new_view = self.views[#self.views]
+	if new_view ~= nil then
+		new_view._pending_goto = { line = line, char = char }
+	end
 end
 
 ---------------------------------------------------------------------------------------------------
@@ -1303,16 +1368,16 @@ end
 --- @param uri string file:// URI
 --- @return View|nil
 function Editor:view_for_lsp_uri(uri)
-    if uri == nil then
-        return nil
-    end
-    for _, v in ipairs(self.views) do
-        local b = v.buffer
-        if b ~= nil and b.lsp_uri == uri then
-            return v
-        end
-    end
-    return nil
+	if uri == nil then
+		return nil
+	end
+	for _, v in ipairs(self.views) do
+		local b = v.buffer
+		if b ~= nil and b.lsp_uri == uri then
+			return v
+		end
+	end
+	return nil
 end
 
 --- Per-view post-bulk-mutation resync shared by apply_workspace_edit +
@@ -1322,12 +1387,12 @@ end
 --- when no highlighter mode is active.
 --- @param view View
 local function resync_after_external_edit(view)
-    view:clamp_cursor()
-    view:invalidate_wrap_cache()
-    local c = view:p()
-    local starts = view:_hl_line_starts()
-    local byte = (starts[c.line + 1] or 0) + c.col
-    view:_hl_cold_requery(byte)
+	view:clamp_cursor()
+	view:invalidate_wrap_cache()
+	local c = view:p()
+	local starts = view:_hl_line_starts()
+	local byte = (starts[c.line + 1] or 0) + c.col
+	view:_hl_cold_requery(byte)
 end
 
 --- Apply an LSP WorkspaceEdit across the editor's open documents. Handles
@@ -1352,152 +1417,152 @@ end
 ---@param on_complete? fun(result:{touched:string[], skipped:string[]}) fires exactly once when all edits are settled; synchronous when nothing needed a background open
 ---@return {touched:string[], skipped:string[]} touched/skipped SO FAR — the complete verdict (including background opens) arrives via on_complete
 function Editor:apply_workspace_edit(ws_edit, on_complete)
-    local lsp = require("cursed.lsp_client")
-    local touched = {}
-    local skipped = {}
-    local result = { touched = touched, skipped = skipped }
-    if type(ws_edit) ~= "table" then
-        if on_complete ~= nil then
-            on_complete(result)
-        end
-        return result
-    end
+	local lsp = require("cursed.lsp_client")
+	local touched = {}
+	local skipped = {}
+	local result = { touched = touched, skipped = skipped }
+	if type(ws_edit) ~= "table" then
+		if on_complete ~= nil then
+			on_complete(result)
+		end
+		return result
+	end
 
-    -- Collect (uri → TextEdit[]) pairs from both shapes, then apply each
-    -- exactly once. `changes` is a flat map; `documentChanges` is an array.
-    local per_uri = {} ---@type table<string, table[]>
-    local function collect(uri, edits)
-        if type(uri) ~= "string" or uri == "" then
-            return
-        end
-        if type(edits) ~= "table" then
-            return
-        end
-        per_uri[uri] = per_uri[uri] or {}
-        for _, e in ipairs(edits) do
-            per_uri[uri][#per_uri[uri] + 1] = e
-        end
-    end
+	-- Collect (uri → TextEdit[]) pairs from both shapes, then apply each
+	-- exactly once. `changes` is a flat map; `documentChanges` is an array.
+	local per_uri = {} ---@type table<string, table[]>
+	local function collect(uri, edits)
+		if type(uri) ~= "string" or uri == "" then
+			return
+		end
+		if type(edits) ~= "table" then
+			return
+		end
+		per_uri[uri] = per_uri[uri] or {}
+		for _, e in ipairs(edits) do
+			per_uri[uri][#per_uri[uri] + 1] = e
+		end
+	end
 
-    local changes = ws_edit.changes
-    if type(changes) == "table" then
-        for uri, edits in pairs(changes) do
-            collect(uri, edits)
-        end
-    end
+	local changes = ws_edit.changes
+	if type(changes) == "table" then
+		for uri, edits in pairs(changes) do
+			collect(uri, edits)
+		end
+	end
 
-    local doc_changes = ws_edit.documentChanges
-    if type(doc_changes) == "table" then
-        for _, dc in ipairs(doc_changes) do
-            if type(dc) == "table" then
-                -- TextDocumentEdit: { textDocument: { uri }, edits: TextEdit[] }
-                local td = dc.textDocument
-                if type(td) == "table" and type(td.uri) == "string" and dc.edits ~= nil then
-                    collect(td.uri, dc.edits)
-                else
-                    -- CreateFile / RenameFile / DeleteFile / skip
-                    local kind = dc.kind or "resourceOperation"
-                    skipped[#skipped + 1] = tostring(kind)
-                end
-            end
-        end
-    end
+	local doc_changes = ws_edit.documentChanges
+	if type(doc_changes) == "table" then
+		for _, dc in ipairs(doc_changes) do
+			if type(dc) == "table" then
+				-- TextDocumentEdit: { textDocument: { uri }, edits: TextEdit[] }
+				local td = dc.textDocument
+				if type(td) == "table" and type(td.uri) == "string" and dc.edits ~= nil then
+					collect(td.uri, dc.edits)
+				else
+					-- CreateFile / RenameFile / DeleteFile / skip
+					local kind = dc.kind or "resourceOperation"
+					skipped[#skipped + 1] = tostring(kind)
+				end
+			end
+		end
+	end
 
-    -- Apply one uri's edits to an ALREADY-OPEN view's buffer: one undo
-    -- group via Buffer:apply_lsp_edits (right-to-left so coords stay
-    -- valid), resync, then didChange-sync the mutated text back to the
-    -- doc's bound server so its view tracks ours. Shared by the
-    -- synchronous (open-document) path here and the deferred
-    -- (background-open) path in _drain_pending_apply_edits.
-    local function apply_to_view(view, edits)
-        local buf = view.buffer
-        if buf == nil then
-            return false
-        end
-        buf:apply_lsp_edits(edits)
-        resync_after_external_edit(view)
-        -- Sync the (now-mutated) text back to the server. Pass
-        -- buf.lsp_client_id directly inline so LLS keeps the `~= nil`
-        -- narrowing from the if-guard (an intermediate local would widen
-        -- back to integer|nil). The doc owns its bound client (chosen at
-        -- mode_enter by the file's language); for a rename every affected
-        -- doc belongs to the requesting server, so this is correct.
-        if buf.lsp_client_id ~= nil and buf.lsp_uri ~= nil then
-            local v = buf.lsp_version or 0
-            lsp.sync_change(buf.lsp_client_id, buf.lsp_uri, v, function()
-                return buf:write_text_direct()
-            end)
-        end
-        return true
-    end
+	-- Apply one uri's edits to an ALREADY-OPEN view's buffer: one undo
+	-- group via Buffer:apply_lsp_edits (right-to-left so coords stay
+	-- valid), resync, then didChange-sync the mutated text back to the
+	-- doc's bound server so its view tracks ours. Shared by the
+	-- synchronous (open-document) path here and the deferred
+	-- (background-open) path in _drain_pending_apply_edits.
+	local function apply_to_view(view, edits)
+		local buf = view.buffer
+		if buf == nil then
+			return false
+		end
+		buf:apply_lsp_edits(edits)
+		resync_after_external_edit(view)
+		-- Sync the (now-mutated) text back to the server. Pass
+		-- buf.lsp_client_id directly inline so LLS keeps the `~= nil`
+		-- narrowing from the if-guard (an intermediate local would widen
+		-- back to integer|nil). The doc owns its bound client (chosen at
+		-- mode_enter by the file's language); for a rename every affected
+		-- doc belongs to the requesting server, so this is correct.
+		if buf.lsp_client_id ~= nil and buf.lsp_uri ~= nil then
+			local v = buf.lsp_version or 0
+			lsp.sync_change(buf.lsp_client_id, buf.lsp_uri, v, function()
+				return buf:write_text_direct()
+			end)
+		end
+		return true
+	end
 
-    -- Pending background opens: each one parks its edits on the new view
-    -- (`view._pending_apply_edits` + a `done` continuation) and decrements
-    -- `pending`; `finish` fires `on_complete` exactly once when the last
-    -- settle lands — OR synchronously here when nothing needed a load.
-    local pending = 0
-    local settled = false
-    local function finish()
-        if settled then
-            return
-        end
-        if pending == 0 then
-            settled = true
-            if on_complete ~= nil then
-                on_complete(result)
-            end
-        end
-    end
+	-- Pending background opens: each one parks its edits on the new view
+	-- (`view._pending_apply_edits` + a `done` continuation) and decrements
+	-- `pending`; `finish` fires `on_complete` exactly once when the last
+	-- settle lands — OR synchronously here when nothing needed a load.
+	local pending = 0
+	local settled = false
+	local function finish()
+		if settled then
+			return
+		end
+		if pending == 0 then
+			settled = true
+			if on_complete ~= nil then
+				on_complete(result)
+			end
+		end
+	end
 
-    -- URI → absolute path for the background-open path.
-    local function uri_to_path(uri)
-        return uri:gsub("^file://localhost", ""):gsub("^file://", "")
-    end
+	-- URI → absolute path for the background-open path.
+	local function uri_to_path(uri)
+		return uri:gsub("^file://localhost", ""):gsub("^file://", "")
+	end
 
-    for uri, edits in pairs(per_uri) do
-        local view = self:view_for_lsp_uri(uri)
-        if view ~= nil and view.buffer ~= nil then
-            -- Already open: apply synchronously now.
-            if apply_to_view(view, edits) then
-                touched[#touched + 1] = uri
-            else
-                skipped[#skipped + 1] = uri
-            end
-        else
-            -- Not open: background-visit the file and defer the apply
-            -- until `file_loaded` lands (mode_enter will have bound
-            -- lsp_client_id/uri + didOpen'd the original text by then).
-            local path = uri_to_path(uri)
-            local new_view = self:open_file_background(path)
-            if new_view == nil then
-                skipped[#skipped + 1] = uri
-            else
-                pending = pending + 1
-                new_view._pending_apply_edits = edits
-                new_view._pending_apply_uri = uri
-                -- `done(ok)` records the uri as touched (ok) or skipped
-                -- (!ok) and decrements `pending`; `finish` fires
-                -- `on_complete` exactly once when the last slot settles.
-                -- Not-OK settles come from _drain_pending_apply_edits's
-                -- error path (file_load_error / buffer vanished mid-load).
-                new_view._pending_apply_done = function(ok)
-                    if ok then
-                        touched[#touched + 1] = uri
-                    else
-                        skipped[#skipped + 1] = uri
-                    end
-                    pending = pending - 1
-                    finish()
-                end
-            end
-        end
-    end
+	for uri, edits in pairs(per_uri) do
+		local view = self:view_for_lsp_uri(uri)
+		if view ~= nil and view.buffer ~= nil then
+			-- Already open: apply synchronously now.
+			if apply_to_view(view, edits) then
+				touched[#touched + 1] = uri
+			else
+				skipped[#skipped + 1] = uri
+			end
+		else
+			-- Not open: background-visit the file and defer the apply
+			-- until `file_loaded` lands (mode_enter will have bound
+			-- lsp_client_id/uri + didOpen'd the original text by then).
+			local path = uri_to_path(uri)
+			local new_view = self:open_file_background(path)
+			if new_view == nil then
+				skipped[#skipped + 1] = uri
+			else
+				pending = pending + 1
+				new_view._pending_apply_edits = edits
+				new_view._pending_apply_uri = uri
+				-- `done(ok)` records the uri as touched (ok) or skipped
+				-- (!ok) and decrements `pending`; `finish` fires
+				-- `on_complete` exactly once when the last slot settles.
+				-- Not-OK settles come from _drain_pending_apply_edits's
+				-- error path (file_load_error / buffer vanished mid-load).
+				new_view._pending_apply_done = function(ok)
+					if ok then
+						touched[#touched + 1] = uri
+					else
+						skipped[#skipped + 1] = uri
+					end
+					pending = pending - 1
+					finish()
+				end
+			end
+		end
+	end
 
-    -- Everything that was already open has settled; finish synchronously
-    -- unless background opens are still in flight (those call finish from
-    -- their done continuations / _drain_pending_apply_edits).
-    finish()
-    return result
+	-- Everything that was already open has settled; finish synchronously
+	-- unless background opens are still in flight (those call finish from
+	-- their done continuations / _drain_pending_apply_edits).
+	finish()
+	return result
 end
 
 --- Drain a background-opened view's parked workspace edits once its file
@@ -1518,69 +1583,69 @@ end
 ---@param view View
 ---@param ok? boolean default true; false = load failed, skip the apply
 function Editor:_drain_pending_apply_edits(view, ok)
-    if ok == nil then
-        ok = true
-    end
-    local edits = view._pending_apply_edits
-    if edits == nil then
-        return
-    end
-    local done = view._pending_apply_done
-    view._pending_apply_edits = nil
-    view._pending_apply_uri = nil
-    view._pending_apply_done = nil
-    local lsp = require("cursed.lsp_client")
-    local buf = view.buffer
-    if ok and buf ~= nil then
-        buf:apply_lsp_edits(edits)
-        resync_after_external_edit(view)
-        if buf.lsp_client_id ~= nil and buf.lsp_uri ~= nil then
-            local v = buf.lsp_version or 0
-            lsp.sync_change(buf.lsp_client_id, buf.lsp_uri, v, function()
-                return buf:write_text_direct()
-            end)
-        end
-    else
-        ok = false -- buffer vanished mid-load / load failed → skip
-    end
-    if done ~= nil then
-        done(ok)
-    end
+	if ok == nil then
+		ok = true
+	end
+	local edits = view._pending_apply_edits
+	if edits == nil then
+		return
+	end
+	local done = view._pending_apply_done
+	view._pending_apply_edits = nil
+	view._pending_apply_uri = nil
+	view._pending_apply_done = nil
+	local lsp = require("cursed.lsp_client")
+	local buf = view.buffer
+	if ok and buf ~= nil then
+		buf:apply_lsp_edits(edits)
+		resync_after_external_edit(view)
+		if buf.lsp_client_id ~= nil and buf.lsp_uri ~= nil then
+			local v = buf.lsp_version or 0
+			lsp.sync_change(buf.lsp_client_id, buf.lsp_uri, v, function()
+				return buf:write_text_direct()
+			end)
+		end
+	else
+		ok = false -- buffer vanished mid-load / load failed → skip
+	end
+	if done ~= nil then
+		done(ok)
+	end
 end
 
 --- Insert a file's contents at the cursor (async via IO lane).
 ---@param filepath string raw path from the user (may contain ~, $ENV)
 function Editor:insert_file(filepath)
-    local expanded = find_file.expand_path(filepath)
+	local expanded = find_file.expand_path(filepath)
 
-    if find_file.is_directory(expanded) then
-        self.status_message = "cannot insert directory: " .. filepath
-        return
-    end
+	if find_file.is_directory(expanded) then
+		self.status_message = "cannot insert directory: " .. filepath
+		return
+	end
 
-    local editor = self
-    local req_id = self:_next_file_op_id()
-    -- The on_done is a no-op — MSG_INSERT_FILE doesn't return a
-    -- Buffer; the lane runs the insert synchronously-off-main and
-    -- the reply MSG_FILE_INSERTED is a separate drain path. We
-    -- register just so the req_id is tracked for error replies.
-    self._pending_ops_count = (self._pending_ops_count or 0) + 1
-    local event_name = "file_op:" .. req_id
-    local handler
-    handler = self.event_system:on(event_name, function(_, payload)
-        self.event_system:off(event_name, handler)
-        self._pending_ops_count = self._pending_ops_count - 1
-        if payload.err then
-            editor.status_message = payload.err
-        end
-    end)
+	local editor = self
+	local req_id = self:_next_file_op_id()
+	-- The on_done is a no-op — MSG_INSERT_FILE doesn't return a
+	-- Buffer; the lane runs the insert synchronously-off-main and
+	-- the reply MSG_FILE_INSERTED is a separate drain path. We
+	-- register just so the req_id is tracked for error replies.
+	self._pending_ops_count = (self._pending_ops_count or 0) + 1
+	local event_name = "file_op:" .. req_id
+	local handler
+	handler = self.event_system:on(event_name, function(_, payload)
+		self.event_system:off(event_name, handler)
+		self._pending_ops_count = self._pending_ops_count - 1
+		if payload.err then
+			editor.status_message = payload.err
+		end
+	end)
 
-    local ss = shared.SharedState.from_global()
-    ss:push(ss._ptr.outbox_io, {
-        type = shared.MSG_INSERT_FILE,
-        arg = req_id,
-        ptr = expanded,
-    })
+	local ss = shared.SharedState.from_global()
+	ss:push(ss._ptr.outbox_io, {
+		type = shared.MSG_INSERT_FILE,
+		arg = req_id,
+		ptr = expanded,
+	})
 end
 
 --- Read a file and hand it off as a Buffer via a callback.
@@ -1596,80 +1661,132 @@ end
 ---@param on_done fun(buf: Buffer|nil, err: string?) called with the Buffer
 ---                    on success, or (nil, err) on failure.
 function Editor:read_into_buffer(filepath, on_done)
-    local expanded = find_file.expand_path(filepath)
+	local expanded = find_file.expand_path(filepath)
 
-    if find_file.is_directory(expanded) then
-        if on_done then
-            on_done(nil, "is a directory: " .. filepath)
-        end
-        return
-    end
+	if find_file.is_directory(expanded) then
+		if on_done then
+			on_done(nil, "is a directory: " .. filepath)
+		end
+		return
+	end
 
-    local req_id = self:_next_file_op_id()
-    self._pending_ops_count = (self._pending_ops_count or 0) + 1
-    local event_name = "file_op:" .. req_id
-    local handler
-    handler = self.event_system:on(event_name, function(_, payload)
-        self.event_system:off(event_name, handler)
-        self._pending_ops_count = self._pending_ops_count - 1
-        if payload.err then
-            if on_done then
-                on_done(nil, payload.err)
-            end
-            return
-        end
-        local mmap_ptr = payload.mmap
-        local file_size = payload.size
-        ---@cast file_size integer
-        if mmap_ptr == nil then
-            local placeholder = Buffer.new()
-            placeholder:set_filepath(expanded)
-            if on_done then
-                on_done(placeholder, nil)
-            end
-            return
-        end
-        local psize = tonumber(ffi.C.sysconf(require("cursed.shared")._SC_PAGESIZE)) or 4096
-        local cap = file_size > 0 and bit.band(file_size + psize - 1, bit.bnot(psize - 1)) or psize
-        local buf = Buffer.from_mmap(mmap_ptr, file_size, cap)
-        buf:set_filepath(expanded)
-        if on_done then
-            on_done(buf, nil)
-        end
-    end)
+	local req_id = self:_next_file_op_id()
+	self._pending_ops_count = (self._pending_ops_count or 0) + 1
+	local event_name = "file_op:" .. req_id
+	local handler
+	handler = self.event_system:on(event_name, function(_, payload)
+		self.event_system:off(event_name, handler)
+		self._pending_ops_count = self._pending_ops_count - 1
+		if payload.err then
+			if on_done then
+				on_done(nil, payload.err)
+			end
+			return
+		end
+		local mmap_ptr = payload.mmap
+		local file_size = payload.size
+		---@cast file_size integer
+		if mmap_ptr == nil then
+			local placeholder = Buffer.new()
+			placeholder:set_filepath(expanded)
+			if on_done then
+				on_done(placeholder, nil)
+			end
+			return
+		end
+		local psize = tonumber(ffi.C.sysconf(require("cursed.shared")._SC_PAGESIZE)) or 4096
+		local cap = file_size > 0 and bit.band(file_size + psize - 1, bit.bnot(psize - 1)) or psize
+		local buf = Buffer.from_mmap(mmap_ptr, file_size, cap)
+		buf:set_filepath(expanded)
+		if on_done then
+			on_done(buf, nil)
+		end
+	end)
 
-    local ss = shared.SharedState.from_global()
-    ss:push(ss._ptr.outbox_io, {
-        type = shared.MSG_FILE_LOAD,
-        arg = req_id,
-        ptr = expanded,
-    })
+	local ss = shared.SharedState.from_global()
+	ss:push(ss._ptr.outbox_io, {
+		type = shared.MSG_FILE_LOAD,
+		arg = req_id,
+		ptr = expanded,
+	})
+end
+
+--- Load a file into a Buffer (coroutine variant).
+--- Returns (buf, nil) on success, (nil, err) on failure.
+---
+--- Usage:
+---   local payload = async.await(editor:read_into_buffer_async(path))
+---   if payload.err then ... end
+---   local buf = Editor._payload_to_buffer(payload, path)
+---
+--- The raw token payload has {mmap, size} or {err}. Use the helper
+--- or construct a Buffer directly from the mmap.
+---@param filepath string
+---@return AsyncToken
+function Editor:load_async(filepath)
+	local expanded = find_file.expand_path(filepath)
+	local req_id = self:_next_file_op_id()
+	self._pending_ops_count = (self._pending_ops_count or 0) + 1
+	local ss = shared.SharedState.from_global()
+	ss:push(ss._ptr.outbox_io, {
+		type = shared.MSG_FILE_LOAD,
+		arg = req_id,
+		ptr = expanded,
+	})
+	return async.token(self.event_system, "file_op:" .. req_id, function()
+		self._pending_ops_count = (self._pending_ops_count or 1) - 1
+	end)
+end
+
+--- Convert a load_async payload into a Buffer (or nil on error/empty).
+--- Shared by read_into_buffer and open_file flows.
+---@param payload table {mmap, size} or {err}
+---@param filepath string
+---@return Buffer|nil
+---@return string|nil err
+function Editor._payload_to_buffer(payload, filepath)
+	if payload.err then
+		return nil, payload.err
+	end
+	local mmap_ptr = payload.mmap
+	local file_size = payload.size
+	---@cast file_size integer
+	if mmap_ptr == nil then
+		local placeholder = Buffer.new()
+		placeholder:set_filepath(filepath)
+		return placeholder, nil
+	end
+	local psize = tonumber(ffi.C.sysconf(require("cursed.shared")._SC_PAGESIZE)) or 4096
+	local cap = file_size > 0 and bit.band(file_size + psize - 1, bit.bnot(psize - 1)) or psize
+	local buf = Buffer.from_mmap(mmap_ptr, file_size, cap)
+	buf:set_filepath(filepath)
+	return buf, nil
 end
 --- Save the current buffer to its filepath (async via IO lane).
 function Editor:save()
-    local view = self:current_view()
-    if not view then
-        return
-    end
-    local buf = view.buffer
-    local fp = buf:filepath()
-    if fp == nil then
-        self.status_message = "no file"
-        return
-    end
-    self:_async_save(buf)
+	local view = self:current_view()
+	if not view then
+		return
+	end
+	local buf = view.buffer
+	local fp = buf:filepath()
+	if fp == nil then
+		self.status_message = "no file"
+		return
+	end
+	self:_async_save(buf)
 end
 
 --- Save the current buffer to a new filepath (async via IO lane).
 ---@param filepath string raw path from the user (may contain ~, $ENV)
 function Editor:save_as(filepath)
-    local view = self:current_view()
-    if not view then
-        return
-    end
-    local expanded = find_file.expand_path(filepath)
-    view.buffer:set_filepath(expanded)
-    self:_async_save(view.buffer)
+	local view = self:current_view()
+	if not view then
+		return
+	end
+	local expanded = find_file.expand_path(filepath)
+	view.buffer:set_filepath(expanded)
+	self:_async_save(view.buffer)
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -1691,61 +1808,95 @@ end
 --- editor recreation and is stable across the headless / fork paths.
 ---@return integer
 function Editor:_next_file_op_id()
-    return shared.next_file_op_id()
+	return shared.next_file_op_id()
 end
 
 --- Delete a file via IO lane (unlink(2)).
 ---@param filepath string absolute path (already expanded)
 ---@param on_done fun(success: boolean, err: string?)? optional callback
 function Editor:delete_file(filepath, on_done)
-    local ss = shared.SharedState.from_global()
-    local req_id = self:_next_file_op_id()
-    if on_done then
-        self._pending_ops_count = (self._pending_ops_count or 0) + 1
-        local event_name = "file_op:" .. req_id
-        local handler
-        handler = self.event_system:on(event_name, function(_, payload)
-            self.event_system:off(event_name, handler)
-            self._pending_ops_count = self._pending_ops_count - 1
-            if payload.err then
-                on_done(false, payload.err)
-            else
-                on_done(true, nil)
-            end
-        end)
-    end
-    ss:push(ss._ptr.outbox_io, {
-        type = shared.MSG_FILE_DELETE,
-        arg = req_id,
-        ptr = filepath,
-    })
+	local ss = shared.SharedState.from_global()
+	local req_id = self:_next_file_op_id()
+	if on_done then
+		self._pending_ops_count = (self._pending_ops_count or 0) + 1
+		local event_name = "file_op:" .. req_id
+		local handler
+		handler = self.event_system:on(event_name, function(_, payload)
+			self.event_system:off(event_name, handler)
+			self._pending_ops_count = self._pending_ops_count - 1
+			if payload.err then
+				on_done(false, payload.err)
+			else
+				on_done(true, nil)
+			end
+		end)
+	end
+	ss:push(ss._ptr.outbox_io, {
+		type = shared.MSG_FILE_DELETE,
+		arg = req_id,
+		ptr = filepath,
+	})
+end
+
+--- Delete a file (coroutine variant). Returns a token for async.await().
+---@param filepath string
+---@return AsyncToken
+function Editor:delete_async(filepath)
+	local req_id = self:_next_file_op_id()
+	self._pending_ops_count = (self._pending_ops_count or 0) + 1
+	local ss = shared.SharedState.from_global()
+	ss:push(ss._ptr.outbox_io, {
+		type = shared.MSG_FILE_DELETE,
+		arg = req_id,
+		ptr = filepath,
+	})
+	return async.token(self.event_system, "file_op:" .. req_id, function()
+		self._pending_ops_count = (self._pending_ops_count or 1) - 1
+	end)
 end
 
 --- Create a new file via IO lane (O_CREAT|O_EXCL — fails if file exists).
 ---@param filepath string absolute path (already expanded)
 ---@param on_done fun(success: boolean, err: string?)? optional callback
 function Editor:create_file(filepath, on_done)
-    local ss = shared.SharedState.from_global()
-    local req_id = self:_next_file_op_id()
-    if on_done then
-        self._pending_ops_count = (self._pending_ops_count or 0) + 1
-        local event_name = "file_op:" .. req_id
-        local handler
-        handler = self.event_system:on(event_name, function(_, payload)
-            self.event_system:off(event_name, handler)
-            self._pending_ops_count = self._pending_ops_count - 1
-            if payload.err then
-                on_done(false, payload.err)
-            else
-                on_done(true, nil)
-            end
-        end)
-    end
-    ss:push(ss._ptr.outbox_io, {
-        type = shared.MSG_FILE_CREATE,
-        arg = req_id,
-        ptr = filepath,
-    })
+	local ss = shared.SharedState.from_global()
+	local req_id = self:_next_file_op_id()
+	if on_done then
+		self._pending_ops_count = (self._pending_ops_count or 0) + 1
+		local event_name = "file_op:" .. req_id
+		local handler
+		handler = self.event_system:on(event_name, function(_, payload)
+			self.event_system:off(event_name, handler)
+			self._pending_ops_count = self._pending_ops_count - 1
+			if payload.err then
+				on_done(false, payload.err)
+			else
+				on_done(true, nil)
+			end
+		end)
+	end
+	ss:push(ss._ptr.outbox_io, {
+		type = shared.MSG_FILE_CREATE,
+		arg = req_id,
+		ptr = filepath,
+	})
+end
+
+--- Create a new file (coroutine variant). Returns a token for async.await().
+---@param filepath string
+---@return AsyncToken
+function Editor:create_async(filepath)
+	local req_id = self:_next_file_op_id()
+	self._pending_ops_count = (self._pending_ops_count or 0) + 1
+	local ss = shared.SharedState.from_global()
+	ss:push(ss._ptr.outbox_io, {
+		type = shared.MSG_FILE_CREATE,
+		arg = req_id,
+		ptr = filepath,
+	})
+	return async.token(self.event_system, "file_op:" .. req_id, function()
+		self._pending_ops_count = (self._pending_ops_count or 1) - 1
+	end)
 end
 
 --- Make a single directory via IO lane (mkdir(2), NOT mkdir -p).
@@ -1753,27 +1904,44 @@ end
 ---@param dirpath string absolute directory path (already expanded)
 ---@param on_done fun(success: boolean, err: string?)? optional callback
 function Editor:mkdir(dirpath, on_done)
-    local ss = shared.SharedState.from_global()
-    local req_id = self:_next_file_op_id()
-    if on_done then
-        self._pending_ops_count = (self._pending_ops_count or 0) + 1
-        local event_name = "file_op:" .. req_id
-        local handler
-        handler = self.event_system:on(event_name, function(_, payload)
-            self.event_system:off(event_name, handler)
-            self._pending_ops_count = self._pending_ops_count - 1
-            if payload.err then
-                on_done(false, payload.err)
-            else
-                on_done(true, nil)
-            end
-        end)
-    end
-    ss:push(ss._ptr.outbox_io, {
-        type = shared.MSG_FILE_MKDIR,
-        arg = req_id,
-        ptr = dirpath,
-    })
+	local ss = shared.SharedState.from_global()
+	local req_id = self:_next_file_op_id()
+	if on_done then
+		self._pending_ops_count = (self._pending_ops_count or 0) + 1
+		local event_name = "file_op:" .. req_id
+		local handler
+		handler = self.event_system:on(event_name, function(_, payload)
+			self.event_system:off(event_name, handler)
+			self._pending_ops_count = self._pending_ops_count - 1
+			if payload.err then
+				on_done(false, payload.err)
+			else
+				on_done(true, nil)
+			end
+		end)
+	end
+	ss:push(ss._ptr.outbox_io, {
+		type = shared.MSG_FILE_MKDIR,
+		arg = req_id,
+		ptr = dirpath,
+	})
+end
+
+--- Make a directory (coroutine variant). Returns a token for async.await().
+---@param dirpath string
+---@return AsyncToken
+function Editor:mkdir_async(dirpath)
+	local req_id = self:_next_file_op_id()
+	self._pending_ops_count = (self._pending_ops_count or 0) + 1
+	local ss = shared.SharedState.from_global()
+	ss:push(ss._ptr.outbox_io, {
+		type = shared.MSG_FILE_MKDIR,
+		arg = req_id,
+		ptr = dirpath,
+	})
+	return async.token(self.event_system, "file_op:" .. req_id, function()
+		self._pending_ops_count = (self._pending_ops_count or 1) - 1
+	end)
 end
 
 --- chmod(2): set the file mode bits.
@@ -1781,29 +1949,48 @@ end
 ---@param mode integer 9-bit mode (e.g. tonumber("0755", 8) → 493)
 ---@param on_done fun(success: boolean, err: string?)? optional callback
 function Editor:chmod(filepath, mode, on_done)
-    local ss = shared.SharedState.from_global()
-    local req_id = self:_next_file_op_id()
-    if on_done then
-        self._pending_ops_count = (self._pending_ops_count or 0) + 1
-        local event_name = "file_op:" .. req_id
-        local handler
-        handler = self.event_system:on(event_name, function(_, payload)
-            self.event_system:off(event_name, handler)
-            self._pending_ops_count = self._pending_ops_count - 1
-            if payload.err then
-                on_done(false, payload.err)
-            else
-                on_done(true, nil)
-            end
-        end)
-    end
-    -- Pack mode in low 9 bits, req_id above; lane splits them back.
-    local packed = bit.bor(bit.lshift(req_id, 9), bit.band(mode, 0x1FF))
-    ss:push(ss._ptr.outbox_io, {
-        type = shared.MSG_FILE_CHMOD,
-        arg = packed,
-        ptr = filepath,
-    })
+	local ss = shared.SharedState.from_global()
+	local req_id = self:_next_file_op_id()
+	if on_done then
+		self._pending_ops_count = (self._pending_ops_count or 0) + 1
+		local event_name = "file_op:" .. req_id
+		local handler
+		handler = self.event_system:on(event_name, function(_, payload)
+			self.event_system:off(event_name, handler)
+			self._pending_ops_count = self._pending_ops_count - 1
+			if payload.err then
+				on_done(false, payload.err)
+			else
+				on_done(true, nil)
+			end
+		end)
+	end
+	-- Pack mode in low 9 bits, req_id above; lane splits them back.
+	local packed = bit.bor(bit.lshift(req_id, 9), bit.band(mode, 0x1FF))
+	ss:push(ss._ptr.outbox_io, {
+		type = shared.MSG_FILE_CHMOD,
+		arg = packed,
+		ptr = filepath,
+	})
+end
+
+--- chmod (coroutine variant). Returns a token for async.await().
+---@param filepath string
+---@param mode integer
+---@return AsyncToken
+function Editor:chmod_async(filepath, mode)
+	local req_id = self:_next_file_op_id()
+	self._pending_ops_count = (self._pending_ops_count or 0) + 1
+	local packed = bit.bor(bit.lshift(req_id, 9), bit.band(mode, 0x1FF))
+	local ss = shared.SharedState.from_global()
+	ss:push(ss._ptr.outbox_io, {
+		type = shared.MSG_FILE_CHMOD,
+		arg = packed,
+		ptr = filepath,
+	})
+	return async.token(self.event_system, "file_op:" .. req_id, function()
+		self._pending_ops_count = (self._pending_ops_count or 1) - 1
+	end)
 end
 
 --- rename(2) via IO lane.
@@ -1811,45 +1998,82 @@ end
 ---@param dst string absolute destination path (already expanded)
 ---@param on_done fun(success: boolean, err: string?)? optional callback
 function Editor:rename(src, dst, on_done)
-    local ss = shared.SharedState.from_global()
-    local req_id = self:_next_file_op_id()
-    if on_done then
-        self._pending_ops_count = (self._pending_ops_count or 0) + 1
-        local event_name = "file_op:" .. req_id
-        local handler
-        handler = self.event_system:on(event_name, function(_, payload)
-            self.event_system:off(event_name, handler)
-            self._pending_ops_count = self._pending_ops_count - 1
-            if payload.err then
-                on_done(false, payload.err)
-            else
-                on_done(true, nil)
-            end
-        end)
-    end
-    -- Build a heap FileMoveReq{ src_len, dst_len, src bytes, dst bytes }.
-    local req_size = ffi.sizeof("struct FileMoveReq") + #src + #dst
-    local req = ffi.C.malloc(req_size)
-    if req == nil then
-        if on_done then
-            on_done(false, "malloc failed")
-        end
-        return
-    end
-    local hdr = ffi.cast("struct FileMoveReq *", req)
-    hdr.src_len = #src
-    hdr.dst_len = #dst
-    -- Inline src bytes at offset = sizeof(FileMoveReq)
-    local src_dst = ffi.cast("char *", req) + ffi.sizeof("struct FileMoveReq")
-    ffi.copy(src_dst, src, #src)
-    -- Inline dst bytes after that
-    ffi.copy(src_dst + #src, dst, #dst)
+	local ss = shared.SharedState.from_global()
+	local req_id = self:_next_file_op_id()
+	if on_done then
+		self._pending_ops_count = (self._pending_ops_count or 0) + 1
+		local event_name = "file_op:" .. req_id
+		local handler
+		handler = self.event_system:on(event_name, function(_, payload)
+			self.event_system:off(event_name, handler)
+			self._pending_ops_count = self._pending_ops_count - 1
+			if payload.err then
+				on_done(false, payload.err)
+			else
+				on_done(true, nil)
+			end
+		end)
+	end
+	-- Build a heap FileMoveReq{ src_len, dst_len, src bytes, dst bytes }.
+	local req_size = ffi.sizeof("struct FileMoveReq") + #src + #dst
+	local req = ffi.C.malloc(req_size)
+	if req == nil then
+		if on_done then
+			on_done(false, "malloc failed")
+		end
+		return
+	end
+	local hdr = ffi.cast("struct FileMoveReq *", req)
+	hdr.src_len = #src
+	hdr.dst_len = #dst
+	-- Inline src bytes at offset = sizeof(FileMoveReq)
+	local src_dst = ffi.cast("char *", req) + ffi.sizeof("struct FileMoveReq")
+	ffi.copy(src_dst, src, #src)
+	-- Inline dst bytes after that
+	ffi.copy(src_dst + #src, dst, #dst)
 
-    ss:push(ss._ptr.outbox_io, {
-        type = shared.MSG_FILE_RENAME,
-        arg = req_id,
-        ptr = req, -- lane frees on completion
-    })
+	ss:push(ss._ptr.outbox_io, {
+		type = shared.MSG_FILE_RENAME,
+		arg = req_id,
+		ptr = req, -- lane frees on completion
+	})
+end
+
+--- Rename a file (coroutine variant). Returns a token for async.await().
+---@param src string
+---@param dst string
+---@return AsyncToken
+function Editor:rename_async(src, dst)
+	local req_id = self:_next_file_op_id()
+	self._pending_ops_count = (self._pending_ops_count or 0) + 1
+	local ss = shared.SharedState.from_global()
+	local req_size = ffi.sizeof("struct FileMoveReq") + #src + #dst
+	local req = ffi.C.malloc(req_size)
+	if req == nil then
+		-- Fire the completion now so the count still decrements.
+		ss:push(ss._ptr.inbox_io, {
+			type = shared.MSG_FILE_ERROR,
+			arg = req_id,
+			ptr = nil,
+		})
+		return async.token(self.event_system, "file_op:" .. req_id, function()
+			self._pending_ops_count = (self._pending_ops_count or 1) - 1
+		end)
+	end
+	local hdr = ffi.cast("struct FileMoveReq *", req)
+	hdr.src_len = #src
+	hdr.dst_len = #dst
+	local src_dst = ffi.cast("char *", req) + ffi.sizeof("struct FileMoveReq")
+	ffi.copy(src_dst, src, #src)
+	ffi.copy(src_dst + #src, dst, #dst)
+	ss:push(ss._ptr.outbox_io, {
+		type = shared.MSG_FILE_RENAME,
+		arg = req_id,
+		ptr = req,
+	})
+	return async.token(self.event_system, "file_op:" .. req_id, function()
+		self._pending_ops_count = (self._pending_ops_count or 1) - 1
+	end)
 end
 
 --- List directory entries via IO lane. Reads dirlist_pack layout
@@ -1859,25 +2083,43 @@ end
 ---@param dirpath string absolute directory path (already expanded)
 ---@param on_done fun(entries: table[]?, err: string?)
 function Editor:dirlist(dirpath, on_done)
-    local ss = shared.SharedState.from_global()
-    local req_id = self:_next_file_op_id()
-    self._pending_ops_count = (self._pending_ops_count or 0) + 1
-    local event_name = "file_op:" .. req_id
-    local handler
-    handler = self.event_system:on(event_name, function(_, payload)
-        self.event_system:off(event_name, handler)
-        self._pending_ops_count = self._pending_ops_count - 1
-        if payload.err then
-            on_done(nil, payload.err)
-        else
-            on_done(payload.entries, nil)
-        end
-    end)
-    ss:push(ss._ptr.outbox_io, {
-        type = shared.MSG_FILE_DIRLIST,
-        arg = req_id,
-        ptr = dirpath,
-    })
+	local ss = shared.SharedState.from_global()
+	local req_id = self:_next_file_op_id()
+	self._pending_ops_count = (self._pending_ops_count or 0) + 1
+	local event_name = "file_op:" .. req_id
+	local handler
+	handler = self.event_system:on(event_name, function(_, payload)
+		self.event_system:off(event_name, handler)
+		self._pending_ops_count = self._pending_ops_count - 1
+		if payload.err then
+			on_done(nil, payload.err)
+		else
+			on_done(payload.entries, nil)
+		end
+	end)
+	ss:push(ss._ptr.outbox_io, {
+		type = shared.MSG_FILE_DIRLIST,
+		arg = req_id,
+		ptr = dirpath,
+	})
+end
+
+--- List directory entries (coroutine variant). Returns a token for async.await().
+--- Payload is { entries = { {name, is_dir}, ... } } on success, { err = ... } on failure.
+---@param dirpath string
+---@return AsyncToken
+function Editor:dirlist_async(dirpath)
+	local req_id = self:_next_file_op_id()
+	self._pending_ops_count = (self._pending_ops_count or 0) + 1
+	local ss = shared.SharedState.from_global()
+	ss:push(ss._ptr.outbox_io, {
+		type = shared.MSG_FILE_DIRLIST,
+		arg = req_id,
+		ptr = dirpath,
+	})
+	return async.token(self.event_system, "file_op:" .. req_id, function()
+		self._pending_ops_count = (self._pending_ops_count or 1) - 1
+	end)
 end
 
 --- Serialize a Buffer and write it to a file via MSG_FILE_WRITE.
@@ -1894,60 +2136,104 @@ end
 ---@param filepath string absolute path (already expanded)
 ---@param on_done fun(success: boolean, err: string?)? optional callback
 function Editor:save_buffer_to_file(buffer, filepath, on_done)
-    local real_buf
-    if type(buffer) == "table" and buffer.buffer ~= nil then
-        -- View
-        real_buf = buffer.buffer
-    else
-        real_buf = buffer
-    end
-    local data_ptr, data_len = real_buf:serialize_to_bytes()
-    local ss = shared.SharedState.from_global()
-    local req_id = self:_next_file_op_id()
+	local real_buf
+	if type(buffer) == "table" and buffer.buffer ~= nil then
+		-- View
+		real_buf = buffer.buffer
+	else
+		real_buf = buffer
+	end
+	local data_ptr, data_len = real_buf:serialize_to_bytes()
+	local ss = shared.SharedState.from_global()
+	local req_id = self:_next_file_op_id()
 
-    -- Pack the request: struct{src_len, filepath_len} + src + path.
-    -- IMPORTANT: the IO lane reads bytes synchronously from the heap
-    -- FileWriteReq (no async reference to data_ptr), so we can free
-    -- data_ptr RIGHT NOW — even before the lane pop. The lane frees
-    -- its own `req` allocation after writing.
-    local req_size = ffi.sizeof("struct FileWriteReq") + data_len + #filepath
-    local req = ffi.C.malloc(req_size)
-    if req == nil then
-        ffi.C.free(data_ptr)
-        if on_done then
-            on_done(false, "malloc failed")
-        end
-        return
-    end
-    local hdr = ffi.cast("struct FileWriteReq *", req)
-    hdr.src_len = data_len
-    hdr.filepath_len = #filepath
-    local payload = ffi.cast("uint8_t *", req) + ffi.sizeof("struct FileWriteReq")
-    ffi.copy(payload, ffi.cast("uint8_t *", data_ptr), data_len)
-    ffi.copy(payload + data_len, filepath, #filepath)
-    -- data_ptr is now redundant: all bytes are in `req`.
-    ffi.C.free(data_ptr)
+	-- Pack the request: struct{src_len, filepath_len} + src + path.
+	-- IMPORTANT: the IO lane reads bytes synchronously from the heap
+	-- FileWriteReq (no async reference to data_ptr), so we can free
+	-- data_ptr RIGHT NOW — even before the lane pop. The lane frees
+	-- its own `req` allocation after writing.
+	local req_size = ffi.sizeof("struct FileWriteReq") + data_len + #filepath
+	local req = ffi.C.malloc(req_size)
+	if req == nil then
+		ffi.C.free(data_ptr)
+		if on_done then
+			on_done(false, "malloc failed")
+		end
+		return
+	end
+	local hdr = ffi.cast("struct FileWriteReq *", req)
+	hdr.src_len = data_len
+	hdr.filepath_len = #filepath
+	local payload = ffi.cast("uint8_t *", req) + ffi.sizeof("struct FileWriteReq")
+	ffi.copy(payload, ffi.cast("uint8_t *", data_ptr), data_len)
+	ffi.copy(payload + data_len, filepath, #filepath)
+	-- data_ptr is now redundant: all bytes are in `req`.
+	ffi.C.free(data_ptr)
 
-    if on_done then
-        self._pending_ops_count = (self._pending_ops_count or 0) + 1
-        local event_name = "file_op:" .. req_id
-        local handler
-        handler = self.event_system:on(event_name, function(_, payload)
-            self.event_system:off(event_name, handler)
-            self._pending_ops_count = self._pending_ops_count - 1
-            if payload.err then
-                on_done(false, payload.err)
-            else
-                on_done(true, nil)
-            end
-        end)
-    end
+	if on_done then
+		self._pending_ops_count = (self._pending_ops_count or 0) + 1
+		local event_name = "file_op:" .. req_id
+		local handler
+		handler = self.event_system:on(event_name, function(_, payload)
+			self.event_system:off(event_name, handler)
+			self._pending_ops_count = self._pending_ops_count - 1
+			if payload.err then
+				on_done(false, payload.err)
+			else
+				on_done(true, nil)
+			end
+		end)
+	end
 
-    ss:push(ss._ptr.outbox_io, {
-        type = shared.MSG_FILE_WRITE,
-        arg = req_id,
-        ptr = req, -- lane frees on completion (after `write_file`)
-    })
+	ss:push(ss._ptr.outbox_io, {
+		type = shared.MSG_FILE_WRITE,
+		arg = req_id,
+		ptr = req, -- lane frees on completion (after `write_file`)
+	})
+end
+
+--- Save a buffer to file (coroutine variant). Returns a token for async.await().
+---@param buffer Buffer|View
+---@param filepath string
+---@return AsyncToken
+function Editor:save_buffer_async(buffer, filepath)
+	local real_buf
+	if type(buffer) == "table" and buffer.buffer ~= nil then
+		real_buf = buffer.buffer
+	else
+		real_buf = buffer
+	end
+	local data_ptr, data_len = real_buf:serialize_to_bytes()
+	local req_id = self:_next_file_op_id()
+	self._pending_ops_count = (self._pending_ops_count or 0) + 1
+	local ss = shared.SharedState.from_global()
+
+	local req_size = ffi.sizeof("struct FileWriteReq") + data_len + #filepath
+	local req = ffi.C.malloc(req_size)
+	if req == nil then
+		ffi.C.free(data_ptr)
+		-- Emit a synthetic error so the awaiting coroutine doesn't hang.
+		self.event_system:emit("file_op:" .. req_id, { err = "malloc failed" })
+		return async.token(self.event_system, "file_op:" .. req_id, function()
+			self._pending_ops_count = (self._pending_ops_count or 1) - 1
+		end)
+	end
+	local hdr = ffi.cast("struct FileWriteReq *", req)
+	hdr.src_len = data_len
+	hdr.filepath_len = #filepath
+	local payload = ffi.cast("uint8_t *", req) + ffi.sizeof("struct FileWriteReq")
+	ffi.copy(payload, ffi.cast("uint8_t *", data_ptr), data_len)
+	ffi.copy(payload + data_len, filepath, #filepath)
+	ffi.C.free(data_ptr)
+
+	ss:push(ss._ptr.outbox_io, {
+		type = shared.MSG_FILE_WRITE,
+		arg = req_id,
+		ptr = req,
+	})
+	return async.token(self.event_system, "file_op:" .. req_id, function()
+		self._pending_ops_count = (self._pending_ops_count or 1) - 1
+	end)
 end
 
 --- Write a string to a file via MSG_FILE_WRITE.
@@ -1959,8 +2245,17 @@ end
 ---@param filepath string absolute path (already expanded)
 ---@param on_done fun(success: boolean, err: string?)? optional callback
 function Editor:write_string_to_file(str, filepath, on_done)
-    local buf = Buffer.from_string(str or "")
-    self:save_buffer_to_file(buf, filepath, on_done)
+	local buf = Buffer.from_string(str or "")
+	self:save_buffer_to_file(buf, filepath, on_done)
+end
+
+--- Write a string to a file (coroutine variant). Returns a token for async.await().
+---@param str string
+---@param filepath string
+---@return AsyncToken
+function Editor:write_string_async(str, filepath)
+	local buf = Buffer.from_string(str or "")
+	return self:save_buffer_async(buf, filepath)
 end
 
 --- Short y/n prompt helper for destructive operations.
@@ -1973,75 +2268,135 @@ end
 ---@param on_yes function called with no args if the user typed 'y'
 ---@param on_no function? called if the user typed anything else / Esc
 function Editor:confirm(msg, on_yes, on_no)
-    self:read_from_minibuffer({
-        prompt = msg .. " (Y/n) ",
-        on_submit = function(input)
-            local first = (input or ""):lower():sub(1, 1)
-            -- Empty submit defaults to "yes" (matches user's setting
-            -- preference). To get a default-no prompt, callers can use
-            -- the lower-level read_from_minibuffer prompt directly.
-            if first == "" or first == "y" then
-                if on_yes then
-                    on_yes()
-                end
-            else
-                if on_no then
-                    on_no()
-                end
-            end
-        end,
-        on_cancel = function()
-            if on_no then
-                on_no()
-            end
-        end,
-    })
+	self:read_from_minibuffer({
+		prompt = msg .. " (Y/n) ",
+		on_submit = function(input)
+			local first = (input or ""):lower():sub(1, 1)
+			-- Empty submit defaults to "yes" (matches user's setting
+			-- preference). To get a default-no prompt, callers can use
+			-- the lower-level read_from_minibuffer prompt directly.
+			if first == "" or first == "y" then
+				if on_yes then
+					on_yes()
+				end
+			else
+				if on_no then
+					on_no()
+				end
+			end
+		end,
+		on_cancel = function()
+			if on_no then
+				on_no()
+			end
+		end,
+	})
+end
+
+--- Async variant: returns an AsyncToken that resolves to a boolean
+--- (true = yes, false = no/cancel). Must be awaited from a coroutine.
+---@param msg string
+---@return AsyncToken
+function Editor:confirm_async(msg)
+	self._async_ui_id = (self._async_ui_id or 0) + 1
+	local token = async.token(self.event_system, "confirm:" .. self._async_ui_id)
+	self:confirm(msg, function()
+		self.event_system:emit(token._ev, true)
+	end, function()
+		self.event_system:emit(token._ev, false)
+	end)
+	return token
+end
+
+--- Async variant of read_from_minibuffer. Returns an AsyncToken that
+--- resolves to `{ value = string, cancelled = boolean }`. Must be
+--- awaited from a coroutine.
+--- `opts.on_change` is passed through for live preview (isearch).
+--- `opts.on_submit` and `opts.on_cancel` are replaced by the token.
+---@param opts { prompt: string?, initial: string?, completion: boolean?, completer: function?, on_change: function?, value: any?, auto_accept: boolean?, palette: boolean? }
+---@return AsyncToken
+function Editor:read_minibuffer_async(opts)
+	self._async_ui_id = (self._async_ui_id or 0) + 1
+
+	-- Handle kmacro replay: pop a pre-recorded input and return a
+	-- resolved token so async.await returns immediately.
+	if #self._mb_input_stack > 0 then
+		local value = table.remove(self._mb_input_stack, 1)
+		if opts.on_change then
+			opts.on_change(value)
+		end
+		return async.resolved({ value = value, cancelled = false })
+	end
+
+	-- Handle value short-circuit.
+	if opts.value ~= nil then
+		return async.resolved({ value = opts.value, cancelled = false })
+	end
+
+	local token = async.token(self.event_system, "mb_async:" .. self._async_ui_id)
+	self:read_from_minibuffer({
+		prompt = opts.prompt,
+		initial = opts.initial,
+		completion = opts.completion,
+		completer = opts.completer,
+		on_change = opts.on_change,
+		value = opts.value,
+		auto_accept = opts.auto_accept,
+		palette = opts.palette,
+		on_submit = function(input)
+			self.event_system:emit(token._ev, { value = input, cancelled = false })
+		end,
+		on_cancel = function()
+			self.event_system:emit(token._ev, { value = nil, cancelled = true })
+		end,
+	})
+	return token
 end
 
 --- Internal: serialize buffer to mmap and dispatch to IO lane.
 ---@param buf Buffer
 function Editor:_async_save(buf)
-    local fp = buf:filepath()
-    if fp == nil then
-        self.status_message = "no file"
-        return
-    end
+	local fp = buf:filepath()
+	if fp == nil then
+		self.status_message = "no file"
+		return
+	end
 
-    local data, len, cap = buf:serialize_to_mmap()
+	local data, len, cap = buf:serialize_to_mmap()
 
-    -- Allocate SaveRequest on the heap
-    local req = ffi.cast("struct SaveRequest *", c.calloc(1, ffi.sizeof("struct SaveRequest")))
-    if req == nil then
-        ffi.C.munmap(data, cap)
-        self.status_message = "save failed"
-        return
-    end
-    req.data = data
-    req.data_len = len
-    req.data_cap = cap
+	-- Allocate SaveRequest on the heap
+	local req = ffi.cast("struct SaveRequest *", c.calloc(1, ffi.sizeof("struct SaveRequest")))
+	if req == nil then
+		ffi.C.munmap(data, cap)
+		self.status_message = "save failed"
+		return
+	end
+	req.data = data
+	req.data_len = len
+	req.data_cap = cap
 
-    -- Copy filepath into heap C string
-    local fp_buf = ffi.cast("char *", c.calloc(#fp + 1, 1))
-    if fp_buf == nil then
-        ffi.C.munmap(data, cap)
-        c.free(req)
-        self.status_message = "save failed"
-        return
-    end
-    ffi.copy(fp_buf, fp)
-    req.filepath = fp_buf
+	-- Copy filepath into heap C string
+	local fp_buf = ffi.cast("char *", c.calloc(#fp + 1, 1))
+	if fp_buf == nil then
+		ffi.C.munmap(data, cap)
+		c.free(req)
+		self.status_message = "save failed"
+		return
+	end
+	ffi.copy(fp_buf, fp)
+	req.filepath = fp_buf
 
-    local ss = shared.SharedState.from_global()
-    ss:push(ss._ptr.outbox_io, {
-        type = shared.MSG_FILE_SAVE,
-        ptr = req,
-    })
+	local ss = shared.SharedState.from_global()
+	ss:push(ss._ptr.outbox_io, {
+		type = shared.MSG_FILE_SAVE,
+		ptr = req,
+	})
 end
 
 --- Quit the editor.
 ---@return string
 function Editor:quit()
-    return "quit"
+	return "quit"
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -2053,71 +2408,71 @@ end
 --- without showing the minibuffer.
 ---@param opts { prompt: string?, on_submit: function?, on_cancel: function?, on_change: function?, initial: string?, completion: boolean?, completer: function?, value: any?, auto_accept: boolean?, palette: boolean? }
 function Editor:read_from_minibuffer(opts)
-    -- When replaying a kmacro, pop from the input stack to auto-submit.
-    -- This lets commands like find_file, isearch, etc. skip the
-    -- interactive minibuffer during replay.
-    if #self._mb_input_stack > 0 then
-        local value = table.remove(self._mb_input_stack, 1)
-        -- Simulate the user typing the answer, then pressing Enter.
-        if opts.on_change then
-            opts.on_change(value)
-        end
-        if opts.on_submit then
-            opts.on_submit(value)
-        end
-        return
-    end
-    if opts.value ~= nil then
-        if opts.on_submit then
-            opts.on_submit(opts.value)
-        end
-        return
-    end
-    self.minibuffer:activate(opts)
+	-- When replaying a kmacro, pop from the input stack to auto-submit.
+	-- This lets commands like find_file, isearch, etc. skip the
+	-- interactive minibuffer during replay.
+	if #self._mb_input_stack > 0 then
+		local value = table.remove(self._mb_input_stack, 1)
+		-- Simulate the user typing the answer, then pressing Enter.
+		if opts.on_change then
+			opts.on_change(value)
+		end
+		if opts.on_submit then
+			opts.on_submit(value)
+		end
+		return
+	end
+	if opts.value ~= nil then
+		if opts.on_submit then
+			opts.on_submit(opts.value)
+		end
+		return
+	end
+	self.minibuffer:activate(opts)
 end
 
 --- Submit the minibuffer: invoke on_submit with the input text and deactivate.
 function Editor:minibuffer_submit()
-    if not self.minibuffer or not self.minibuffer.active then
-        return
-    end
-    local input_text = self.minibuffer:view_text()
-    self.minibuffer:history_push(input_text)
-    -- If recording a kmacro, push this input onto the stack
-    if self._recording then
-        local stack = self._recorded_mb_inputs
-        if stack then
-            stack[#stack + 1] = input_text
-        end
-    end
-    local callback = self.minibuffer.on_submit
-    self.minibuffer:deactivate()
-    -- Flag that minibuffer just closed, so stale Enter/Tab events
-    -- in the same drain batch don't dispatch to the main view.
-    self._mb_just_closed = 1
-    if callback then
-        callback(input_text)
-    end
+	if not self.minibuffer or not self.minibuffer.active then
+		return
+	end
+	local input_text = self.minibuffer:view_text()
+	self.minibuffer:history_push(input_text)
+	-- If recording a kmacro, push this input onto the stack
+	if self._recording then
+		local stack = self._recorded_mb_inputs
+		if stack then
+			stack[#stack + 1] = input_text
+		end
+	end
+	local callback = self.minibuffer.on_submit
+	self.minibuffer:deactivate()
+	-- Flag that minibuffer just closed, so stale Enter/Tab events
+	-- in the same drain batch don't dispatch to the main view.
+	self._mb_just_closed = 1
+	if callback then
+		callback(input_text)
+	end
 end
 
 --- Cancel the minibuffer: invoke on_cancel and deactivate.
 function Editor:minibuffer_cancel()
-    if not self.minibuffer or not self.minibuffer.active then
-        return
-    end
-    local callback = self.minibuffer.on_cancel
-    self.minibuffer:deactivate()
-    self._mb_just_closed = 1
-    if callback then
-        callback()
-    end
+	if not self.minibuffer or not self.minibuffer.active then
+		return
+	end
+	local callback = self.minibuffer.on_cancel
+	self.minibuffer:deactivate()
+	self._mb_just_closed = 1
+	if callback then
+		callback()
+	end
 end
 
 --- Fire minibuffer on_change if text has changed. Called from the main loop.
 function Editor:minibuffer_notify_change()
-    if self.minibuffer then
-        self.minibuffer:notify_change()
-    end
+	if self.minibuffer then
+		self.minibuffer:notify_change()
+	end
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -2136,18 +2491,18 @@ end
 ---@param handler function
 ---@return integer id
 function Editor:push_transient_handler(handler)
-    local h = self._transient_handlers
-    h[#h + 1] = handler
-    return #h
+	local h = self._transient_handlers
+	h[#h + 1] = handler
+	return #h
 end
 
 --- Remove a transient handler by id. Idempotent.
 ---@param id integer
 function Editor:remove_transient_handler(id)
-    local h = self._transient_handlers
-    if id and id <= #h then
-        h[id] = nil
-    end
+	local h = self._transient_handlers
+	if id and id <= #h then
+		h[id] = nil
+	end
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -2160,19 +2515,19 @@ end
 ---@param prompt string short prompt (e.g. "Zap to char: ")
 ---@param callback fun(ch: string|nil) called with the char (or nil on cancel)
 function Editor:read_char(prompt, callback)
-    -- Remove previous read-char handler if still active
-    if self._read_char_handler_id then
-        self:remove_transient_handler(self._read_char_handler_id)
-        self._read_char_handler_id = nil
-    end
-    self._read_char_cb = callback
-    self._read_char_prompt = prompt
-    -- Push a transient handler that wraps _read_char_consume.
-    -- The handler self-removes when consumed (see _read_char_consume).
-    local editor = self
-    self._read_char_handler_id = self:push_transient_handler(function(ed, token, ch, _)
-        return ed:_read_char_consume(token, ch)
-    end)
+	-- Remove previous read-char handler if still active
+	if self._read_char_handler_id then
+		self:remove_transient_handler(self._read_char_handler_id)
+		self._read_char_handler_id = nil
+	end
+	self._read_char_cb = callback
+	self._read_char_prompt = prompt
+	-- Push a transient handler that wraps _read_char_consume.
+	-- The handler self-removes when consumed (see _read_char_consume).
+	local editor = self
+	self._read_char_handler_id = self:push_transient_handler(function(ed, token, ch, _)
+		return ed:_read_char_consume(token, ch)
+	end)
 end
 
 --- Try to consume a key event for an active read-char interaction.
@@ -2187,50 +2542,69 @@ end
 ---@param ch string|nil printable character (1 byte) if the event is printable
 ---@return boolean consumed
 function Editor:_read_char_consume(token, ch)
-    if self._read_char_cb == nil then
-        return false
-    end
-    if token == "ctrl-g" or token == "escape" then
-        local cb = self._read_char_cb
-        self._read_char_cb = nil
-        self._read_char_prompt = ""
-        -- Remove the transient handler
-        if self._read_char_handler_id then
-            self:remove_transient_handler(self._read_char_handler_id)
-            self._read_char_handler_id = nil
-        end
-        if cb then
-            cb(nil)
-        end
-        return true
-    end
-    if ch and #ch == 1 then
-        local byte = ch:byte(1)
-        if byte >= 32 then
-            local cb = self._read_char_cb
-            self._read_char_cb = nil
-            self._read_char_prompt = ""
-            -- Remove the transient handler
-            if self._read_char_handler_id then
-                self:remove_transient_handler(self._read_char_handler_id)
-                self._read_char_handler_id = nil
-            end
-            if cb then
-                cb(ch)
-            end
-            return true
-        end
-    end
-    return false
+	if self._read_char_cb == nil then
+		return false
+	end
+	if token == "ctrl-g" or token == "escape" then
+		local cb = self._read_char_cb
+		self._read_char_cb = nil
+		self._read_char_prompt = ""
+		-- Remove the transient handler
+		if self._read_char_handler_id then
+			self:remove_transient_handler(self._read_char_handler_id)
+			self._read_char_handler_id = nil
+		end
+		if cb then
+			cb(nil)
+		end
+		return true
+	end
+	if ch and #ch == 1 then
+		local byte = ch:byte(1)
+		if byte >= 32 then
+			local cb = self._read_char_cb
+			self._read_char_cb = nil
+			self._read_char_prompt = ""
+			-- Remove the transient handler
+			if self._read_char_handler_id then
+				self:remove_transient_handler(self._read_char_handler_id)
+				self._read_char_handler_id = nil
+			end
+			if cb then
+				cb(ch)
+			end
+			return true
+		end
+	end
+	return false
+end
+
+--- Async variant: returns an AsyncToken that resolves to the character
+--- (string) on input, or nil on cancel (C-g/Escape). Must be awaited
+--- from a coroutine.
+---
+--- Usage:
+---   local ch = async.await(editor:read_char_async("Zap to char: "))
+---   if ch == nil then return end  -- cancelled
+---
+---@param prompt string
+---@return AsyncToken
+function Editor:read_char_async(prompt)
+	self._async_ui_id = (self._async_ui_id or 0) + 1
+	local token = async.token(self.event_system, "read_char:" .. self._async_ui_id)
+	self:read_char(prompt, function(ch)
+		self.event_system:emit(token._ev, ch)
+	end)
+	return token
 end
 
 --- Active read-char prompt for modeline display, or nil.
 ---@return string|nil
 function Editor:read_char_status()
-    if self._read_char_cb ~= nil then
-        return self._read_char_prompt
-    end
-    return nil
+	if self._read_char_cb ~= nil then
+		return self._read_char_prompt
+	end
+	return nil
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -2243,47 +2617,47 @@ end
 --- dispatch the command with the universal args.
 ---@param count integer? initial C-u count (default 1)
 function Editor:start_universal_arg(count)
-    self._universal_active = true
-    self._universal_count = count or 1
-    self.minibuffer:activate({
-        prompt = self:_universal_prompt(),
-        on_cancel = function()
-            self:cancel_universal_arg()
-        end,
-    })
+	self._universal_active = true
+	self._universal_count = count or 1
+	self.minibuffer:activate({
+		prompt = self:_universal_prompt(),
+		on_cancel = function()
+			self:cancel_universal_arg()
+		end,
+	})
 end
 
 --- Toggle the universal flag (called when C-u is pressed during collection).
 function Editor:toggle_universal_arg()
-    self._universal_count = self._universal_count + 1
-    self.minibuffer.prompt = self:_universal_prompt()
+	self._universal_count = self._universal_count + 1
+	self.minibuffer.prompt = self:_universal_prompt()
 end
 
 --- Build the prompt string showing the current C-u state.
 ---@return string
 function Editor:_universal_prompt()
-    local cu_str = string.rep("C-u", self._universal_count)
-    return cu_str .. " "
+	local cu_str = string.rep("C-u", self._universal_count)
+	return cu_str .. " "
 end
 
 --- Cancel universal argument collection.
 function Editor:cancel_universal_arg()
-    self._universal_active = false
-    self._universal_count = 0
-    self.universal_args = nil
+	self._universal_active = false
+	self._universal_count = 0
+	self.universal_args = nil
 end
 
 --- Compute and store the universal argument list from current state.
 --- Called when a command key is pressed during universal arg collection.
 --- The args are stored on editor.universal_args for the command to read.
 function Editor:get_universal_args()
-    local universal_arg = require("cursed.universal_arg")
-    local input = self.minibuffer:view_text()
-    local args = universal_arg.build_universal_args(self._universal_count, input)
-    self._universal_active = false
-    self._universal_count = 0
-    self.minibuffer:deactivate()
-    self.universal_args = args
+	local universal_arg = require("cursed.universal_arg")
+	local input = self.minibuffer:view_text()
+	local args = universal_arg.build_universal_args(self._universal_count, input)
+	self._universal_active = false
+	self._universal_count = 0
+	self.minibuffer:deactivate()
+	self.universal_args = args
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -2294,29 +2668,28 @@ end
 --- M-3 M-0 → value becomes 30.
 ---@param digit integer 0-9
 function Editor:accumulate_digit(digit)
-    if not self._digit_active then
-        self._digit_active = true
-        self._digit_value = digit
-        self._digit_negative = false
-    else
-        self._digit_value = self._digit_value * 10 + digit
-    end
-    self.status_message =
-        string.format("Arg: %d", self._digit_negative and -self._digit_value or self._digit_value)
+	if not self._digit_active then
+		self._digit_active = true
+		self._digit_value = digit
+		self._digit_negative = false
+	else
+		self._digit_value = self._digit_value * 10 + digit
+	end
+	self.status_message = string.format("Arg: %d", self._digit_negative and -self._digit_value or self._digit_value)
 end
 
 --- Set the negative flag for M--.
 function Editor:set_digit_negative()
-    if not self._digit_active then
-        self._digit_active = true
-        self._digit_value = 0
-    end
-    self._digit_negative = true
-    if self._digit_value == 0 then
-        self.status_message = "Arg: -"
-    else
-        self.status_message = string.format("Arg: -%d", self._digit_value)
-    end
+	if not self._digit_active then
+		self._digit_active = true
+		self._digit_value = 0
+	end
+	self._digit_negative = true
+	if self._digit_value == 0 then
+		self.status_message = "Arg: -"
+	else
+		self.status_message = string.format("Arg: -%d", self._digit_value)
+	end
 end
 
 --- Commit the accumulated digit argument into universal_args.
@@ -2325,33 +2698,29 @@ end
 --- The value is always positive; direction is encoded in the flag
 --- (consistent with C-u's flag semantics).
 function Editor:commit_digit_arg()
-    local flag = not self._digit_negative
-    local value = self._digit_value
-    log.info(
-        "editor",
-        "commit_digit_arg",
-        { flag = flag, value = value, negative = self._digit_negative }
-    )
-    if value == 0 and not self._digit_negative then
-        -- M-0 alone: numeric arg 0
-        self.universal_args = { true, 0 }
-    elseif value == 0 and self._digit_negative then
-        -- M-- alone: flag=false (like bare C-u)
-        self.universal_args = { false }
-    else
-        -- M-N or M-- M-N: value is positive, direction in flag
-        self.universal_args = { flag, value }
-    end
-    self._digit_active = false
-    self._digit_value = 0
-    self._digit_negative = false
+	local flag = not self._digit_negative
+	local value = self._digit_value
+	log.info("editor", "commit_digit_arg", { flag = flag, value = value, negative = self._digit_negative })
+	if value == 0 and not self._digit_negative then
+		-- M-0 alone: numeric arg 0
+		self.universal_args = { true, 0 }
+	elseif value == 0 and self._digit_negative then
+		-- M-- alone: flag=false (like bare C-u)
+		self.universal_args = { false }
+	else
+		-- M-N or M-- M-N: value is positive, direction in flag
+		self.universal_args = { flag, value }
+	end
+	self._digit_active = false
+	self._digit_value = 0
+	self._digit_negative = false
 end
 
 --- Cancel digit argument accumulation.
 function Editor:cancel_digit_arg()
-    self._digit_active = false
-    self._digit_value = 0
-    self._digit_negative = false
+	self._digit_active = false
+	self._digit_value = 0
+	self._digit_negative = false
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -2364,25 +2733,25 @@ end
 --- one kill ring entry (the two kills appended), not two separate entries.
 ---@param text string killed text to push or append
 function Editor:push_kill(text)
-    if #text == 0 then
-        return
-    end
-    if (self._last_was_kill or self._kill_called) and #kill_ring.ring > 0 then
-        -- Append to the top entry (consecutive kill or multiple kills in one command)
-        kill_ring.ring[1] = kill_ring.ring[1] .. text
-    else
-        kill_ring:push(text)
-        -- Sync new kill to system clipboard (consecutive kills skip this
-        -- since they append to ring[1] here instead).
-        require("cursed.clipboard").set_if_different(text)
-    end
-    self._kill_called = true
+	if #text == 0 then
+		return
+	end
+	if (self._last_was_kill or self._kill_called) and #kill_ring.ring > 0 then
+		-- Append to the top entry (consecutive kill or multiple kills in one command)
+		kill_ring.ring[1] = kill_ring.ring[1] .. text
+	else
+		kill_ring:push(text)
+		-- Sync new kill to system clipboard (consecutive kills skip this
+		-- since they append to ring[1] here instead).
+		require("cursed.clipboard").set_if_different(text)
+	end
+	self._kill_called = true
 end
 
 --- Store a pretty-printed eval result to display in the minibuffer area.
 ---@param value any
 function Editor:show_eval_result(value)
-    self._eval_result = pprint(value)
+	self._eval_result = pprint(value)
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -2392,94 +2761,93 @@ end
 --- Start an incremental search from the current cursor position.
 ---@param direction integer 1=forward, -1=backward
 function Editor:start_isearch(direction, initial_query, opts)
-    opts = opts or {}
-    local main_view = self:current_view()
-    if not main_view or not main_view.file_loaded then
-        return
-    end
+	opts = opts or {}
+	local main_view = self:current_view()
+	if not main_view or not main_view.file_loaded then
+		return
+	end
 
-    -- Use selection text as initial query if none provided
-    if not initial_query and main_view:p().anchor_line then
-        local sl, sc, el, ec = main_view:selection_range()
-        if sl then
-            ---@cast sc integer
-            ---@cast el integer
-            ---@cast ec integer
-            initial_query = main_view:text_between(sl, sc, el, ec)
-        end
-    end
+	-- Use selection text as initial query if none provided
+	if not initial_query and main_view:p().anchor_line then
+		local sl, sc, el, ec = main_view:selection_range()
+		if sl then
+			---@cast sc integer
+			---@cast el integer
+			---@cast ec integer
+			initial_query = main_view:text_between(sl, sc, el, ec)
+		end
+	end
 
-    -- Save original point for C-g cancel
-    self._isearch_origin_line = main_view:p().line
-    self._isearch_origin_col = main_view:p().col
-    self._isearch_direction = direction
-    self._isearch_regex = opts.regex == true
+	-- Save original point for C-g cancel
+	self._isearch_origin_line = main_view:p().line
+	self._isearch_origin_col = main_view:p().col
+	self._isearch_direction = direction
+	self._isearch_regex = opts.regex == true
 
-    local prompt
-    if opts.regex then
-        prompt = direction > 0 and "Search regexp: " or "Search backward regexp: "
-    else
-        prompt = direction > 0 and "Search: " or "Search backward: "
-    end
+	local prompt
+	if opts.regex then
+		prompt = direction > 0 and "Search regexp: " or "Search backward regexp: "
+	else
+		prompt = direction > 0 and "Search: " or "Search backward: "
+	end
 
-    local mb_opts = {
-        prompt = prompt,
-        completion = true,
-        on_change = function(query)
-            self:_isearch_update(query)
-        end,
-        on_submit = function(query)
-            -- Clear the typing-phase overlay highlight.
-            self._isearch_match = nil
-            self._isearch_origin_line = nil
-            self._isearch_origin_col = nil
-            self._isearch_regex = nil
-            if #query == 0 then
-                return
-            end
-            -- Populate pending cursors with every match in the buffer.
-            local mv = self:current_view()
-            if not mv or not mv.file_loaded then
-                return
-            end
-            local buf = mv.buffer
-            mv.pending_cursors = {}
-            local iter, err = self:_isearch_iter(buf, query, { line = 0, offset = 0 }, 1)
-            if iter then
-                local count = 0
-                for match in iter do
-                    mv:drop_cursor(match.line, match.offset)
-                    count = count + 1
-                end
-                if count > 0 then
-                    self.status_message = count
-                        .. " matches — alt-m to commit, C-x C-n/p to navigate, C-g to cancel"
-                else
-                    self.status_message = "no matches"
-                end
-            else
-                self.status_message = "invalid regexp: " .. tostring(err)
-            end
-        end,
-        on_cancel = function()
-            -- Clean up overlay and restore original point.
-            self._isearch_match = nil
-            local mv = self:current_view()
-            if mv and self._isearch_origin_line then
-                mv:p().line = self._isearch_origin_line
-                mv:p().col = self._isearch_origin_col
-                mv:_set_goal_col(mv:p().col)
-                mv:unset_mark()
-            end
-            self._isearch_origin_line = nil
-            self._isearch_origin_col = nil
-            self._isearch_regex = nil
-        end,
-    }
+	local mb_opts = {
+		prompt = prompt,
+		completion = true,
+		on_change = function(query)
+			self:_isearch_update(query)
+		end,
+		on_submit = function(query)
+			-- Clear the typing-phase overlay highlight.
+			self._isearch_match = nil
+			self._isearch_origin_line = nil
+			self._isearch_origin_col = nil
+			self._isearch_regex = nil
+			if #query == 0 then
+				return
+			end
+			-- Populate pending cursors with every match in the buffer.
+			local mv = self:current_view()
+			if not mv or not mv.file_loaded then
+				return
+			end
+			local buf = mv.buffer
+			mv.pending_cursors = {}
+			local iter, err = self:_isearch_iter(buf, query, { line = 0, offset = 0 }, 1)
+			if iter then
+				local count = 0
+				for match in iter do
+					mv:drop_cursor(match.line, match.offset)
+					count = count + 1
+				end
+				if count > 0 then
+					self.status_message = count .. " matches — alt-m to commit, C-x C-n/p to navigate, C-g to cancel"
+				else
+					self.status_message = "no matches"
+				end
+			else
+				self.status_message = "invalid regexp: " .. tostring(err)
+			end
+		end,
+		on_cancel = function()
+			-- Clean up overlay and restore original point.
+			self._isearch_match = nil
+			local mv = self:current_view()
+			if mv and self._isearch_origin_line then
+				mv:p().line = self._isearch_origin_line
+				mv:p().col = self._isearch_origin_col
+				mv:_set_goal_col(mv:p().col)
+				mv:unset_mark()
+			end
+			self._isearch_origin_line = nil
+			self._isearch_origin_col = nil
+			self._isearch_regex = nil
+		end,
+	}
 
-    mb_opts.initial = initial_query
+	mb_opts.initial = initial_query
 
-    self:read_from_minibuffer(mb_opts)
+	self:read_from_minibuffer(mb_opts)
 end
 
 --- Build a search iterator for the active isearch mode (plain or
@@ -2491,22 +2859,22 @@ end
 ---@return function|nil iter
 ---@return string|nil errmsg
 function Editor:_isearch_iter(buf, query, start, direction)
-    if self._isearch_regex then
-        -- POSIX extended regex via TRE (case-sensitive), reusing the
-        -- same search_regex / search_regex_backward path as
-        -- replace_regexp for consistency.
-        local icase = false
-        if direction > 0 then
-            return buf:search_regex(query, start, icase)
-        else
-            return buf:search_regex_backward(query, start, icase)
-        end
-    end
-    if direction > 0 then
-        return buf:search_forward(query, start, true)
-    else
-        return buf:search_backward(query, start, true)
-    end
+	if self._isearch_regex then
+		-- POSIX extended regex via TRE (case-sensitive), reusing the
+		-- same search_regex / search_regex_backward path as
+		-- replace_regexp for consistency.
+		local icase = false
+		if direction > 0 then
+			return buf:search_regex(query, start, icase)
+		else
+			return buf:search_regex_backward(query, start, icase)
+		end
+	end
+	if direction > 0 then
+		return buf:search_forward(query, start, true)
+	else
+		return buf:search_backward(query, start, true)
+	end
 end
 
 --- Highlight a match as the typing-phase overlay and jump the cursor
@@ -2514,161 +2882,160 @@ end
 ---@param mv View
 ---@param match table {line, offset, end_line, end_offset}
 function Editor:_isearch_show_match(mv, match)
-    self._isearch_match = match
-    mv:p().line = match.line
-    mv:p().col = match.offset
-    mv:_set_goal_col(mv:p().col)
-    mv:unset_mark()
-    self.status_message = nil
+	self._isearch_match = match
+	mv:p().line = match.line
+	mv:p().col = match.offset
+	mv:_set_goal_col(mv:p().col)
+	mv:unset_mark()
+	self.status_message = nil
 end
 
 --- Jump to the next isearch match (C-s while in isearch).
 function Editor:isearch_next()
-    local main_view = self:current_view()
-    if not main_view or not main_view.file_loaded then
-        return
-    end
-    local query = self.minibuffer:view_text()
-    if #query == 0 then
-        return
-    end
+	local main_view = self:current_view()
+	if not main_view or not main_view.file_loaded then
+		return
+	end
+	local query = self.minibuffer:view_text()
+	if #query == 0 then
+		return
+	end
 
-    local buf = main_view.buffer
-    -- Search forward from end of current match (or cursor if no match).
-    local start
-    if self._isearch_match then
-        start = { line = self._isearch_match.end_line, offset = self._isearch_match.end_offset }
-    else
-        start = { line = main_view:p().line, offset = main_view:p().col }
-    end
-    local iter, err = self:_isearch_iter(buf, query, start, 1)
-    if not iter then
-        self.status_message = "invalid regexp: " .. tostring(err)
-        return
-    end
-    local match = iter()
-    if match then
-        self:_isearch_show_match(main_view, match)
-    else
-        self.status_message = "failing search"
-    end
+	local buf = main_view.buffer
+	-- Search forward from end of current match (or cursor if no match).
+	local start
+	if self._isearch_match then
+		start = { line = self._isearch_match.end_line, offset = self._isearch_match.end_offset }
+	else
+		start = { line = main_view:p().line, offset = main_view:p().col }
+	end
+	local iter, err = self:_isearch_iter(buf, query, start, 1)
+	if not iter then
+		self.status_message = "invalid regexp: " .. tostring(err)
+		return
+	end
+	local match = iter()
+	if match then
+		self:_isearch_show_match(main_view, match)
+	else
+		self.status_message = "failing search"
+	end
 
-    self._isearch_direction = 1
-    self.minibuffer.prompt = self._isearch_regex and "Search regexp: " or "Search: "
+	self._isearch_direction = 1
+	self.minibuffer.prompt = self._isearch_regex and "Search regexp: " or "Search: "
 end
 
 --- Jump to the previous isearch match (C-r while in isearch).
 function Editor:isearch_prev()
-    local main_view = self:current_view()
-    if not main_view or not main_view.file_loaded then
-        return
-    end
-    local query = self.minibuffer:view_text()
-    if #query == 0 then
-        return
-    end
+	local main_view = self:current_view()
+	if not main_view or not main_view.file_loaded then
+		return
+	end
+	local query = self.minibuffer:view_text()
+	if #query == 0 then
+		return
+	end
 
-    local buf = main_view.buffer
-    -- Search backward from start of current match (or cursor if no match).
-    local start
-    if self._isearch_match then
-        start = { line = self._isearch_match.line, offset = self._isearch_match.offset }
-    else
-        start = { line = main_view:p().line, offset = main_view:p().col }
-    end
-    local iter, err = self:_isearch_iter(buf, query, start, -1)
-    if not iter then
-        self.status_message = "invalid regexp: " .. tostring(err)
-        return
-    end
-    local match = iter()
-    if match then
-        self:_isearch_show_match(main_view, match)
-    else
-        self.status_message = "failing search"
-    end
+	local buf = main_view.buffer
+	-- Search backward from start of current match (or cursor if no match).
+	local start
+	if self._isearch_match then
+		start = { line = self._isearch_match.line, offset = self._isearch_match.offset }
+	else
+		start = { line = main_view:p().line, offset = main_view:p().col }
+	end
+	local iter, err = self:_isearch_iter(buf, query, start, -1)
+	if not iter then
+		self.status_message = "invalid regexp: " .. tostring(err)
+		return
+	end
+	local match = iter()
+	if match then
+		self:_isearch_show_match(main_view, match)
+	else
+		self.status_message = "failing search"
+	end
 
-    self._isearch_direction = -1
-    self.minibuffer.prompt = self._isearch_regex and "Search backward regexp: "
-        or "Search backward: "
+	self._isearch_direction = -1
+	self.minibuffer.prompt = self._isearch_regex and "Search backward regexp: " or "Search backward: "
 end
 
 --- Internal: run isearch from the saved origin for the given query.
 --- Highlights the first match as an overlay; does not set a selection.
 ---@param query string
 function Editor:_isearch_update(query)
-    if #query == 0 then
-        self._isearch_match = nil
-        return
-    end
-    local main_view = self:current_view()
-    if not main_view or not main_view.file_loaded then
-        return
-    end
-    local buf = main_view.buffer
-    local start = { line = self._isearch_origin_line, offset = self._isearch_origin_col }
-    local iter, err = self:_isearch_iter(buf, query, start, self._isearch_direction)
-    if not iter then
-        self.status_message = "invalid regexp: " .. tostring(err)
-        return
-    end
-    local match = iter()
-    if match then
-        self:_isearch_show_match(main_view, match)
-    else
-        self._isearch_match = nil
-    end
+	if #query == 0 then
+		self._isearch_match = nil
+		return
+	end
+	local main_view = self:current_view()
+	if not main_view or not main_view.file_loaded then
+		return
+	end
+	local buf = main_view.buffer
+	local start = { line = self._isearch_origin_line, offset = self._isearch_origin_col }
+	local iter, err = self:_isearch_iter(buf, query, start, self._isearch_direction)
+	if not iter then
+		self.status_message = "invalid regexp: " .. tostring(err)
+		return
+	end
+	local match = iter()
+	if match then
+		self:_isearch_show_match(main_view, match)
+	else
+		self._isearch_match = nil
+	end
 end
 
 --- Navigate the primary cursor through pending cursor candidates.
 --- Called by select_next_match / select_prev_match when candidates exist.
 ---@param dir integer 1=next (forward), -1=prev (backward)
 function Editor:_nav_candidate(dir)
-    local mv = self:current_view()
-    if not mv or #mv.pending_cursors == 0 then
-        return
-    end
-    local cursors = mv.pending_cursors
-    local pline = mv:p().line
-    local pcol = mv:p().col
+	local mv = self:current_view()
+	if not mv or #mv.pending_cursors == 0 then
+		return
+	end
+	local cursors = mv.pending_cursors
+	local pline = mv:p().line
+	local pcol = mv:p().col
 
-    if dir > 0 then
-        -- Find the first candidate strictly after the primary cursor.
-        for i = 1, #cursors do
-            local c = cursors[i]
-            if c.line > pline or (c.line == pline and c.col > pcol) then
-                mv:p().line = c.line
-                mv:p().col = c.col
-                mv:_set_goal_col(c.col)
-                return
-            end
-        end
-        -- Wrap to first candidate.
-        local c = cursors[1]
-        if c then
-            mv:p().line = c.line
-            mv:p().col = c.col
-            mv:_set_goal_col(c.col)
-        end
-    else
-        -- Find the first candidate strictly before the primary cursor.
-        for i = #cursors, 1, -1 do
-            local c = cursors[i]
-            if c.line < pline or (c.line == pline and c.col < pcol) then
-                mv:p().line = c.line
-                mv:p().col = c.col
-                mv:_set_goal_col(c.col)
-                return
-            end
-        end
-        -- Wrap to last candidate.
-        local c = cursors[#cursors]
-        if c then
-            mv:p().line = c.line
-            mv:p().col = c.col
-            mv:_set_goal_col(c.col)
-        end
-    end
+	if dir > 0 then
+		-- Find the first candidate strictly after the primary cursor.
+		for i = 1, #cursors do
+			local c = cursors[i]
+			if c.line > pline or (c.line == pline and c.col > pcol) then
+				mv:p().line = c.line
+				mv:p().col = c.col
+				mv:_set_goal_col(c.col)
+				return
+			end
+		end
+		-- Wrap to first candidate.
+		local c = cursors[1]
+		if c then
+			mv:p().line = c.line
+			mv:p().col = c.col
+			mv:_set_goal_col(c.col)
+		end
+	else
+		-- Find the first candidate strictly before the primary cursor.
+		for i = #cursors, 1, -1 do
+			local c = cursors[i]
+			if c.line < pline or (c.line == pline and c.col < pcol) then
+				mv:p().line = c.line
+				mv:p().col = c.col
+				mv:_set_goal_col(c.col)
+				return
+			end
+		end
+		-- Wrap to last candidate.
+		local c = cursors[#cursors]
+		if c then
+			mv:p().line = c.line
+			mv:p().col = c.col
+			mv:_set_goal_col(c.col)
+		end
+	end
 end
 
 --- Promote the pending candidate at the given index to a live cursor.
@@ -2677,49 +3044,49 @@ end
 ---@param i integer 1-based index into mv.pending_cursors
 ---@return boolean true if a candidate was promoted
 function Editor:_promote_candidate_at_index(i)
-    local mv = self:current_view()
-    if not mv then
-        return false
-    end
-    local pending = mv.pending_cursors
-    local ranges = self._query_ranges
-    local c = pending[i]
-    if not c then
-        return false
-    end
-    local nc = mv:make_cursor(c.line, c.col)
-    if ranges and ranges[i] then
-        nc.anchor_line = nc.line
-        nc.anchor_col = nc.col
-        nc.line = ranges[i].end_line
-        nc.col = ranges[i].end_offset
-        nc.anchor_transient = nil
-    end
-    table.insert(mv.cursors, nc)
-    table.remove(pending, i)
-    if ranges then
-        table.remove(ranges, i)
-    end
-    return true
+	local mv = self:current_view()
+	if not mv then
+		return false
+	end
+	local pending = mv.pending_cursors
+	local ranges = self._query_ranges
+	local c = pending[i]
+	if not c then
+		return false
+	end
+	local nc = mv:make_cursor(c.line, c.col)
+	if ranges and ranges[i] then
+		nc.anchor_line = nc.line
+		nc.anchor_col = nc.col
+		nc.line = ranges[i].end_line
+		nc.col = ranges[i].end_offset
+		nc.anchor_transient = nil
+	end
+	table.insert(mv.cursors, nc)
+	table.remove(pending, i)
+	if ranges then
+		table.remove(ranges, i)
+	end
+	return true
 end
 
 --- Promote the pending candidate at the primary cursor's exact position
 --- to a live cursor (delegates to _promote_candidate_at_index). Returns
 --- false if no candidate sits exactly under the primary.
 function Editor:_promote_candidate_at_primary()
-    local mv = self:current_view()
-    if not mv then
-        return false
-    end
-    local p = mv:p()
-    local pending = mv.pending_cursors
-    for i = 1, #pending do
-        local c = pending[i]
-        if c.line == p.line and c.col == p.col then
-            return self:_promote_candidate_at_index(i)
-        end
-    end
-    return false
+	local mv = self:current_view()
+	if not mv then
+		return false
+	end
+	local p = mv:p()
+	local pending = mv.pending_cursors
+	for i = 1, #pending do
+		local c = pending[i]
+		if c.line == p.line and c.col == p.col then
+			return self:_promote_candidate_at_index(i)
+		end
+	end
+	return false
 end
 
 --- Find the closest pending candidate to the primary cursor, breaking
@@ -2729,31 +3096,31 @@ end
 --- need not sit exactly on a candidate.
 ---@return integer|nil 1-based index, or nil if no candidates
 function Editor:_find_nearest_candidate_past_biased()
-    local mv = self:current_view()
-    if not mv or #mv.pending_cursors == 0 then
-        return nil
-    end
-    local p = mv:p()
-    local pending = mv.pending_cursors
-    local best_i, best_abs, best_past = nil, nil, false
-    for i = 1, #pending do
-        local c = pending[i]
-        -- Flatten to a single document-ordered key for distance. Columns
-        -- are bounded by a line's length, so a large per-line multiplier
-        -- keeps cross-line ordering faithful to (line, col) tuples.
-        local diff
-        if c.line == p.line then
-            diff = c.col - p.col
-        else
-            diff = (c.line - p.line) * 0x100000 + (c.col - p.col)
-        end
-        local adiff = math.abs(diff)
-        local past = diff <= 0
-        if best_i == nil or adiff < best_abs or (adiff == best_abs and past and not best_past) then
-            best_i, best_abs, best_past = i, adiff, past
-        end
-    end
-    return best_i
+	local mv = self:current_view()
+	if not mv or #mv.pending_cursors == 0 then
+		return nil
+	end
+	local p = mv:p()
+	local pending = mv.pending_cursors
+	local best_i, best_abs, best_past = nil, nil, false
+	for i = 1, #pending do
+		local c = pending[i]
+		-- Flatten to a single document-ordered key for distance. Columns
+		-- are bounded by a line's length, so a large per-line multiplier
+		-- keeps cross-line ordering faithful to (line, col) tuples.
+		local diff
+		if c.line == p.line then
+			diff = c.col - p.col
+		else
+			diff = (c.line - p.line) * 0x100000 + (c.col - p.col)
+		end
+		local adiff = math.abs(diff)
+		local past = diff <= 0
+		if best_i == nil or adiff < best_abs or (adiff == best_abs and past and not best_past) then
+			best_i, best_abs, best_past = i, adiff, past
+		end
+	end
+	return best_i
 end
 
 --- Promote every pending candidate whose position falls within the
@@ -2762,37 +3129,37 @@ end
 --- lower indices valid). Clears the region's mark on success.
 ---@return integer count of promoted candidates
 function Editor:_promote_candidates_in_region()
-    local mv = self:current_view()
-    if not mv then
-        return 0
-    end
-    local p = mv:p()
-    if not p.anchor_line then
-        return 0
-    end
-    local sl, sc, el, ec = mv:selection_ranges_one(p)
-    if sl == nil then
-        return 0
-    end
-    ---@cast sl integer
-    ---@cast sc integer
-    ---@cast el integer
-    ---@cast ec integer
-    local pending = mv.pending_cursors
-    local count = 0
-    for i = #pending, 1, -1 do
-        local c = pending[i]
-        local after_start = c.line > sl or (c.line == sl and c.col >= sc)
-        local before_end = c.line < el or (c.line == el and c.col <= ec)
-        if after_start and before_end then
-            self:_promote_candidate_at_index(i)
-            count = count + 1
-        end
-    end
-    if count > 0 then
-        mv:unset_mark()
-    end
-    return count
+	local mv = self:current_view()
+	if not mv then
+		return 0
+	end
+	local p = mv:p()
+	if not p.anchor_line then
+		return 0
+	end
+	local sl, sc, el, ec = mv:selection_ranges_one(p)
+	if sl == nil then
+		return 0
+	end
+	---@cast sl integer
+	---@cast sc integer
+	---@cast el integer
+	---@cast ec integer
+	local pending = mv.pending_cursors
+	local count = 0
+	for i = #pending, 1, -1 do
+		local c = pending[i]
+		local after_start = c.line > sl or (c.line == sl and c.col >= sc)
+		local before_end = c.line < el or (c.line == el and c.col <= ec)
+		if after_start and before_end then
+			self:_promote_candidate_at_index(i)
+			count = count + 1
+		end
+	end
+	if count > 0 then
+		mv:unset_mark()
+	end
+	return count
 end
 
 --- Handle a printable key during query-replace candidate mode.
@@ -2802,32 +3169,32 @@ end
 ---@param ch string single printable character
 ---@return boolean
 function Editor:_handle_query_candidate_key(ch)
-    if not self._query_ranges then
-        return false
-    end
-    local mv = self:current_view()
-    if not mv or #mv.pending_cursors == 0 then
-        self._query_ranges = nil
-        return false
-    end
-    if ch == "y" then
-        self:_promote_candidate_at_primary()
-        if #mv.pending_cursors > 0 then
-            self:_nav_candidate(1)
-        else
-            self._query_ranges = nil
-            self.status_message = "all candidates promoted — type to replace"
-        end
-        return true
-    elseif ch == "n" then
-        if #mv.pending_cursors > 0 then
-            self:_nav_candidate(1)
-        else
-            self._query_ranges = nil
-        end
-        return true
-    end
-    return false
+	if not self._query_ranges then
+		return false
+	end
+	local mv = self:current_view()
+	if not mv or #mv.pending_cursors == 0 then
+		self._query_ranges = nil
+		return false
+	end
+	if ch == "y" then
+		self:_promote_candidate_at_primary()
+		if #mv.pending_cursors > 0 then
+			self:_nav_candidate(1)
+		else
+			self._query_ranges = nil
+			self.status_message = "all candidates promoted — type to replace"
+		end
+		return true
+	elseif ch == "n" then
+		if #mv.pending_cursors > 0 then
+			self:_nav_candidate(1)
+		else
+			self._query_ranges = nil
+		end
+		return true
+	end
+	return false
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -2840,115 +3207,113 @@ end
 --- selections; typing then replaces all selections at once (multi-cursor).
 ---@param initial_query string? optional pre-fill from selection
 function Editor:start_query_replace(initial_query)
-    local main_view = self:current_view()
-    if not main_view or not main_view.file_loaded then
-        return
-    end
+	local main_view = self:current_view()
+	if not main_view or not main_view.file_loaded then
+		return
+	end
 
-    -- Use selection text as initial query if none provided
-    if not initial_query and main_view:p().anchor_line then
-        local sl, sc, el, ec = main_view:selection_range()
-        if sl then
-            ---@cast sc integer
-            ---@cast el integer
-            ---@cast ec integer
-            initial_query = main_view:text_between(sl, sc, el, ec)
-        end
-    end
+	-- Use selection text as initial query if none provided
+	if not initial_query and main_view:p().anchor_line then
+		local sl, sc, el, ec = main_view:selection_range()
+		if sl then
+			---@cast sc integer
+			---@cast el integer
+			---@cast ec integer
+			initial_query = main_view:text_between(sl, sc, el, ec)
+		end
+	end
 
-    -- Save original point for C-g cancel. Reuse isearch overlay machinery.
-    self._isearch_origin_line = main_view:p().line
-    self._isearch_origin_col = main_view:p().col
-    self._isearch_direction = 1 -- always forward for query-replace
-    self._isearch_regex = false -- plain substring match
+	-- Save original point for C-g cancel. Reuse isearch overlay machinery.
+	self._isearch_origin_line = main_view:p().line
+	self._isearch_origin_col = main_view:p().col
+	self._isearch_direction = 1 -- always forward for query-replace
+	self._isearch_regex = false -- plain substring match
 
-    local mb_opts = {
-        prompt = "Query replace: ",
-        completion = true,
-        on_change = function(query)
-            self:_isearch_update(query)
-        end,
-        on_submit = function(query)
-            -- Clear the typing-phase overlay highlight.
-            self._isearch_match = nil
-            self._isearch_origin_line = nil
-            self._isearch_origin_col = nil
-            if #query == 0 then
-                return
-            end
-            -- Populate pending cursors AND query ranges with every match.
-            local mv = self:current_view()
-            if not mv or not mv.file_loaded then
-                return
-            end
-            local buf = mv.buffer
-            mv.pending_cursors = {}
-            self._query_ranges = {}
-            -- Push transient key handler for y/n navigation (LIFO).
-            -- Self-deactivates when _query_ranges is cleared.
-            if not self._query_range_handler_id then
-                local query_handler = keybind.handler({
-                    ["y"] = function(ed)
-                        return ed:_handle_query_candidate_key("y")
-                    end,
-                    ["n"] = function(ed)
-                        return ed:_handle_query_candidate_key("n")
-                    end,
-                })
-                self._query_range_handler_id = self:push_transient_handler(
-                    function(ed, token, ch, is_printable)
-                        if not ed._query_ranges then
-                            return false
-                        end
-                        if not is_printable or not ch then
-                            return false
-                        end
-                        return query_handler(ed, token, ch, is_printable)
-                    end
-                )
-            end
-            local iter, err = self:_isearch_iter(buf, query, { line = 0, offset = 0 }, 1)
-            if iter then
-                local count = 0
-                for match in iter do
-                    mv:drop_cursor(match.line, match.offset)
-                    self._query_ranges[#self._query_ranges + 1] = {
-                        end_line = match.end_line,
-                        end_offset = match.end_offset,
-                    }
-                    count = count + 1
-                end
-                if count > 0 then
-                    self.status_message = count
-                        .. " matches — alt-m to commit (with selections), C-x C-n/p to navigate, C-g to cancel"
-                else
-                    self.status_message = "no matches"
-                    self._query_ranges = nil
-                end
-            else
-                self.status_message = "invalid regexp: " .. tostring(err)
-                self._query_ranges = nil
-            end
-        end,
-        on_cancel = function()
-            -- Clean up overlay and restore original point.
-            self._isearch_match = nil
-            self._query_ranges = nil
-            local mv = self:current_view()
-            if mv and self._isearch_origin_line then
-                mv:p().line = self._isearch_origin_line
-                mv:p().col = self._isearch_origin_col
-                mv:_set_goal_col(mv:p().col)
-                mv:unset_mark()
-            end
-            self._isearch_origin_line = nil
-            self._isearch_origin_col = nil
-        end,
-    }
+	local mb_opts = {
+		prompt = "Query replace: ",
+		completion = true,
+		on_change = function(query)
+			self:_isearch_update(query)
+		end,
+		on_submit = function(query)
+			-- Clear the typing-phase overlay highlight.
+			self._isearch_match = nil
+			self._isearch_origin_line = nil
+			self._isearch_origin_col = nil
+			if #query == 0 then
+				return
+			end
+			-- Populate pending cursors AND query ranges with every match.
+			local mv = self:current_view()
+			if not mv or not mv.file_loaded then
+				return
+			end
+			local buf = mv.buffer
+			mv.pending_cursors = {}
+			self._query_ranges = {}
+			-- Push transient key handler for y/n navigation (LIFO).
+			-- Self-deactivates when _query_ranges is cleared.
+			if not self._query_range_handler_id then
+				local query_handler = keybind.handler({
+					["y"] = function(ed)
+						return ed:_handle_query_candidate_key("y")
+					end,
+					["n"] = function(ed)
+						return ed:_handle_query_candidate_key("n")
+					end,
+				})
+				self._query_range_handler_id = self:push_transient_handler(function(ed, token, ch, is_printable)
+					if not ed._query_ranges then
+						return false
+					end
+					if not is_printable or not ch then
+						return false
+					end
+					return query_handler(ed, token, ch, is_printable)
+				end)
+			end
+			local iter, err = self:_isearch_iter(buf, query, { line = 0, offset = 0 }, 1)
+			if iter then
+				local count = 0
+				for match in iter do
+					mv:drop_cursor(match.line, match.offset)
+					self._query_ranges[#self._query_ranges + 1] = {
+						end_line = match.end_line,
+						end_offset = match.end_offset,
+					}
+					count = count + 1
+				end
+				if count > 0 then
+					self.status_message = count
+						.. " matches — alt-m to commit (with selections), C-x C-n/p to navigate, C-g to cancel"
+				else
+					self.status_message = "no matches"
+					self._query_ranges = nil
+				end
+			else
+				self.status_message = "invalid regexp: " .. tostring(err)
+				self._query_ranges = nil
+			end
+		end,
+		on_cancel = function()
+			-- Clean up overlay and restore original point.
+			self._isearch_match = nil
+			self._query_ranges = nil
+			local mv = self:current_view()
+			if mv and self._isearch_origin_line then
+				mv:p().line = self._isearch_origin_line
+				mv:p().col = self._isearch_origin_col
+				mv:_set_goal_col(mv:p().col)
+				mv:unset_mark()
+			end
+			self._isearch_origin_line = nil
+			self._isearch_origin_col = nil
+		end,
+	}
 
-    mb_opts.initial = initial_query
+	mb_opts.initial = initial_query
 
-    self:read_from_minibuffer(mb_opts)
+	self:read_from_minibuffer(mb_opts)
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -2962,20 +3327,20 @@ end
 ---@param caps string[] caps[1]=whole match, caps[2..10]=groups 1..9
 ---@return string
 local function expand_replacement(template, caps)
-    return (
-        template:gsub("\\(.)", function(c)
-            if c == "&" then
-                return caps[1] or ""
-            elseif c == "\\" then
-                return "\\"
-            elseif c >= "0" and c <= "9" then
-                local n = tonumber(c)
-                ---@cast n integer
-                return caps[n + 1] or ""
-            end
-            return c
-        end)
-    )
+	return (
+		template:gsub("\\(.)", function(c)
+			if c == "&" then
+				return caps[1] or ""
+			elseif c == "\\" then
+				return "\\"
+			elseif c >= "0" and c <= "9" then
+				local n = tonumber(c)
+				---@cast n integer
+				return caps[n + 1] or ""
+			end
+			return c
+		end)
+	)
 end
 Editor._expand_replacement = expand_replacement -- exposed for tests
 
@@ -2992,113 +3357,102 @@ Editor._expand_replacement = expand_replacement -- exposed for tests
 ---          valid (each edit only shifts positions after it).
 ---@param initial_query string? optional pre-fill
 function Editor:start_query_replace_regexp(initial_query)
-    local main_view = self:current_view()
-    if not main_view or not main_view.file_loaded then
-        return
-    end
+	local main_view = self:current_view()
+	if not main_view or not main_view.file_loaded then
+		return
+	end
 
-    if not initial_query and main_view:p().anchor_line then
-        local sl, sc, el, ec = main_view:selection_range()
-        if sl then
-            ---@cast sc integer
-            ---@cast el integer
-            ---@cast ec integer
-            initial_query = main_view:text_between(sl, sc, el, ec)
-        end
-    end
+	if not initial_query and main_view:p().anchor_line then
+		local sl, sc, el, ec = main_view:selection_range()
+		if sl then
+			---@cast sc integer
+			---@cast el integer
+			---@cast ec integer
+			initial_query = main_view:text_between(sl, sc, el, ec)
+		end
+	end
 
-    self._isearch_origin_line = main_view:p().line
-    self._isearch_origin_col = main_view:p().col
-    self._isearch_direction = 1
-    self._isearch_regex = true
-    -- Preserve the true origin across step 1's overlay moves, since
-    -- _isearch_origin_* are clobbered/restored during step 1.
-    local saved_origin_line = self._isearch_origin_line
-    local saved_origin_col = self._isearch_origin_col
-    ---@cast saved_origin_line integer
-    ---@cast saved_origin_col integer
+	self._isearch_origin_line = main_view:p().line
+	self._isearch_origin_col = main_view:p().col
+	self._isearch_direction = 1
+	self._isearch_regex = true
+	-- Preserve the true origin across step 1's overlay moves, since
+	-- _isearch_origin_* are clobbered/restored during step 1.
+	local saved_origin_line = self._isearch_origin_line
+	local saved_origin_col = self._isearch_origin_col
+	---@cast saved_origin_line integer
+	---@cast saved_origin_col integer
 
-    local mb_opts = {
-        prompt = "Query replace regexp: ",
-        completion = true,
-        on_change = function(query)
-            self:_isearch_update(query)
-        end,
-        on_submit = function(query)
-            self._isearch_match = nil
-            self._isearch_regex = nil
-            self._isearch_origin_line = nil
-            self._isearch_origin_col = nil
-            if #query == 0 then
-                return
-            end
-            -- Populate pending cursors + capture groups for EVERY
-            -- match across the buffer. They show as drop markers
-            -- and are navigable with C-x C-n/p.
-            local mv = self:current_view()
-            if not mv or not mv.file_loaded then
-                return
-            end
-            mv.pending_cursors = {}
-            self._query_captures = {}
-            -- search_regex via _isearch_iter (regex-armed) so capture
-            -- groups are populated; step 1 cleared _isearch_regex,
-            -- so re-arm briefly.
-            self._isearch_regex = true
-            local iter, err = self:_isearch_iter(mv.buffer, query, { line = 0, offset = 0 }, 1)
-            if not iter then
-                self._isearch_regex = nil
-                self.status_message = "invalid regexp: " .. tostring(err)
-                return
-            end
-            local count = 0
-            for match in iter do
-                mv:drop_cursor(match.line, match.offset)
-                self._query_captures[#self._query_captures + 1] = {
-                    end_line = match.end_line,
-                    end_offset = match.end_offset,
-                    caps = match.captures or { "" },
-                }
-                count = count + 1
-            end
-            if count == 0 then
-                self.status_message = "no matches"
-                self._query_captures = nil
-                return
-            end
-            -- Step 2: prompt for the replacement template.
-            self:read_from_minibuffer({
-                prompt = "Replace regexp " .. query .. " with: ",
-                on_submit = function(template)
-                    self:_begin_replace_regexp_batch(
-                        template,
-                        saved_origin_line,
-                        saved_origin_col,
-                        count
-                    )
-                end,
-                on_cancel = function()
-                    self:_cancel_replace_regexp()
-                end,
-            })
-        end,
-        on_cancel = function()
-            self._isearch_match = nil
-            self._isearch_regex = nil
-            local mv = self:current_view()
-            if mv and self._isearch_origin_line then
-                mv:p().line = self._isearch_origin_line
-                mv:p().col = self._isearch_origin_col
-                mv:_set_goal_col(mv:p().col)
-                mv:unset_mark()
-            end
-            self._isearch_origin_line = nil
-            self._isearch_origin_col = nil
-        end,
-    }
+	-- Step 1: regexp prompt with isearch live preview.
+	local r1 = async.await(self:read_minibuffer_async({
+		prompt = "Query replace regexp: ",
+		completion = true,
+		initial = initial_query,
+		on_change = function(query)
+			self:_isearch_update(query)
+		end,
+	}))
 
-    mb_opts.initial = initial_query
-    self:read_from_minibuffer(mb_opts)
+	-- Clean up isearch state now that the prompt is closed.
+	self._isearch_match = nil
+	self._isearch_regex = nil
+	self._isearch_origin_line = nil
+	self._isearch_origin_col = nil
+
+	if r1.cancelled or #(r1.value or "") == 0 then
+		if r1.cancelled then
+			local mv = self:current_view()
+			if mv and saved_origin_line then
+				mv:p().line = saved_origin_line
+				mv:p().col = saved_origin_col
+				mv:_set_goal_col(mv:p().col)
+				mv:unset_mark()
+			end
+		end
+		return
+	end
+	local query = r1.value
+
+	-- Populate pending cursors + capture groups for EVERY match.
+	local mv = self:current_view()
+	if not mv or not mv.file_loaded then
+		return
+	end
+	mv.pending_cursors = {}
+	self._query_captures = {}
+	self._isearch_regex = true
+	local iter, err = self:_isearch_iter(mv.buffer, query, { line = 0, offset = 0 }, 1)
+	if not iter then
+		self._isearch_regex = nil
+		self.status_message = "invalid regexp: " .. tostring(err)
+		return
+	end
+	local count = 0
+	for match in iter do
+		mv:drop_cursor(match.line, match.offset)
+		self._query_captures[#self._query_captures + 1] = {
+			end_line = match.end_line,
+			end_offset = match.end_offset,
+			caps = match.captures or { "" },
+		}
+		count = count + 1
+	end
+	if count == 0 then
+		self.status_message = "no matches"
+		self._query_captures = nil
+		return
+	end
+
+	-- Step 2: replacement template prompt.
+	local r2 = async.await(self:read_minibuffer_async({
+		prompt = "Replace regexp " .. query .. " with: ",
+	}))
+
+	if r2.cancelled then
+		self:_cancel_replace_regexp()
+		return
+	end
+	self:_begin_replace_regexp_batch(r2.value, saved_origin_line, saved_origin_col, count)
 end
 
 --- Enter the y/n batch walk after both prompts are submitted.
@@ -3107,76 +3461,74 @@ end
 ---@param origin_col integer saved primary cursor col
 ---@param count integer total candidate count (for the prompt)
 function Editor:_begin_replace_regexp_batch(template, origin_line, origin_col, count)
-    local mv = self:current_view()
-    if not mv or not mv.file_loaded or not mv:has_pending_cursors() then
-        return
-    end
-    self._query_replace_template = template
-    self._query_replacements = {}
-    self._replace_regexp_origin_line = origin_line
-    self._replace_regexp_origin_col = origin_col
-    -- Jump the primary cursor to the first candidate so y/n act on a
-    -- real candidate (without this, promote/skip at primary fails
-    -- silently — the primary may sit where no candidate lives).
-    local first = mv.pending_cursors[1]
-    if first then
-        mv:p().line = first.line
-        mv:p().col = first.col
-        mv:_set_goal_col(first.col)
-    end
-    mv:unset_mark()
-    self._replace_regexp_active = true
-    -- Push transient key handler for y/n/!/enter navigation (LIFO).
-    -- Self-deactivates when _replace_regexp_active is cleared.
-    if not self._replace_regexp_handler_id then
-        local regexp_handler = keybind.handler({
-            ["y"] = function(ed)
-                return ed:_handle_replace_regexp_key("y")
-            end,
-            ["n"] = function(ed)
-                return ed:_handle_replace_regexp_key("n")
-            end,
-            ["!"] = function(ed)
-                return ed:_handle_replace_regexp_key("!")
-            end,
-        })
-        self._replace_regexp_handler_id = self:push_transient_handler(
-            function(ed, token, ch, is_printable)
-                if not ed._replace_regexp_active then
-                    return false
-                end
-                if is_printable and ch then
-                    return regexp_handler(ed, token, ch, is_printable)
-                end
-                if token == "enter" then
-                    ed:_commit_replace_regexp()
-                    return true
-                end
-                return false
-            end
-        )
-    end
-    self.status_message = count
-        .. " matches — y replace, n skip, ! all, RET commit, C-g cancel (C-x C-n/p to navigate)"
+	local mv = self:current_view()
+	if not mv or not mv.file_loaded or not mv:has_pending_cursors() then
+		return
+	end
+	self._query_replace_template = template
+	self._query_replacements = {}
+	self._replace_regexp_origin_line = origin_line
+	self._replace_regexp_origin_col = origin_col
+	-- Jump the primary cursor to the first candidate so y/n act on a
+	-- real candidate (without this, promote/skip at primary fails
+	-- silently — the primary may sit where no candidate lives).
+	local first = mv.pending_cursors[1]
+	if first then
+		mv:p().line = first.line
+		mv:p().col = first.col
+		mv:_set_goal_col(first.col)
+	end
+	mv:unset_mark()
+	self._replace_regexp_active = true
+	-- Push transient key handler for y/n/!/enter navigation (LIFO).
+	-- Self-deactivates when _replace_regexp_active is cleared.
+	if not self._replace_regexp_handler_id then
+		local regexp_handler = keybind.handler({
+			["y"] = function(ed)
+				return ed:_handle_replace_regexp_key("y")
+			end,
+			["n"] = function(ed)
+				return ed:_handle_replace_regexp_key("n")
+			end,
+			["!"] = function(ed)
+				return ed:_handle_replace_regexp_key("!")
+			end,
+		})
+		self._replace_regexp_handler_id = self:push_transient_handler(function(ed, token, ch, is_printable)
+			if not ed._replace_regexp_active then
+				return false
+			end
+			if is_printable and ch then
+				return regexp_handler(ed, token, ch, is_printable)
+			end
+			if token == "enter" then
+				ed:_commit_replace_regexp()
+				return true
+			end
+			return false
+		end)
+	end
+	self.status_message = count
+		.. " matches — y replace, n skip, ! all, RET commit, C-g cancel (C-x C-n/p to navigate)"
 end
 
 --- Find the index of the pending cursor sitting at the primary
 --- cursor's position.
 ---@return integer|nil
 function Editor:_replace_regexp_candidate_index()
-    local mv = self:current_view()
-    if not mv then
-        return nil
-    end
-    local p = mv:p()
-    local pending = mv.pending_cursors
-    for i = 1, #pending do
-        local c = pending[i]
-        if c.line == p.line and c.col == p.col then
-            return i
-        end
-    end
-    return nil
+	local mv = self:current_view()
+	if not mv then
+		return nil
+	end
+	local p = mv:p()
+	local pending = mv.pending_cursors
+	for i = 1, #pending do
+		local c = pending[i]
+		if c.line == p.line and c.col == p.col then
+			return i
+		end
+	end
+	return nil
 end
 
 --- Stash the candidate at the primary cursor as an accepted
@@ -3185,75 +3537,75 @@ end
 --- stashed. Does NOT mutate the buffer (edits are deferred to commit).
 ---@return boolean
 function Editor:_stash_candidate_at_primary()
-    local mv = self:current_view()
-    if not mv then
-        return false
-    end
-    local i = self:_replace_regexp_candidate_index()
-    if not i then
-        return false
-    end
-    local caps_entry = self._query_captures and self._query_captures[i]
-    if not caps_entry then
-        return false
-    end
-    local c = mv.pending_cursors[i]
-    local text = expand_replacement(self._query_replace_template, caps_entry.caps or { "" })
-    self._query_replacements = self._query_replacements or {}
-    self._query_replacements[#self._query_replacements + 1] = {
-        line = c.line,
-        offset = c.col,
-        end_line = caps_entry.end_line,
-        end_offset = caps_entry.end_offset,
-        text = text,
-    }
-    table.remove(mv.pending_cursors, i)
-    if self._query_captures then
-        table.remove(self._query_captures, i)
-    end
-    return true
+	local mv = self:current_view()
+	if not mv then
+		return false
+	end
+	local i = self:_replace_regexp_candidate_index()
+	if not i then
+		return false
+	end
+	local caps_entry = self._query_captures and self._query_captures[i]
+	if not caps_entry then
+		return false
+	end
+	local c = mv.pending_cursors[i]
+	local text = expand_replacement(self._query_replace_template, caps_entry.caps or { "" })
+	self._query_replacements = self._query_replacements or {}
+	self._query_replacements[#self._query_replacements + 1] = {
+		line = c.line,
+		offset = c.col,
+		end_line = caps_entry.end_line,
+		end_offset = caps_entry.end_offset,
+		text = text,
+	}
+	table.remove(mv.pending_cursors, i)
+	if self._query_captures then
+		table.remove(self._query_captures, i)
+	end
+	return true
 end
 
 --- Drop the candidate at the primary cursor (skip without replacing).
 ---@return boolean
 function Editor:_skip_candidate_at_primary()
-    local mv = self:current_view()
-    if not mv then
-        return false
-    end
-    local i = self:_replace_regexp_candidate_index()
-    if not i then
-        return false
-    end
-    table.remove(mv.pending_cursors, i)
-    if self._query_captures then
-        table.remove(self._query_captures, i)
-    end
-    return true
+	local mv = self:current_view()
+	if not mv then
+		return false
+	end
+	local i = self:_replace_regexp_candidate_index()
+	if not i then
+		return false
+	end
+	table.remove(mv.pending_cursors, i)
+	if self._query_captures then
+		table.remove(self._query_captures, i)
+	end
+	return true
 end
 
 --- Stash every remaining pending candidate, then commit all stashed
 --- replacements in reverse document order (one undo group).
 function Editor:_replace_regexp_replace_all()
-    local mv = self:current_view()
-    if not mv then
-        return
-    end
-    while mv:has_pending_cursors() do
-        -- Stash from the front each iteration; _stash_candidate_at_primary
-        -- operates on whichever candidate is at the primary cursor, so
-        -- jump the primary to the first pending cursor first.
-        local first = mv.pending_cursors[1]
-        if not first then
-            break
-        end
-        mv:p().line = first.line
-        mv:p().col = first.col
-        if not self:_stash_candidate_at_primary() then
-            break
-        end
-    end
-    self:_commit_replace_regexp()
+	local mv = self:current_view()
+	if not mv then
+		return
+	end
+	while mv:has_pending_cursors() do
+		-- Stash from the front each iteration; _stash_candidate_at_primary
+		-- operates on whichever candidate is at the primary cursor, so
+		-- jump the primary to the first pending cursor first.
+		local first = mv.pending_cursors[1]
+		if not first then
+			break
+		end
+		mv:p().line = first.line
+		mv:p().col = first.col
+		if not self:_stash_candidate_at_primary() then
+			break
+		end
+	end
+	self:_commit_replace_regexp()
 end
 
 --- Handle a single printable key during the regexp-replace walk.
@@ -3261,35 +3613,35 @@ end
 ---@param ch string single character
 ---@return boolean true if consumed
 function Editor:_handle_replace_regexp_key(ch)
-    if not self._replace_regexp_active then
-        return false
-    end
-    if ch == "y" then
-        self:_stash_candidate_at_primary()
-        self:_advance_replace_regexp()
-        return true
-    elseif ch == "n" then
-        self:_skip_candidate_at_primary()
-        self:_advance_replace_regexp()
-        return true
-    elseif ch == "!" then
-        self:_replace_regexp_replace_all()
-        return true
-    end
-    return false
+	if not self._replace_regexp_active then
+		return false
+	end
+	if ch == "y" then
+		self:_stash_candidate_at_primary()
+		self:_advance_replace_regexp()
+		return true
+	elseif ch == "n" then
+		self:_skip_candidate_at_primary()
+		self:_advance_replace_regexp()
+		return true
+	elseif ch == "!" then
+		self:_replace_regexp_replace_all()
+		return true
+	end
+	return false
 end
 
 --- Advance to the next candidate, or commit if none remain.
 function Editor:_advance_replace_regexp()
-    local mv = self:current_view()
-    if not mv then
-        return
-    end
-    if not mv:has_pending_cursors() then
-        self:_commit_replace_regexp()
-        return
-    end
-    self:_nav_candidate(1)
+	local mv = self:current_view()
+	if not mv then
+		return
+	end
+	if not mv:has_pending_cursors() then
+		self:_commit_replace_regexp()
+		return
+	end
+	self:_nav_candidate(1)
 end
 
 --- Apply every stashed replacement in reverse document order within a
@@ -3297,91 +3649,91 @@ end
 --- each delete+insert only shifts positions AFTER it, and we've
 --- already processed those.
 function Editor:_commit_replace_regexp()
-    local mv = self:current_view()
-    self._replace_regexp_active = nil
-    local reps = self._query_replacements or {}
-    local template_ok = self._query_replace_template ~= nil
-    -- Capture origin before _clear_replace_regexp_state nils it.
-    local origin_line = self._replace_regexp_origin_line
-    local origin_col = self._replace_regexp_origin_col
-    -- Clear walk state up front (after the walk, before edits).
-    self:_clear_replace_regexp_state()
-    if not mv then
-        return
-    end
-    if #reps == 0 then
-        if template_ok then
-            self.status_message = "no replacements made"
-        end
-        return
-    end
-    -- Reverse-document order: descending by (line, offset).
-    table.sort(reps, function(a, b)
-        if a.line ~= b.line then
-            return a.line > b.line
-        end
-        return a.offset > b.offset
-    end)
-    local buf = mv.buffer
-    buf:close_edit()
-    buf:begin_edit()
-    for i = 1, #reps do
-        local r = reps[i]
-        local n = mv:chars_between(r.line, r.offset, r.end_line, r.end_offset)
-        ---@cast n integer
-        local rl, rc = r.line, r.offset
-        if n > 0 then
-            rl, rc = buf:delete_char(r.line, r.offset, n)
-        end
-        if #r.text > 0 then
-            rl, rc = buf:insert_char(rl, rc, r.text)
-        end
-    end
-    buf:end_edit()
-    -- Restore point to the saved origin (predictable, matches C-g).
-    if origin_line then
-        ---@cast origin_line integer
-        ---@cast origin_col integer
-        mv:p().line = origin_line
-        mv:p().col = origin_col
-        mv:_set_goal_col(origin_col)
-        mv:unset_mark()
-    end
-    self.status_message = "replaced " .. #reps .. (#reps == 1 and " occurrence" or " occurrences")
+	local mv = self:current_view()
+	self._replace_regexp_active = nil
+	local reps = self._query_replacements or {}
+	local template_ok = self._query_replace_template ~= nil
+	-- Capture origin before _clear_replace_regexp_state nils it.
+	local origin_line = self._replace_regexp_origin_line
+	local origin_col = self._replace_regexp_origin_col
+	-- Clear walk state up front (after the walk, before edits).
+	self:_clear_replace_regexp_state()
+	if not mv then
+		return
+	end
+	if #reps == 0 then
+		if template_ok then
+			self.status_message = "no replacements made"
+		end
+		return
+	end
+	-- Reverse-document order: descending by (line, offset).
+	table.sort(reps, function(a, b)
+		if a.line ~= b.line then
+			return a.line > b.line
+		end
+		return a.offset > b.offset
+	end)
+	local buf = mv.buffer
+	buf:close_edit()
+	buf:begin_edit()
+	for i = 1, #reps do
+		local r = reps[i]
+		local n = mv:chars_between(r.line, r.offset, r.end_line, r.end_offset)
+		---@cast n integer
+		local rl, rc = r.line, r.offset
+		if n > 0 then
+			rl, rc = buf:delete_char(r.line, r.offset, n)
+		end
+		if #r.text > 0 then
+			rl, rc = buf:insert_char(rl, rc, r.text)
+		end
+	end
+	buf:end_edit()
+	-- Restore point to the saved origin (predictable, matches C-g).
+	if origin_line then
+		---@cast origin_line integer
+		---@cast origin_col integer
+		mv:p().line = origin_line
+		mv:p().col = origin_col
+		mv:_set_goal_col(origin_col)
+		mv:unset_mark()
+	end
+	self.status_message = "replaced " .. #reps .. (#reps == 1 and " occurrence" or " occurrences")
 end
 
 --- Clear all regexp-replace walk state (does not touch the buffer).
 function Editor:_clear_replace_regexp_state()
-    local mv = self:current_view()
-    if mv then
-        mv.pending_cursors = {}
-    end
-    self._query_captures = nil
-    self._query_replacements = nil
-    self._query_replace_template = nil
-    self._replace_regexp_active = nil
-    self._replace_regexp_origin_line = nil
-    self._replace_regexp_origin_col = nil
-    self._isearch_match = nil
-    self._isearch_regex = nil
+	local mv = self:current_view()
+	if mv then
+		mv.pending_cursors = {}
+	end
+	self._query_captures = nil
+	self._query_replacements = nil
+	self._query_replace_template = nil
+	self._replace_regexp_active = nil
+	self._replace_regexp_origin_line = nil
+	self._replace_regexp_origin_col = nil
+	self._isearch_match = nil
+	self._isearch_regex = nil
 end
 
 --- Cancel the walk and restore the original point (no edits applied).
 function Editor:_cancel_replace_regexp()
-    -- Capture origin before _clear_replace_regexp_state nils it.
-    local origin_line = self._replace_regexp_origin_line
-    local origin_col = self._replace_regexp_origin_col
-    self:_clear_replace_regexp_state()
-    local mv = self:current_view()
-    if mv and origin_line then
-        ---@cast origin_line integer
-        ---@cast origin_col integer
-        mv:p().line = origin_line
-        mv:p().col = origin_col
-        mv:_set_goal_col(origin_col)
-        mv:unset_mark()
-    end
-    self.status_message = "Quit"
+	-- Capture origin before _clear_replace_regexp_state nils it.
+	local origin_line = self._replace_regexp_origin_line
+	local origin_col = self._replace_regexp_origin_col
+	self:_clear_replace_regexp_state()
+	local mv = self:current_view()
+	if mv and origin_line then
+		---@cast origin_line integer
+		---@cast origin_col integer
+		mv:p().line = origin_line
+		mv:p().col = origin_col
+		mv:_set_goal_col(origin_col)
+		mv:unset_mark()
+	end
+	self.status_message = "Quit"
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -3391,17 +3743,17 @@ end
 --- Get the focused view (minibuffer view when active, otherwise main view).
 ---@return View|nil
 function Editor:focused_view()
-    if self.minibuffer and self.minibuffer.active and not self._universal_active then
-        return self.minibuffer.view
-    end
-    return self:current_view()
+	if self.minibuffer and self.minibuffer.active and not self._universal_active then
+		return self.minibuffer.view
+	end
+	return self:current_view()
 end
 
 --- Get the active view's buffer.
 ---@return Buffer|nil
 function Editor:buffer()
-    local view = self:current_view()
-    return view and view.buffer
+	local view = self:current_view()
+	return view and view.buffer
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -3410,30 +3762,28 @@ end
 
 ---@param height integer terminal height in rows
 function Editor:scroll_to_cursor(height)
-    local view = self:current_view()
-    if view then
-        view:scroll_to_cursor(height)
-    end
+	local view = self:current_view()
+	if view then
+		view:scroll_to_cursor(height)
+	end
 end
 
 --- Get the number of footer rows (modeline + minibuffer input rows + completions + eval).
 ---@return integer
 function Editor:footer_rows()
-    local mb = self.minibuffer
-    local mb_rows = 0
-    if mb and mb.active then
-        -- Palette mode floats over the buffer (centered box), so it
-        -- reserves NO bottom rows — only the modeline does.
-        if not mb.palette then
-            mb_rows = mb:input_rows()
-        end
-    elseif self._eval_result then
-        mb_rows = 1
-    end
-    local comp_rows = (mb and mb.active and not mb.palette and mb.completion)
-            and mb:comp_visible_rows()
-        or 0
-    return 1 + mb_rows + comp_rows
+	local mb = self.minibuffer
+	local mb_rows = 0
+	if mb and mb.active then
+		-- Palette mode floats over the buffer (centered box), so it
+		-- reserves NO bottom rows — only the modeline does.
+		if not mb.palette then
+			mb_rows = mb:input_rows()
+		end
+	elseif self._eval_result then
+		mb_rows = 1
+	end
+	local comp_rows = (mb and mb.active and not mb.palette and mb.completion) and mb:comp_visible_rows() or 0
+	return 1 + mb_rows + comp_rows
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -3449,113 +3799,113 @@ end
 ---@param y integer screen row for the modeline
 ---@param fp function float-print sink (x, y, text, fg, bg) from the overlay manager
 function Editor:render_modeline(view, w, y, fp)
-    local scheme = ColorScheme.active
-    if scheme == nil or self.modeline_segments == nil then
-        return
-    end
+	local scheme = ColorScheme.active
+	if scheme == nil or self.modeline_segments == nil then
+		return
+	end
 
-    -- 1. Evaluate formats → survivors. A segment with empty text and
-    --    non-fill elides entirely (no block, no separators).
-    local segs = {}
-    for _, spec in ipairs(self.modeline_segments) do
-        local text = spec.format(self, view)
-        if text == nil then
-            text = ""
-        end
-        local is_fill = spec.fill == true
-        if text ~= "" or is_fill then
-            segs[#segs + 1] = {
-                text = text,
-                fill = is_fill,
-                w = cell_len(text),
-                bg_spec = spec.bg,
-                fg_spec = spec.fg,
-            }
-        end
-    end
-    local n = #segs
-    if n == 0 then
-        return
-    end
+	-- 1. Evaluate formats → survivors. A segment with empty text and
+	--    non-fill elides entirely (no block, no separators).
+	local segs = {}
+	for _, spec in ipairs(self.modeline_segments) do
+		local text = spec.format(self, view)
+		if text == nil then
+			text = ""
+		end
+		local is_fill = spec.fill == true
+		if text ~= "" or is_fill then
+			segs[#segs + 1] = {
+				text = text,
+				fill = is_fill,
+				w = cell_len(text),
+				bg_spec = spec.bg,
+				fg_spec = spec.fg,
+			}
+		end
+	end
+	local n = #segs
+	if n == 0 then
+		return
+	end
 
-    -- 2. Resolve colors: bg from spec; text = spec.fg override or
-    --    auto-detected from bg luminance (dark bg → base06, light → base00).
-    for _, s in ipairs(segs) do
-        s.bg_color = resolve_seg_color(s.bg_spec, ui("modeline_bg"))
-        if s.fg_spec ~= nil then
-            s.fg_color = resolve_seg_color(s.fg_spec, ui("modeline_fg"))
-        else
-            s.fg_color = auto_text_color(scheme, s.bg_color)
-        end
-    end
+	-- 2. Resolve colors: bg from spec; text = spec.fg override or
+	--    auto-detected from bg luminance (dark bg → base06, light → base00).
+	for _, s in ipairs(segs) do
+		s.bg_color = resolve_seg_color(s.bg_spec, ui("modeline_bg"))
+		if s.fg_spec ~= nil then
+			s.fg_color = resolve_seg_color(s.fg_spec, ui("modeline_fg"))
+		else
+			s.fg_color = auto_text_color(scheme, s.bg_color)
+		end
+	end
 
-    -- 3. Layout. available space = w − Σ(text widths) − (N−1 separators).
-    --    Split `available` evenly among `fill` segments; remainder →
-    --    leftmost fills first.
-    local seps = n - 1
-    local text_total = 0
-    local fill_count = 0
-    for _, s in ipairs(segs) do
-        text_total = text_total + s.w
-        if s.fill then
-            fill_count = fill_count + 1
-        end
-    end
-    local available = w - text_total - seps
-    if available < 0 then
-        available = 0
-    end
-    local pad_each = 0
-    local remainder = 0
-    if fill_count > 0 then
-        pad_each = math.floor(available / fill_count)
-        remainder = available - pad_each * fill_count
-    end
+	-- 3. Layout. available space = w − Σ(text widths) − (N−1 separators).
+	--    Split `available` evenly among `fill` segments; remainder →
+	--    leftmost fills first.
+	local seps = n - 1
+	local text_total = 0
+	local fill_count = 0
+	for _, s in ipairs(segs) do
+		text_total = text_total + s.w
+		if s.fill then
+			fill_count = fill_count + 1
+		end
+	end
+	local available = w - text_total - seps
+	if available < 0 then
+		available = 0
+	end
+	local pad_each = 0
+	local remainder = 0
+	if fill_count > 0 then
+		pad_each = math.floor(available / fill_count)
+		remainder = available - pad_each * fill_count
+	end
 
-    -- 4. Paint, left → right. Each segment: bg block of its allocation
-    --    (spaces), then the text overdrawn at the start, then a separator
-    --    cell (unless last). Separator glyph alternates ◣ / ◢ and its colors
-    --    are derived from the two adjacent segments' bg colors.
-    local x = 0
-    for i, s in ipairs(segs) do
-        local extra = 0
-        if s.fill then
-            extra = pad_each
-            if remainder > 0 then
-                extra = extra + 1
-                remainder = remainder - 1
-            end
-        end
-        local alloc = s.w + extra
-        if alloc < 1 then
-            alloc = s.w > 0 and s.w or 1
-        end
-        -- Truncate text to its allocation when it overflows (available was
-        -- clamped to 0, so a non-fill segment wider than the row clips).
-        local text = s.text
-        if s.w > alloc then
-            text = truncate_cells(text, alloc)
-        end
-        -- bg block fill for the whole allocation.
-        fp(x, y, spaces(alloc), s.fg_color, s.bg_color)
-        -- text overdrawn at the start.
-        if text ~= "" then
-            fp(x, y, text, s.fg_color, s.bg_color)
-        end
-        x = x + alloc
-        -- Separator at the boundary between segs[i] and segs[i+1].
-        if i < n then
-            local rbg = segs[i + 1].bg_color
-            if (i - 1) % 2 == 0 then
-                -- Even boundary (0-based): ◣ lower-left, fg = left bg, bg = right bg.
-                fp(x, y, "◣", s.bg_color, rbg)
-            else
-                -- Odd boundary: ◢ lower-right, fg = right bg, bg = left bg.
-                fp(x, y, "◢", rbg, s.bg_color)
-            end
-            x = x + 1
-        end
-    end
+	-- 4. Paint, left → right. Each segment: bg block of its allocation
+	--    (spaces), then the text overdrawn at the start, then a separator
+	--    cell (unless last). Separator glyph alternates ◣ / ◢ and its colors
+	--    are derived from the two adjacent segments' bg colors.
+	local x = 0
+	for i, s in ipairs(segs) do
+		local extra = 0
+		if s.fill then
+			extra = pad_each
+			if remainder > 0 then
+				extra = extra + 1
+				remainder = remainder - 1
+			end
+		end
+		local alloc = s.w + extra
+		if alloc < 1 then
+			alloc = s.w > 0 and s.w or 1
+		end
+		-- Truncate text to its allocation when it overflows (available was
+		-- clamped to 0, so a non-fill segment wider than the row clips).
+		local text = s.text
+		if s.w > alloc then
+			text = truncate_cells(text, alloc)
+		end
+		-- bg block fill for the whole allocation.
+		fp(x, y, spaces(alloc), s.fg_color, s.bg_color)
+		-- text overdrawn at the start.
+		if text ~= "" then
+			fp(x, y, text, s.fg_color, s.bg_color)
+		end
+		x = x + alloc
+		-- Separator at the boundary between segs[i] and segs[i+1].
+		if i < n then
+			local rbg = segs[i + 1].bg_color
+			if (i - 1) % 2 == 0 then
+				-- Even boundary (0-based): ◣ lower-left, fg = left bg, bg = right bg.
+				fp(x, y, "◣", s.bg_color, rbg)
+			else
+				-- Odd boundary: ◢ lower-right, fg = right bg, bg = left bg.
+				fp(x, y, "◢", rbg, s.bg_color)
+			end
+			x = x + 1
+		end
+	end
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -3564,23 +3914,23 @@ end
 
 --- Clamp all cursors in all file-loaded views before rendering.
 function Editor:_render_clamp_views()
-    for _, v in ipairs(self.views) do
-        if v.file_loaded then
-            v:_clamp_all_cursors()
-        end
-    end
+	for _, v in ipairs(self.views) do
+		if v.file_loaded then
+			v:_clamp_all_cursors()
+		end
+	end
 end
 
 --- Clear the backbuffer and apply focus-backdrop tint.
 ---@param term table
 function Editor:_render_clear(term)
-    local mb = self.minibuffer
-    local clear_bg = ui("default_bg")
-    if mb and mb.palette then
-        clear_bg = blend(clear_bg, 0x000000, 195)
-    end
-    term:clear(ui("default_fg"), clear_bg)
-    term:hide_cursor()
+	local mb = self.minibuffer
+	local clear_bg = ui("default_bg")
+	if mb and mb.palette then
+		clear_bg = blend(clear_bg, 0x000000, 195)
+	end
+	term:clear(ui("default_fg"), clear_bg)
+	term:hide_cursor()
 end
 
 --- Render the "Loading..." placeholder.
@@ -3588,13 +3938,13 @@ end
 ---@param ov OverlayManager
 ---@param fp function
 function Editor:_render_loading(term, ov, fp)
-    local msg = "Loading..."
-    local x = math.floor(term:width() / 2) - math.floor(#msg / 2)
-    local y = math.floor(term:height() / 2)
-    fp(x, y, msg, ui("default_fg"), ui("default_bg"))
-    ov:emit_render()
-    ov:flush()
-    term:present()
+	local msg = "Loading..."
+	local x = math.floor(term:width() / 2) - math.floor(#msg / 2)
+	local y = math.floor(term:height() / 2)
+	fp(x, y, msg, ui("default_fg"), ui("default_bg"))
+	ov:emit_render()
+	ov:flush()
+	term:present()
 end
 
 --- Compute text geometry and return a table of derived values.
@@ -3602,19 +3952,19 @@ end
 ---@param w integer terminal width
 ---@return table geo {gutter_w, text_x, text_w, block_x, block_w, line_digits, sign_fns, sign_count}
 function Editor:_render_geometry(view, w)
-    local gutter_w, text_x, text_w, block_x, block_w = view:text_geometry(w)
-    local line_count = view.buffer:line_count()
-    local sign_fns = self.gutter_sign_fns
-    return {
-        gutter_w = gutter_w,
-        text_x = text_x,
-        text_w = text_w,
-        block_x = block_x,
-        block_w = block_w,
-        line_digits = #tostring(line_count),
-        sign_fns = sign_fns,
-        sign_count = sign_fns and #sign_fns or 0,
-    }
+	local gutter_w, text_x, text_w, block_x, block_w = view:text_geometry(w)
+	local line_count = view.buffer:line_count()
+	local sign_fns = self.gutter_sign_fns
+	return {
+		gutter_w = gutter_w,
+		text_x = text_x,
+		text_w = text_w,
+		block_x = block_x,
+		block_w = block_w,
+		line_digits = #tostring(line_count),
+		sign_fns = sign_fns,
+		sign_count = sign_fns and #sign_fns or 0,
+	}
 end
 
 --- Compute footer layout, wrap settings, and viewport byte range.
@@ -3626,64 +3976,64 @@ end
 ---@param ov OverlayManager
 ---@return table layout {max_y, footer_tail, reflowed, vstart_li, vend_li}
 function Editor:_render_layout(mb, view, text_w, term, fp, ov)
-    local w, h = term:width(), term:height()
+	local w, h = term:width(), term:height()
 
-    -- Minibuffer chrome
-    local mb_tail = self.minibuffer:_render(self, w, h, fp)
-    local eval_rows = (not (mb and mb.active) and self._eval_result) and 1 or 0
-    local footer_tail = mb_tail + eval_rows
-    local max_y = h - footer_tail - 2
+	-- Minibuffer chrome
+	local mb_tail = self.minibuffer:_render(self, w, h, fp)
+	local eval_rows = (not (mb and mb.active) and self._eval_result) and 1 or 0
+	local footer_tail = mb_tail + eval_rows
+	local max_y = h - footer_tail - 2
 
-    -- Wrap width
-    local reflowed = false
-    if view.no_wrap then
-        if view.wrap_width ~= nil then
-            view.wrap_width = nil
-            view:invalidate_wrap_cache()
-            reflowed = true
-        end
-    elseif view.wrap_width ~= text_w then
-        view.wrap_width = text_w
-        view:invalidate_wrap_cache()
-        reflowed = true
-    else
-        local gen = tonumber(view.buffer._ptr.undo.count) + tonumber(view.buffer._ptr.redo.count)
-        if view._wrap_gen ~= gen then
-            view:invalidate_wrap_cache()
-            view._wrap_gen = gen
-        end
-    end
-    if reflowed then
-        view:scroll_to_cursor(h - self:footer_rows() + 1, true)
-    end
+	-- Wrap width
+	local reflowed = false
+	if view.no_wrap then
+		if view.wrap_width ~= nil then
+			view.wrap_width = nil
+			view:invalidate_wrap_cache()
+			reflowed = true
+		end
+	elseif view.wrap_width ~= text_w then
+		view.wrap_width = text_w
+		view:invalidate_wrap_cache()
+		reflowed = true
+	else
+		local gen = tonumber(view.buffer._ptr.undo.count) + tonumber(view.buffer._ptr.redo.count)
+		if view._wrap_gen ~= gen then
+			view:invalidate_wrap_cache()
+			view._wrap_gen = gen
+		end
+	end
+	if reflowed then
+		view:scroll_to_cursor(h - self:footer_rows() + 1, true)
+	end
 
-    -- Viewport byte range for highlighter
-    local vstart_li = view.scroll_li or 0
-    local sub = view.scroll_sub_row or 0
-    local li = vstart_li
-    local filled = (view:wrap_rows(li) or 1) - sub
-    local vend_li = li
-    local line_count = view.buffer:line_count()
-    while filled <= max_y and li < line_count - 1 do
-        li = li + 1
-        filled = filled + (view:wrap_rows(li) or 1)
-        vend_li = li
-    end
-    local starts = view:_hl_line_starts()
-    local vstart_byte = starts[vstart_li + 1] or 0
-    local vend_byte = (starts[vend_li + 2] or starts[#starts] or 0)
-    if vend_byte > 0 then
-        vend_byte = vend_byte - 1
-    end
-    view:_hl_notify_viewport(vstart_byte, vend_byte)
+	-- Viewport byte range for highlighter
+	local vstart_li = view.scroll_li or 0
+	local sub = view.scroll_sub_row or 0
+	local li = vstart_li
+	local filled = (view:wrap_rows(li) or 1) - sub
+	local vend_li = li
+	local line_count = view.buffer:line_count()
+	while filled <= max_y and li < line_count - 1 do
+		li = li + 1
+		filled = filled + (view:wrap_rows(li) or 1)
+		vend_li = li
+	end
+	local starts = view:_hl_line_starts()
+	local vstart_byte = starts[vstart_li + 1] or 0
+	local vend_byte = (starts[vend_li + 2] or starts[#starts] or 0)
+	if vend_byte > 0 then
+		vend_byte = vend_byte - 1
+	end
+	view:_hl_notify_viewport(vstart_byte, vend_byte)
 
-    return {
-        max_y = max_y,
-        footer_tail = footer_tail,
-        reflowed = reflowed,
-        vstart_li = vstart_li,
-        vend_li = vend_li,
-    }
+	return {
+		max_y = max_y,
+		footer_tail = footer_tail,
+		reflowed = reflowed,
+		vstart_li = vstart_li,
+		vend_li = vend_li,
+	}
 end
 
 --- Paint a text chunk's base layer with syntax-highlight spans.
@@ -3700,61 +4050,49 @@ end
 ---@param seg_idx integer cursor into line_segs
 ---@param focus_dim function(fg, bg) → fg, bg
 ---@return integer seg_idx
-local function _paint_run(
-    term,
-    view,
-    li,
-    row,
-    text_x,
-    line_text,
-    run,
-    row_bg,
-    line_segs,
-    seg_idx,
-    focus_dim
-)
-    local chunk_start = run.byte_start - 1
-    local chunk_end = run.byte_end
-    local dfg = ui("default_fg")
-    local dbg = row_bg or ui("default_bg")
-    dfg, dbg = focus_dim(dfg, dbg)
-    local chunk = line_text:sub(run.byte_start, run.byte_end)
-    local x = text_x + run.col
-    if line_segs == nil or #line_segs == 0 then
-        term:print(x, row, chunk, dfg, dbg)
-        return seg_idx
-    end
-    local painted = 0
-    local n = #line_segs
-    while seg_idx <= n and line_segs[seg_idx].ce <= chunk_start do
-        seg_idx = seg_idx + 1
-    end
-    while seg_idx <= n do
-        local s = line_segs[seg_idx]
-        if s.cs >= chunk_end then
-            break
-        end
-        local cs = math.max(s.cs, chunk_start) - chunk_start
-        local ce = math.min(s.ce, chunk_end) - chunk_start
-        if cs > painted then
-            term:print(x, row, chunk:sub(painted + 1, cs), dfg, dbg)
-        end
-        if ce > cs then
-            local seg_fg = focus_dim(s.fg, dbg)
-            term:print(x, row, chunk:sub(cs + 1, ce), seg_fg, dbg)
-        end
-        if ce > painted then
-            painted = ce
-        end
-        if s.ce > chunk_end then
-            break
-        end
-        seg_idx = seg_idx + 1
-    end
-    if painted < #chunk then
-        term:print(x, row, chunk:sub(painted + 1), dfg, dbg)
-    end
-    return seg_idx
+local function _paint_run(term, view, li, row, text_x, line_text, run, row_bg, line_segs, seg_idx, focus_dim)
+	local chunk_start = run.byte_start - 1
+	local chunk_end = run.byte_end
+	local dfg = ui("default_fg")
+	local dbg = row_bg or ui("default_bg")
+	dfg, dbg = focus_dim(dfg, dbg)
+	local chunk = line_text:sub(run.byte_start, run.byte_end)
+	local x = text_x + run.col
+	if line_segs == nil or #line_segs == 0 then
+		term:print(x, row, chunk, dfg, dbg)
+		return seg_idx
+	end
+	local painted = 0
+	local n = #line_segs
+	while seg_idx <= n and line_segs[seg_idx].ce <= chunk_start do
+		seg_idx = seg_idx + 1
+	end
+	while seg_idx <= n do
+		local s = line_segs[seg_idx]
+		if s.cs >= chunk_end then
+			break
+		end
+		local cs = math.max(s.cs, chunk_start) - chunk_start
+		local ce = math.min(s.ce, chunk_end) - chunk_start
+		if cs > painted then
+			term:print(x, row, chunk:sub(painted + 1, cs), dfg, dbg)
+		end
+		if ce > cs then
+			local seg_fg = focus_dim(s.fg, dbg)
+			term:print(x, row, chunk:sub(cs + 1, ce), seg_fg, dbg)
+		end
+		if ce > painted then
+			painted = ce
+		end
+		if s.ce > chunk_end then
+			break
+		end
+		seg_idx = seg_idx + 1
+	end
+	if painted < #chunk then
+		term:print(x, row, chunk:sub(painted + 1), dfg, dbg)
+	end
+	return seg_idx
 end
 
 --- Render the main content loop (viewport rows).
@@ -3766,367 +4104,332 @@ end
 ---@param geo table from _render_geometry
 ---@param layout table from _render_layout
 function Editor:_render_content(view, term, mb, ov, focus_dim, geo, layout)
-    local w = term:width()
-    local max_y = layout.max_y
-    local line_count = view.buffer:line_count()
-    local sign_fns, sign_count = geo.sign_fns, geo.sign_count
-    local li = view.scroll_li or 0
-    local sub_row = view.scroll_sub_row or 0
-    local row = 0
+	local w = term:width()
+	local max_y = layout.max_y
+	local line_count = view.buffer:line_count()
+	local sign_fns, sign_count = geo.sign_fns, geo.sign_count
+	local li = view.scroll_li or 0
+	local sub_row = view.scroll_sub_row or 0
+	local row = 0
 
-    while row <= max_y and li < line_count do
-        local line_text = view:_line_text_stripped(li)
-        local display_text = line_text
-        local content_len = #display_text
+	while row <= max_y and li < line_count do
+		local line_text = view:_line_text_stripped(li)
+		local display_text = line_text
+		local content_len = #display_text
 
-        -- Syntax highlight segments (lazy, per logical line, visible range)
-        local line_segs = nil
-        local seg_idx = 1
-        local total_sub = view:wrap_rows(li)
+		-- Syntax highlight segments (lazy, per logical line, visible range)
+		local line_segs = nil
+		local seg_idx = 1
+		local total_sub = view:wrap_rows(li)
 
-        -- Gutter signs (once per logical line)
-        local signs
-        if sign_count > 0 then
-            signs = {}
-            for i = 1, sign_count do
-                signs[i] = sign_fns[i](self, view, li)
-            end
-        end
+		-- Gutter signs (once per logical line)
+		local signs
+		if sign_count > 0 then
+			signs = {}
+			for i = 1, sign_count do
+				signs[i] = sign_fns[i](self, view, li)
+			end
+		end
 
-        -- Indent-guide columns
-        local guide_cols = {}
-        do
-            local ts = view.tab_width
-            if ts and ts > 0 then
-                local lead_w, i = 0, 1
-                while i <= #display_text do
-                    local b = display_text:byte(i)
-                    if b == 32 then
-                        lead_w = lead_w + 1
-                    elseif b == 9 then
-                        lead_w = (math.floor(lead_w / ts) + 1) * ts
-                    else
-                        break
-                    end
-                    i = i + 1
-                end
-                local g = ts
-                while g <= lead_w do
-                    guide_cols[#guide_cols + 1] = g - 1
-                    g = g + ts
-                end
-            end
-        end
+		-- Indent-guide columns
+		local guide_cols = {}
+		do
+			local ts = view.tab_width
+			if ts and ts > 0 then
+				local lead_w, i = 0, 1
+				while i <= #display_text do
+					local b = display_text:byte(i)
+					if b == 32 then
+						lead_w = lead_w + 1
+					elseif b == 9 then
+						lead_w = (math.floor(lead_w / ts) + 1) * ts
+					else
+						break
+					end
+					i = i + 1
+				end
+				local g = ts
+				while g <= lead_w do
+					guide_cols[#guide_cols + 1] = g - 1
+					g = g + ts
+				end
+			end
+		end
 
-        -- Sub-rows for this logical line
-        while sub_row < total_sub and row <= max_y do
-            local ok, err = pcall(function()
-                local is_active = (view:p().line == li)
-                local row_bg = is_active and ui("active_line_bg") or ui("default_bg")
-                local num_fg = is_active and ui("line_number_active") or ui("line_number")
-                num_fg, row_bg = focus_dim(num_fg, row_bg)
+		-- Sub-rows for this logical line
+		while sub_row < total_sub and row <= max_y do
+			local ok, err = pcall(function()
+				local is_active = (view:p().line == li)
+				local row_bg = is_active and ui("active_line_bg") or ui("default_bg")
+				local num_fg = is_active and ui("line_number_active") or ui("line_number")
+				num_fg, row_bg = focus_dim(num_fg, row_bg)
 
-                local _, empty_bg = focus_dim(ui("default_fg"), ui("default_bg"))
-                term:print(0, row, spaces(w), empty_bg, empty_bg)
-                term:print(geo.block_x, row, spaces(geo.block_w), row_bg, row_bg)
+				local _, empty_bg = focus_dim(ui("default_fg"), ui("default_bg"))
+				term:print(0, row, spaces(w), empty_bg, empty_bg)
+				term:print(geo.block_x, row, spaces(geo.block_w), row_bg, row_bg)
 
-                -- Gutter: line numbers + signs
-                if not view.no_gutter and sub_row == 0 then
-                    local line_num = view.no_line_numbers and "" or tostring(li + 1)
-                    local num_pad = spaces(geo.line_digits - #line_num)
-                    term:print(geo.block_x, row, " " .. num_pad .. line_num, num_fg, row_bg)
-                end
-                if not view.no_gutter and signs then
-                    local sx = geo.block_x + 2 + geo.line_digits
-                    for i = 1, #signs do
-                        local s = signs[i]
-                        if s then
-                            term:print(sx + (i - 1), row, s.char, s.fg, s.bg or row_bg)
-                        end
-                    end
-                end
+				-- Gutter: line numbers + signs
+				if not view.no_gutter and sub_row == 0 then
+					local line_num = view.no_line_numbers and "" or tostring(li + 1)
+					local num_pad = spaces(geo.line_digits - #line_num)
+					term:print(geo.block_x, row, " " .. num_pad .. line_num, num_fg, row_bg)
+				end
+				if not view.no_gutter and signs then
+					local sx = geo.block_x + 2 + geo.line_digits
+					for i = 1, #signs do
+						local s = signs[i]
+						if s then
+							term:print(sx + (i - 1), row, s.char, s.fg, s.bg or row_bg)
+						end
+					end
+				end
 
-                -- Grapheme runs
-                local runs, row_w = view:sub_row_runs(li, sub_row)
-                local chunk_start, chunk_end = 0, 0
-                if #runs > 0 then
-                    chunk_start = runs[1].byte_start - 1
-                    chunk_end = runs[#runs].byte_end
-                end
+				-- Grapheme runs
+				local runs, row_w = view:sub_row_runs(li, sub_row)
+				local chunk_start, chunk_end = 0, 0
+				if #runs > 0 then
+					chunk_start = runs[1].byte_start - 1
+					chunk_end = runs[#runs].byte_end
+				end
 
-                -- Lazy highlight segments for visible byte range
-                if line_segs == nil and chunk_end > chunk_start then
-                    local visible_rows = (max_y or 0) + 2
-                    local wrap_w = view.wrap_width or content_len
-                    local vstart = chunk_start
-                    local vend_est = vstart + visible_rows * wrap_w * 4
-                    if vend_est > content_len then
-                        vend_est = content_len
-                    end
-                    local raw_segs = view:highlight_segments(li, vstart, vend_est)
-                    if raw_segs and vstart > 0 then
-                        for i = 1, #raw_segs do
-                            raw_segs[i].cs = raw_segs[i].cs + vstart
-                            raw_segs[i].ce = raw_segs[i].ce + vstart
-                        end
-                    end
-                    line_segs = raw_segs
-                end
+				-- Lazy highlight segments for visible byte range
+				if line_segs == nil and chunk_end > chunk_start then
+					local visible_rows = (max_y or 0) + 2
+					local wrap_w = view.wrap_width or content_len
+					local vstart = chunk_start
+					local vend_est = vstart + visible_rows * wrap_w * 4
+					if vend_est > content_len then
+						vend_est = content_len
+					end
+					local raw_segs = view:highlight_segments(li, vstart, vend_est)
+					if raw_segs and vstart > 0 then
+						for i = 1, #raw_segs do
+							raw_segs[i].cs = raw_segs[i].cs + vstart
+							raw_segs[i].ce = raw_segs[i].ce + vstart
+						end
+					end
+					line_segs = raw_segs
+				end
 
-                -- Paint grapheme runs + selection overlay
-                if #runs > 0 then
-                    -- Selection ranges for this sub-row
-                    local sel_runs = {}
-                    for rsl, rsc, rel, rec in view:selection_ranges() do
-                        ---@cast rsl integer
-                        ---@cast rsc integer
-                        ---@cast rel integer
-                        ---@cast rec integer
-                        if li >= rsl and li <= rel then
-                            local cs = (li == rsl) and math.max(rsc, 0) or 0
-                            local ce = (li == rel) and math.min(rec, content_len) or content_len
-                            local chunk_cs = math.max(cs, chunk_start)
-                            local chunk_ce = math.min(ce, chunk_end)
-                            if chunk_cs < chunk_ce then
-                                sel_runs[#sel_runs + 1] = { chunk_cs, chunk_ce }
-                            end
-                        end
-                    end
-                    table.sort(sel_runs, function(a, b)
-                        return a[1] < b[1]
-                    end)
-                    local merged = {}
-                    for _, r in ipairs(sel_runs) do
-                        if #merged > 0 and r[1] <= merged[#merged][2] then
-                            merged[#merged][2] = math.max(merged[#merged][2], r[2])
-                        else
-                            merged[#merged + 1] = { r[1], r[2] }
-                        end
-                    end
+				-- Paint grapheme runs + selection overlay
+				if #runs > 0 then
+					-- Selection ranges for this sub-row
+					local sel_runs = {}
+					for rsl, rsc, rel, rec in view:selection_ranges() do
+						---@cast rsl integer
+						---@cast rsc integer
+						---@cast rel integer
+						---@cast rec integer
+						if li >= rsl and li <= rel then
+							local cs = (li == rsl) and math.max(rsc, 0) or 0
+							local ce = (li == rel) and math.min(rec, content_len) or content_len
+							local chunk_cs = math.max(cs, chunk_start)
+							local chunk_ce = math.min(ce, chunk_end)
+							if chunk_cs < chunk_ce then
+								sel_runs[#sel_runs + 1] = { chunk_cs, chunk_ce }
+							end
+						end
+					end
+					table.sort(sel_runs, function(a, b)
+						return a[1] < b[1]
+					end)
+					local merged = {}
+					for _, r in ipairs(sel_runs) do
+						if #merged > 0 and r[1] <= merged[#merged][2] then
+							merged[#merged][2] = math.max(merged[#merged][2], r[2])
+						else
+							merged[#merged + 1] = { r[1], r[2] }
+						end
+					end
 
-                    -- Base layer: paint grapheme runs
-                    for _, run in ipairs(runs) do
-                        seg_idx = _paint_run(
-                            term,
-                            view,
-                            li,
-                            row,
-                            geo.text_x,
-                            line_text,
-                            run,
-                            row_bg,
-                            line_segs,
-                            seg_idx,
-                            focus_dim
-                        )
-                    end
+					-- Base layer: paint grapheme runs
+					for _, run in ipairs(runs) do
+						seg_idx = _paint_run(
+							term,
+							view,
+							li,
+							row,
+							geo.text_x,
+							line_text,
+							run,
+							row_bg,
+							line_segs,
+							seg_idx,
+							focus_dim
+						)
+					end
 
-                    -- Selection overlay
-                    for _, r in ipairs(merged) do
-                        local dcs = view:byte_to_col(li, r[1]) - view:byte_to_col(li, chunk_start)
-                        local dce = view:byte_to_col(li, r[2]) - view:byte_to_col(li, chunk_start)
-                        if dcs < 0 then
-                            dcs = 0
-                        end
-                        if dce > row_w then
-                            dce = row_w
-                        end
-                        if dce > dcs then
-                            for _, run in ipairs(runs) do
-                                if run.byte_end > r[1] and run.byte_start <= r[2] then
-                                    local s = math.max(run.byte_start, r[1] + 1)
-                                    local e = math.min(run.byte_end, r[2])
-                                    if e >= s then
-                                        local sel_text =
-                                            line_text:sub(s, e):gsub(" ", "·"):gsub("\t", "→")
-                                        term:print(
-                                            geo.text_x + run.col,
-                                            row,
-                                            sel_text,
-                                            ui("selection_fg"),
-                                            ui("selection_bg")
-                                        )
-                                    end
-                                end
-                            end
-                            if
-                                r[2] >= chunk_end
-                                and chunk_end >= content_len
-                                and #line_text > 0
-                                and view.buffer:line_text(li):byte(-1) == 10
-                            then
-                                local nl_x = geo.text_x + row_w
-                                if nl_x < w then
-                                    term:print(
-                                        nl_x,
-                                        row,
-                                        "↵",
-                                        ui("selection_fg"),
-                                        ui("selection_bg")
-                                    )
-                                end
-                            end
-                        end
-                    end
-                end
+					-- Selection overlay
+					for _, r in ipairs(merged) do
+						local dcs = view:byte_to_col(li, r[1]) - view:byte_to_col(li, chunk_start)
+						local dce = view:byte_to_col(li, r[2]) - view:byte_to_col(li, chunk_start)
+						if dcs < 0 then
+							dcs = 0
+						end
+						if dce > row_w then
+							dce = row_w
+						end
+						if dce > dcs then
+							for _, run in ipairs(runs) do
+								if run.byte_end > r[1] and run.byte_start <= r[2] then
+									local s = math.max(run.byte_start, r[1] + 1)
+									local e = math.min(run.byte_end, r[2])
+									if e >= s then
+										local sel_text = line_text:sub(s, e):gsub(" ", "·"):gsub("\t", "→")
+										term:print(
+											geo.text_x + run.col,
+											row,
+											sel_text,
+											ui("selection_fg"),
+											ui("selection_bg")
+										)
+									end
+								end
+							end
+							if
+								r[2] >= chunk_end
+								and chunk_end >= content_len
+								and #line_text > 0
+								and view.buffer:line_text(li):byte(-1) == 10
+							then
+								local nl_x = geo.text_x + row_w
+								if nl_x < w then
+									term:print(nl_x, row, "↵", ui("selection_fg"), ui("selection_bg"))
+								end
+							end
+						end
+					end
+				end
 
-                -- Indent guides
-                if sub_row == 0 and #guide_cols > 0 then
-                    local guide_fg = ui("indent_guide")
-                    for _, g in ipairs(guide_cols) do
-                        if g < row_w then
-                            ov:put_float(geo.text_x + g, row, "│", guide_fg, row_bg)
-                        end
-                    end
-                end
+				-- Indent guides
+				if sub_row == 0 and #guide_cols > 0 then
+					local guide_fg = ui("indent_guide")
+					for _, g in ipairs(guide_cols) do
+						if g < row_w then
+							ov:put_float(geo.text_x + g, row, "│", guide_fg, row_bg)
+						end
+					end
+				end
 
-                -- Cursor overlay
-                if self._blink_on then
-                    for _, c in ipairs(view.cursors) do
-                        if c.line == li then
-                            local csub_row = select(1, view:wrap_sub_position(li, c.col))
-                            if csub_row == sub_row then
-                                local ccol = view:byte_to_col(li, c.col)
-                                    - view:byte_to_col(li, chunk_start)
-                                if ccol < 0 then
-                                    ccol = 0
-                                end
-                                if ccol <= row_w then
-                                    if view.whole_line_cursor then
-                                        local cfg = ui("cursor_fg")
-                                        local cbg = ui("cursor_bg")
-                                        ov:put_float(geo.text_x, row, spaces(row_w), cfg, cbg)
-                                        for _, run in ipairs(runs) do
-                                            local chunk =
-                                                line_text:sub(run.byte_start, run.byte_end)
-                                            if #chunk > 0 then
-                                                ov:put_float(
-                                                    geo.text_x + run.col,
-                                                    row,
-                                                    chunk,
-                                                    cfg,
-                                                    cbg
-                                                )
-                                            end
-                                        end
-                                    else
-                                        local ch = " "
-                                        for _, run in ipairs(runs) do
-                                            if
-                                                c.col + 1 >= run.byte_start
-                                                and c.col + 1 <= run.byte_end
-                                            then
-                                                ch = line_text:sub(run.byte_start, run.byte_end)
-                                                break
-                                            end
-                                        end
-                                        ov:put_float(
-                                            geo.text_x + ccol,
-                                            row,
-                                            ch,
-                                            ui("cursor_fg"),
-                                            ui("cursor_bg")
-                                        )
-                                    end
-                                end
-                            end
-                        end
-                    end
-                end
+				-- Cursor overlay
+				if self._blink_on then
+					for _, c in ipairs(view.cursors) do
+						if c.line == li then
+							local csub_row = select(1, view:wrap_sub_position(li, c.col))
+							if csub_row == sub_row then
+								local ccol = view:byte_to_col(li, c.col) - view:byte_to_col(li, chunk_start)
+								if ccol < 0 then
+									ccol = 0
+								end
+								if ccol <= row_w then
+									if view.whole_line_cursor then
+										local cfg = ui("cursor_fg")
+										local cbg = ui("cursor_bg")
+										ov:put_float(geo.text_x, row, spaces(row_w), cfg, cbg)
+										for _, run in ipairs(runs) do
+											local chunk = line_text:sub(run.byte_start, run.byte_end)
+											if #chunk > 0 then
+												ov:put_float(geo.text_x + run.col, row, chunk, cfg, cbg)
+											end
+										end
+									else
+										local ch = " "
+										for _, run in ipairs(runs) do
+											if c.col + 1 >= run.byte_start and c.col + 1 <= run.byte_end then
+												ch = line_text:sub(run.byte_start, run.byte_end)
+												break
+											end
+										end
+										ov:put_float(geo.text_x + ccol, row, ch, ui("cursor_fg"), ui("cursor_bg"))
+									end
+								end
+							end
+						end
+					end
+				end
 
-                -- Isearch match overlay
-                local im = self._isearch_match
-                if im then
-                    local s_col, e_col
-                    if im.line == li and im.end_line == li then
-                        s_col, e_col = im.offset, im.end_offset
-                    elseif im.line == li then
-                        s_col, e_col = im.offset, content_len
-                    elseif im.end_line == li then
-                        s_col, e_col = 0, im.end_offset
-                    elseif li > im.line and li < im.end_line then
-                        s_col, e_col = 0, content_len
-                    end
-                    if s_col and e_col and e_col > s_col then
-                        local m_fg, m_bg = ui("default_fg"), ui("search_match_bg")
-                        for _, run in ipairs(runs) do
-                            local rb = run.byte_start - 1
-                            local re = run.byte_end
-                            if rb < e_col and re > s_col then
-                                local mcol = view:byte_to_col(li, rb)
-                                    - view:byte_to_col(li, chunk_start)
-                                if mcol >= 0 and mcol <= row_w then
-                                    ov:put_float(
-                                        geo.text_x + mcol,
-                                        row,
-                                        line_text:sub(run.byte_start, run.byte_end),
-                                        m_fg,
-                                        m_bg
-                                    )
-                                end
-                            end
-                        end
-                    end
-                end
+				-- Isearch match overlay
+				local im = self._isearch_match
+				if im then
+					local s_col, e_col
+					if im.line == li and im.end_line == li then
+						s_col, e_col = im.offset, im.end_offset
+					elseif im.line == li then
+						s_col, e_col = im.offset, content_len
+					elseif im.end_line == li then
+						s_col, e_col = 0, im.end_offset
+					elseif li > im.line and li < im.end_line then
+						s_col, e_col = 0, content_len
+					end
+					if s_col and e_col and e_col > s_col then
+						local m_fg, m_bg = ui("default_fg"), ui("search_match_bg")
+						for _, run in ipairs(runs) do
+							local rb = run.byte_start - 1
+							local re = run.byte_end
+							if rb < e_col and re > s_col then
+								local mcol = view:byte_to_col(li, rb) - view:byte_to_col(li, chunk_start)
+								if mcol >= 0 and mcol <= row_w then
+									ov:put_float(
+										geo.text_x + mcol,
+										row,
+										line_text:sub(run.byte_start, run.byte_end),
+										m_fg,
+										m_bg
+									)
+								end
+							end
+						end
+					end
+				end
 
-                -- Pending-drop markers
-                for _, c in ipairs(view.pending_cursors) do
-                    if c.line == li then
-                        local occluded = false
-                        for _, ac in ipairs(view.cursors) do
-                            if ac.line == c.line and ac.col == c.col then
-                                occluded = true
-                                break
-                            end
-                        end
-                        if occluded then
-                            goto continue_drop
-                        end
-                        local csub_row = select(1, view:wrap_sub_position(li, c.col))
-                        if csub_row == sub_row then
-                            local ccol = view:byte_to_col(li, c.col)
-                                - view:byte_to_col(li, chunk_start)
-                            if ccol < 0 then
-                                ccol = 0
-                            end
-                            if ccol <= row_w then
-                                local ch = " "
-                                for _, run in ipairs(runs) do
-                                    if
-                                        c.col + 1 >= run.byte_start
-                                        and c.col + 1 <= run.byte_end
-                                    then
-                                        ch = line_text:sub(run.byte_start, run.byte_end)
-                                        break
-                                    end
-                                end
-                                ov:put_float(
-                                    geo.text_x + ccol,
-                                    row,
-                                    ch,
-                                    ui("cursor_fg"),
-                                    ui("drop_bg")
-                                )
-                            end
-                        end
-                    end
-                    ::continue_drop::
-                end
-            end)
-            if not ok then
-                log.error(
-                    "editor",
-                    "render row failed",
-                    { row = row, li = li, sub_row = sub_row, error = tostring(err) }
-                )
-                return
-            end
-            sub_row = sub_row + 1
-            row = row + 1
-        end
-        li = li + 1
-        sub_row = 0
-    end
+				-- Pending-drop markers
+				for _, c in ipairs(view.pending_cursors) do
+					if c.line == li then
+						local occluded = false
+						for _, ac in ipairs(view.cursors) do
+							if ac.line == c.line and ac.col == c.col then
+								occluded = true
+								break
+							end
+						end
+						if occluded then
+							goto continue_drop
+						end
+						local csub_row = select(1, view:wrap_sub_position(li, c.col))
+						if csub_row == sub_row then
+							local ccol = view:byte_to_col(li, c.col) - view:byte_to_col(li, chunk_start)
+							if ccol < 0 then
+								ccol = 0
+							end
+							if ccol <= row_w then
+								local ch = " "
+								for _, run in ipairs(runs) do
+									if c.col + 1 >= run.byte_start and c.col + 1 <= run.byte_end then
+										ch = line_text:sub(run.byte_start, run.byte_end)
+										break
+									end
+								end
+								ov:put_float(geo.text_x + ccol, row, ch, ui("cursor_fg"), ui("drop_bg"))
+							end
+						end
+					end
+					::continue_drop::
+				end
+			end)
+			if not ok then
+				log.error(
+					"editor",
+					"render row failed",
+					{ row = row, li = li, sub_row = sub_row, error = tostring(err) }
+				)
+				return
+			end
+			sub_row = sub_row + 1
+			row = row + 1
+		end
+		li = li + 1
+		sub_row = 0
+	end
 end
 
 --- Render modeline, eval result, overlay flush, and present.
@@ -4137,74 +4440,74 @@ end
 ---@param fp function
 ---@param layout table from _render_layout
 function Editor:_render_finalize(view, term, mb, ov, fp, layout)
-    local h = term:height()
-    local w = term:width()
+	local h = term:height()
+	local w = term:width()
 
-    -- Modeline
-    local modeline_y = h - layout.footer_tail - 1
-    self:render_modeline(view, w, modeline_y, fp)
+	-- Modeline
+	local modeline_y = h - layout.footer_tail - 1
+	self:render_modeline(view, w, modeline_y, fp)
 
-    -- Eval result
-    local eval_rows = (not (mb and mb.active) and self._eval_result) and 1 or 0
-    if eval_rows > 0 then
-        fp(0, modeline_y + 1, "=> " .. self._eval_result, ui("status_message"), ui("default_bg"))
-    end
+	-- Eval result
+	local eval_rows = (not (mb and mb.active) and self._eval_result) and 1 or 0
+	if eval_rows > 0 then
+		fp(0, modeline_y + 1, "=> " .. self._eval_result, ui("status_message"), ui("default_bg"))
+	end
 
-    ov:emit_render()
-    ov:flush()
-    term:present()
+	ov:emit_render()
+	ov:flush()
+	term:present()
 end
 
 --- Render the entire viewport.
 function Editor:render()
-    local render_t0 = profile.now_us()
-    local term = self.term
+	local render_t0 = profile.now_us()
+	local term = self.term
 
-    -- Phase 1: Clamp cursors + setup
-    self:_render_clamp_views()
-    local mb = self.minibuffer
-    local ov = self.overlays
-    local view = self:current_view()
-    ov:begin_frame(view)
-    local fp = function(x, y, text, fg, bg)
-        ov:put_float(x, y, text, fg, bg)
-    end
-    local BLACK = 0x000000
-    local function focus_dim(fg, bg)
-        if not (mb and mb.palette) then
-            return fg, bg
-        end
-        return blend(fg, BLACK, 165), blend(bg, BLACK, 195)
-    end
+	-- Phase 1: Clamp cursors + setup
+	self:_render_clamp_views()
+	local mb = self.minibuffer
+	local ov = self.overlays
+	local view = self:current_view()
+	ov:begin_frame(view)
+	local fp = function(x, y, text, fg, bg)
+		ov:put_float(x, y, text, fg, bg)
+	end
+	local BLACK = 0x000000
+	local function focus_dim(fg, bg)
+		if not (mb and mb.palette) then
+			return fg, bg
+		end
+		return blend(fg, BLACK, 165), blend(bg, BLACK, 195)
+	end
 
-    -- Phase 2: Clear
-    self:_render_clear(term)
+	-- Phase 2: Clear
+	self:_render_clear(term)
 
-    -- Phase 3: Loading state
-    if not view or not view.file_loaded then
-        self:_render_loading(term, ov, fp)
-        profile.span("editor", "render_total", render_t0)
-        return
-    end
+	-- Phase 3: Loading state
+	if not view or not view.file_loaded then
+		self:_render_loading(term, ov, fp)
+		profile.span("editor", "render_total", render_t0)
+		return
+	end
 
-    -- Phase 4: Geometry
-    local geo = self:_render_geometry(view, term:width())
-    if geo.text_w <= 0 then
-        term:present()
-        profile.span("editor", "render_total", render_t0)
-        return
-    end
+	-- Phase 4: Geometry
+	local geo = self:_render_geometry(view, term:width())
+	if geo.text_w <= 0 then
+		term:present()
+		profile.span("editor", "render_total", render_t0)
+		return
+	end
 
-    -- Phase 5: Layout
-    local layout = self:_render_layout(mb, view, geo.text_w, term, fp, ov)
+	-- Phase 5: Layout
+	local layout = self:_render_layout(mb, view, geo.text_w, term, fp, ov)
 
-    -- Phase 6: Content
-    self:_render_content(view, term, mb, ov, focus_dim, geo, layout)
+	-- Phase 6: Content
+	self:_render_content(view, term, mb, ov, focus_dim, geo, layout)
 
-    -- Phase 7: Finalize
-    self:_render_finalize(view, term, mb, ov, fp, layout)
+	-- Phase 7: Finalize
+	self:_render_finalize(view, term, mb, ov, fp, layout)
 
-    profile.span("editor", "render_total", render_t0)
+	profile.span("editor", "render_total", render_t0)
 end
 
 return Editor

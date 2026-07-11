@@ -5,7 +5,7 @@
 ---   * `sexp(pairs)` — a balanced-pair textobject; `pairs` is a list of
 ---     {opener, closer} strings, which may be multi-character
 ---     ({"begin","end"}, {"(",")"}). The sexp commands
----     (forward_sexp, mark_sexp, transpose_sexp, ...) consult the
+---     (forward_sexp, mark_sexp, drag_sexp, ...) consult the
 ---     active major mode's `sexp` entry to drive matching.
 ---   * `ts({ query = "...", capture = "name", lang? = "..." })` —
 ---     a tree-sitter QUERY textobject. Runs the (cached) query against
@@ -16,7 +16,7 @@
 --- Legacy bare pattern strings are also still accepted.
 ---
 --- Used by move_word(n, obj_name), select_range(name, ...), and the
---- mark/kill/copy/transpose commands built on top of them.
+--- mark/kill/copy/drag commands built on top of them.
 ---
 --- These are the built-in DEFAULTS. Per-language textobjects live on
 --- the major mode itself — `MajorModeSpec.textobjects` (object name →

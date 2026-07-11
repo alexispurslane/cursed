@@ -11,6 +11,11 @@
 --- into it. This unifies filtering, navigation, and completion into a
 --- single mechanic.
 ---
+--- Directory listings are async via editor:dirlist (IO lane). The view
+--- shows "Loading…" while waiting; fzy filtering is purely local once
+--- entries land. `is_directory` and `expand_path` remain synchronous
+--- (hot path in header typing — these are fast stat calls).
+---
 --- Integration: `open_directory(editor, path)` creates the view and
 --- activates the mode. Called from Editor:open_file / open_file_background
 --- and main.lua CLI arg handling when a directory is detected.
@@ -20,6 +25,7 @@ local View = require("cursed.view").View
 local Buffer = require("cursed.buffer").Buffer
 local find_file = require("cursed.find_file")
 local fzy = require("cursed.fzy")
+local async = require("cursed.async")
 
 ---@class FileManagerView : View
 ---@field _fm_dir string resolved base directory (no trailing slash, except root = "/")
@@ -27,6 +33,7 @@ local fzy = require("cursed.fzy")
 ---@field _fm_entries table[] raw directory entries for _fm_dir
 ---@field _fm_matched table[] fzy-filtered and scored entries
 ---@field _fm_show_slash boolean whether to display a trailing "/" after _fm_dir (default true; cleared when user explicitly deletes it)
+---@field _fm_loading boolean true while waiting for async dirlist
 
 ----------------------------------------------------------------------------------------------------
 -- Header layout
@@ -43,16 +50,16 @@ local function build_separator(width)
 end
 
 ----------------------------------------------------------------------------------------------------
--- Directory listing
+-- Async directory listing
 ----------------------------------------------------------------------------------------------------
 
---- Collect sorted directory entries for `dir`.
---- Directories first, then files. ".." parent entry when not at root.
+--- Sort raw dirlist entries: directories first, then files, each group
+--- sorted case-insensitively. Adds ".." parent entry when not at root.
+--- Called inside the async callback so the IO lane isn't blocked.
 ---@param dir string absolute directory path
----@return table[] entries { name: string, is_dir: boolean, is_parent: boolean? }
-local function list_entries(dir)
-    local raw = find_file.list_dir(dir)
-
+---@param raw table[] raw entries from editor:dirlist { name, is_dir }
+---@return table[] entries { name, is_dir, is_parent?: true }
+local function prepare_entries(dir, raw)
     local dirs = {}
     local files = {}
     for _, e in ipairs(raw) do
@@ -82,6 +89,130 @@ local function list_entries(dir)
     end
 
     return entries
+end
+
+----------------------------------------------------------------------------------------------------
+-- Buffer population
+----------------------------------------------------------------------------------------------------
+
+--- Rebuild the buffer from current state.
+--- Header = `_fm_dir .. _fm_query`, items = `_fm_matched`.
+---@param view FileManagerView
+local function rebuild(view)
+    local entries = view._fm_matched or {}
+    local lines = {}
+    for _, e in ipairs(entries) do
+        if e.is_dir then
+            lines[#lines + 1] = e.name .. "/"
+        else
+            lines[#lines + 1] = e.name
+        end
+    end
+
+    local buf = view.buffer
+    local term_w = 80
+    if view.editor and view.editor.term then
+        local tw = view.editor.term.width
+        if type(tw) == "function" then
+            term_w = view.editor.term:width()
+        elseif type(tw) == "number" then
+            term_w = tw
+        end
+    end
+    local query = view._fm_query or ""
+    local show_slash = view._fm_show_slash ~= false
+    local header_text
+    if #query > 0 then
+        header_text = (view._fm_dir or "") .. "/" .. query
+    elseif show_slash then
+        header_text = (view._fm_dir or "") .. "/"
+    else
+        header_text = view._fm_dir or ""
+    end
+
+    buf:close_edit()
+    buf:begin_edit()
+
+    while buf:line_count() > 1 do
+        buf:delete_char(0, 0, buf:line_len(0))
+    end
+    local content_len = buf:line_len(0) - 1
+    if content_len > 0 then
+        buf:delete_char(0, 0, content_len)
+    end
+
+    local all = { header_text, build_separator(term_w) }
+    if view._fm_loading then
+        all[#all + 1] = "Loading…"
+    else
+        for _, l in ipairs(lines) do
+            all[#all + 1] = l
+        end
+    end
+    if #all > 0 then
+        buf:insert_char(0, 0, table.concat(all, "\n") .. "\n")
+    end
+
+    buf:end_edit()
+    view:invalidate_wrap_cache()
+
+    -- Clamp cursor (items area only; leave header cursor alone)
+    local p = view:p()
+    if p.line >= HEADER_LINES then
+        local max_line = #lines + HEADER_LINES - 1
+        if p.line > max_line then
+            p.line = math.max(HEADER_LINES, max_line)
+        end
+        p.col = 0
+        p.goal_col = 0
+        p.visual_col = nil
+        p.yank_line = nil
+        p.yank_col = nil
+    end
+end
+
+--- Request a directory listing from the IO lane and repopulate the view
+--- when it arrives. Sets `_fm_loading = true` until the callback fires.
+--- The view's `_fm_dir` must already be set to the desired directory.
+--- Uses async.await — must be called from a coroutine (keybinding handler
+--- or background task).
+---@param view FileManagerView
+local function fetch_dir(view)
+    local editor = view.editor
+    if not editor then
+        return
+    end
+    view._fm_loading = true
+    view._fm_entries = {}
+    view._fm_matched = {}
+    rebuild(view)
+
+    local dir = view._fm_dir
+    local payload = async.await(editor:dirlist_async(dir))
+
+    if payload.err then
+        view._fm_loading = false
+        view._fm_matched = {}
+        return
+    end
+    if view._fm_dir ~= dir then
+        -- Stale: the user navigated elsewhere before this reply landed.
+        return
+    end
+    view._fm_loading = false
+    view._fm_entries = prepare_entries(dir, payload.entries or {})
+    view._fm_matched = view._fm_entries
+    rebuild(view)
+
+    -- Reposition cursor to first item (or header if empty).
+    local p = view:p()
+    if #view._fm_matched > 0 then
+        p.line = HEADER_LINES
+    else
+        p.line = HEADER_LINES
+    end
+    p.col = 0
+    p.goal_col = 0
 end
 
 --- Filter `entries` by fzy-scoring against `query`. Returns entries
@@ -156,74 +287,6 @@ local function split_header(text)
     return dir, query
 end
 
-----------------------------------------------------------------------------------------------------
--- Buffer population
-----------------------------------------------------------------------------------------------------
-
---- Rebuild the buffer from current state.
---- Header = `_fm_dir .. _fm_query`, items = `_fm_matched`.
----@param view FileManagerView
-local function rebuild(view)
-    local entries = view._fm_matched or {}
-    local lines = {}
-    for _, e in ipairs(entries) do
-        if e.is_dir then
-            lines[#lines + 1] = e.name .. "/"
-        else
-            lines[#lines + 1] = e.name
-        end
-    end
-
-    local buf = view.buffer
-    local term_w = view.editor and view.editor.term:width() or 80
-    local query = view._fm_query or ""
-    local show_slash = view._fm_show_slash ~= false
-    local header_text
-    if #query > 0 then
-        header_text = (view._fm_dir or "") .. "/" .. query
-    elseif show_slash then
-        header_text = (view._fm_dir or "") .. "/"
-    else
-        header_text = view._fm_dir or ""
-    end
-
-    buf:close_edit()
-    buf:begin_edit()
-
-    while buf:line_count() > 1 do
-        buf:delete_char(0, 0, buf:line_len(0))
-    end
-    local content_len = buf:line_len(0) - 1
-    if content_len > 0 then
-        buf:delete_char(0, 0, content_len)
-    end
-
-    local all = { header_text, build_separator(term_w) }
-    for _, l in ipairs(lines) do
-        all[#all + 1] = l
-    end
-    if #all > 0 then
-        buf:insert_char(0, 0, table.concat(all, "\n") .. "\n")
-    end
-
-    buf:end_edit()
-    view:invalidate_wrap_cache()
-
-    -- Clamp cursor (items area only; leave header cursor alone)
-    local p = view:p()
-    if p.line >= HEADER_LINES then
-        local max_line = #lines + HEADER_LINES - 1
-        if p.line > max_line then
-            p.line = math.max(HEADER_LINES, max_line)
-        end
-        p.col = 0
-        p.goal_col = 0
-        p.visual_col = nil
-        p.yank_line = nil
-        p.yank_col = nil
-    end
-end
-
 --- Read the header text, split into dir+query, update state, and
 --- rebuild the display. Called after every edit to the header line.
 --- Also auto-promotes the query when it uniquely prefixes a directory.
@@ -248,11 +311,12 @@ local function resolve_header(view)
     end
 
     if dir_changed then
-        view._fm_entries = list_entries(new_dir)
         view._fm_show_slash = true
+        fetch_dir(view)
+    else
+        view._fm_matched = filter_entries(view._fm_entries, view._fm_query)
+        rebuild(view)
     end
-    view._fm_matched = filter_entries(view._fm_entries, view._fm_query)
-    rebuild(view)
 
     -- Reposition cursor: if dir changed (e.g. ~ expanded), jump to end
     -- of the new header; otherwise stay where _printable_fn left it.
@@ -269,7 +333,7 @@ end
 -- Navigation
 ----------------------------------------------------------------------------------------------------
 
---- Navigate to a directory, clearing the query.
+--- Navigate to a directory, clearing the query. Async via fetch_dir.
 ---@param view FileManagerView
 ---@param dir string absolute directory path
 local function navigate_to(view, dir)
@@ -280,18 +344,7 @@ local function navigate_to(view, dir)
     view._fm_dir = dir
     view._fm_query = ""
     view._fm_show_slash = true
-    view._fm_entries = list_entries(dir)
-    view._fm_matched = view._fm_entries
-    rebuild(view)
-
-    local p = view:p()
-    if #view._fm_matched > 0 then
-        p.line = HEADER_LINES
-    else
-        p.line = HEADER_LINES
-    end
-    p.col = 0
-    p.goal_col = 0
+    fetch_dir(view)
 end
 
 --- Go to parent directory.
@@ -432,15 +485,14 @@ local FileManager = MajorMode.new({
             return
         end
         view._fm_query = view._fm_query or ""
-        view._fm_entries = list_entries(view._fm_dir)
-        view._fm_matched = view._fm_entries
-        rebuild(view)
         -- Start on the header with a normal (single-cell) cursor
         view:change_display_opts({ whole_line_cursor = false, no_completion = true })
         local p = view:p()
         p.line = HEADER_PATH_LINE
         p.col = #view._fm_dir + 1
         p.goal_col = p.col
+        -- Fetch entries async; rebuild will show "Loading…" until the reply.
+        fetch_dir(view)
     end,
     keybindings = {
         ["up"] = handle_up,
@@ -529,9 +581,7 @@ local FileManager = MajorMode.new({
                     if match.is_dir then
                         view._fm_dir = view._fm_dir .. "/" .. match.name
                         view._fm_query = ""
-                        view._fm_entries = list_entries(view._fm_dir)
-                        view._fm_matched = view._fm_entries
-                        rebuild(view)
+                        fetch_dir(view)
                         local p = view:p()
                         p.line = HEADER_PATH_LINE
                         p.col = #view._fm_dir + 1
@@ -597,11 +647,15 @@ local function open_directory(editor, path)
     view._fm_dir = path
     view._fm_query = ""
     view._fm_show_slash = true
-    view._fm_entries = list_entries(path)
-    view._fm_matched = view._fm_entries
+    view._fm_loading = false
+    view._fm_entries = {}
+    view._fm_matched = {}
 
     editor:add_view(view)
     view:activate_major_mode(FileManager)
+
+    -- on_enter kicks off the async fetch; rebuild will show "Loading…" until
+    -- the dirlist reply arrives.
 end
 
 return {
