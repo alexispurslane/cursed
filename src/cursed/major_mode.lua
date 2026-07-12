@@ -82,6 +82,7 @@ local keybind = require("cursed.keybind")
 ---@field symbol_queries string|nil predicate-free tree-sitter query source; `@symbol`-captured nodes feed the tree-sitter document outline (the goto_symbol fallback when no LSP is bound to the buffer)
 ---@field input_hooks table|nil flat list of input-hook specs (build with cursed.input_hook); matched as a suffix of left-of-cursor text and dispatched by View:_run_input_hooks
 ---@field lsp_servers (string|table)[]|nil first-wins list of EITHER bare executable-name strings OR candidate tables `{ bin = "name", args = {"--stdio"}, env = { VAR = "value" } }`, spawned as a language server subprocess when a view activates this mode (managed centrally by the editor)
+---@field spellcheck_captures "all"|true|false|string[]|nil scope for spellchecking: "all"/true = whole text; false = skip; nil = "all" for prose modes / `{comment,string,...}` for code modes; a list = TS capture names to check
 ---@field completer function|nil factory `fun(editor): fun(ctx): table` producing this mode's in-buffer completion source (e.g. `completers.lsp`). The editor's `mode_dispatch` resolver instantiates it lazily + caches it; falls back to `buffer_words` when nil.
 ---@field printable fun(view, editor, ch): boolean?|nil per-mode printable-char handler; nil → fall back to the global `__printable`. Return truthy to feed the trie (command-letter/vim-style apps); return false/nil when handled (filter/insert apps). Enables non-file-backed "TUI app" buffers whose list items are buffer lines and whose selected row is the cursor's line.
 ---@field multi_currency boolean when false, multi-cursor commands (select_next_match, add_cursor, select_all_matches, drop_cursor) and mouse Alt-click no-op in views running this mode. Default true. App/list buffers set false.
@@ -112,6 +113,7 @@ MajorMode.__index = MajorMode
 ---@field symbol_queries? string
 ---@field input_hooks? table
 ---@field lsp_servers? (string|table)[] first-wins list of LSP executables (strings or `{bin,args,env}` tables) to try when this mode activates
+---@field spellcheck_captures? "all"|true|false|string[] scope for spellchecking (nil → mode-aware default)
 ---@field completer? function factory `fun(editor): fun(ctx): table` for this mode's in-buffer completion source (resolved at runtime by the editor's `mode_dispatch`)
 ---@field printable? fun(view, editor, ch): boolean? per-mode printable-char handler (nil → global `__printable`)
 ---@field multi_currency? boolean false → multi-currency commands no-op in this mode (default true)
@@ -144,6 +146,7 @@ function MajorMode.new(spec)
         symbol_queries = spec.symbol_queries,
         input_hooks = spec.input_hooks,
         lsp_servers = spec.lsp_servers,
+        spellcheck_captures = spec.spellcheck_captures,
         completer = spec.completer,
         printable = spec.printable,
         multi_currency = spec.multi_currency, -- nil defaults to "enabled" via view:multi_currency_enabled()

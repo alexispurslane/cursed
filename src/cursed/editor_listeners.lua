@@ -1014,8 +1014,70 @@ local function gutter_code_action(ed, view, li)
     return nil
 end
 
---- Diagnostic hover popup overlay.
+--- Spell squiggles overlay.
+--- Paints a curly underline under misspelled words from the spell store
+--- (mirrors on_render_diagnostic_squiggles). Reads the visible-window
+--- slice of `editor._spell:store()` so the squiggle tracks scroll/wrap
+--- exactly as the LSP squiggle path does. Uses the `spell_error` color,
+--- falling back to `diagnostic_warn` when unset.
 ---@param ed Editor
+local function on_render_spell_squiggles(ed)
+    local ov = ed.overlays
+    if ov == nil then
+        return
+    end
+    if ed._spell == nil then
+        return
+    end
+    local view = ed:current_view()
+    if not view or not view.file_loaded then
+        return
+    end
+    local buf = view.buffer
+    if buf == nil then
+        return
+    end
+    local store = ed._spell:store()
+    if store == nil then
+        return
+    end
+    if not store:fresh(buf) then
+        return
+    end
+    local line_count = view:line_count()
+    local top_li = view.scroll_li or 0
+    local max_y = ed.term:height() - ed:footer_rows() - 1
+    local bottom_li = view:viewport_line_at_row(max_y)
+    if bottom_li == nil then
+        return
+    end
+    local items = store:visible(buf, top_li, bottom_li)
+    local scheme = ColorScheme.active
+    local rgb = scheme and scheme:color("spell_error") or nil
+    if rgb == nil then
+        rgb = scheme and scheme:color("diagnostic_warn") or 0xFF8800
+    end
+    for _, it in ipairs(items) do
+        if it.line >= 0 and it.line < line_count then
+            local clen = view:content_len(it.line)
+            local b_s = it.s_col
+            local b_e = it.e_col
+            if b_s < 0 then
+                b_s = 0
+            end
+            if b_s > clen then
+                b_s = clen
+            end
+            if b_e > clen then
+                b_e = clen
+            end
+            if b_e > b_s then
+                ov:put_underline(it.line, b_s, b_e, rgb)
+            end
+        end
+    end
+end
+
 local function on_render_diagnostic_hover(ed)
     local ov = ed.overlays
     local dismissed = ed._diag_hover_dismissed_sig
@@ -1287,6 +1349,9 @@ function EditorListeners.setup(editor)
     -- Gutter signs
     editor.gutter_sign_fns[#editor.gutter_sign_fns + 1] = gutter_diagnostic
     editor.gutter_sign_fns[#editor.gutter_sign_fns + 1] = gutter_code_action
+
+    -- Spell squiggles overlay (driven by editor._spell store)
+    es:on("render_overlay", on_render_spell_squiggles)
 
     -- Diagnostic hover popup overlay
     es:on("render_overlay", on_render_diagnostic_hover)

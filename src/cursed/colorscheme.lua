@@ -124,6 +124,10 @@ local CONCEPT_SLOTS = {
     diagnostic_warn = 0x09, -- base09: orange
     diagnostic_info = 0x0D, -- base0D: blue
     diagnostic_hint = 0x03, -- base03: dim
+    -- spell_error: squiggle color for misspelled words (flyspell).
+    -- Distinct from diagnostic_warn so spelling errors don't visually
+    -- collide with compiler warnings.
+    spell_error = 0x0E, -- base0E: magenta
     -- code_action: yellow "!" gutter sign on lines with available code actions.
     code_action = 0x0A, -- base0A: yellow
     -- Modern chrome accents (palette-driven; each maps to a base slot).

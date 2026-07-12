@@ -4819,4 +4819,22 @@ function commands.register_textobject_commands(view, extra_textobjects)
     return added
 end
 
+----------------------------------------------------------------------------------------------------
+-- Spell (flyspell) commands
+--
+-- The implementation lives in `cursed.spell.commands`; we eagerly
+-- assign onto `commands` so they appear in `commands.names` (used by
+-- `M-x execute_command` + `completers.commands`) and are resolvable
+-- via `commands.lookup`. Lazy-required so a missing `enchant-2` binary
+-- never blocks commands.lua load.
+----------------------------------------------------------------------------------------------------
+do
+    local spell_cmds = require("cursed.spell.commands")
+    commands.flyspell_correct = spell_cmds.flyspell_correct
+    commands.autocorrect_word = spell_cmds.autocorrect_word
+    commands.flyspell_buffer = spell_cmds.flyspell_buffer
+    commands.flyspell_add_to_dict = spell_cmds.flyspell_add_to_dict
+    commands.flyspell_ignore_word = spell_cmds.flyspell_ignore_word
+end
+
 return commands

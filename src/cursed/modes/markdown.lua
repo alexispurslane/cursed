@@ -165,6 +165,7 @@ return {
     margin = 72,
     expand_tab = true,
     indent_width = 2,
+    spellcheck_captures = "all",
     -- Tree-sitter document outline (goto_symbol fallback when no LSP is
     -- bound to the buffer). Captures headings; the `#` markers are kept
     -- in the label so the outline conveys nesting level.
