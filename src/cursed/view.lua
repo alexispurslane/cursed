@@ -2531,6 +2531,8 @@ end
 ----------------------------------------------------------------------------------------------------
 
 --- Compute the number of screen rows a logical line occupies with soft wrapping.
+--- Delegates to `_wrap_graph` for the authoritative row count, which
+--- includes word-wrap awareness (avoids splitting words when possible).
 --- Walks grapheme display widths (via the per-line grapheme cache) so wide
 --- CJK/emoji glyphs consume 2 columns and zero-width combinings consume 0,
 --- rather than the old `ceil(bytes / wrap_width)` which assumed 1 byte = 1 col.
@@ -2540,32 +2542,8 @@ function View:wrap_rows(li)
 	if not self.wrap_width or self.wrap_width <= 0 then
 		return 1
 	end
-	local _, widths, _, _ = self:_graph(li)
-	local w = self.wrap_width
-	-- Count rows by tracking the running display column; each grapheme
-	-- either fits on the current row (col + gw <= w) or starts a new row.
-	-- A grapheme wider than `w` is forced onto its own row (it overflows
-	-- but never wraps mid-glyph).
-	if #widths == 0 then
-		return 1
-	end
-	local rows, col = 1, 0
-	for i = 1, #widths do
-		local gw = widths[i]
-		if col + gw > w then
-			rows = rows + 1
-			col = gw
-			-- A grapheme wider than the wrap width still occupies one row
-			-- of its own; col may exceed w but that's the degenerate case.
-			if col > w then
-				col = 0
-				-- Leave the over-wide grapheme alone on its row; next one starts fresh.
-			end
-		else
-			col = col + gw
-		end
-	end
-	return rows
+	local _, _, total_rows = self:_wrap_graph(li)
+	return total_rows
 end
 
 --- Invalidate the wrap cache (call when buffer content changes or wrap_width changes).
@@ -2933,17 +2911,21 @@ function View:_graph(li)
 end
 
 --- Get (or build lazily) the per-grapheme wrap skeleton for logical line
---- `li`. Returns three values (all 1-indexed, parallel to `byte_starts`):
+--- `li`. Returns four values (all 1-indexed, parallel to `byte_starts`):
 ---   sub_rows[i] = 0-based sub-row index of grapheme i's start
 ---   sub_cols[i] = 0-based display column within that sub-row at gi's start
 ---   total_rows = total number of sub-rows in this line (>= 1)
---- Built by walking `widths` once per (gen, wrap_width, li) using the SAME
---- wrapping logic as `wrap_rows`/`sub_row_runs`/`wrap_sub_position`'s old
---- linear walk (grapheme i starts a fresh sub-row when `col + gw > w` and
---- `col > 0`, or when `gw > w` — over-wide — the prior row terminates and
---- the over-wide grapheme starts its own row, with the NEXT grapheme
---- advancing to yet another fresh row). Cached; invalidated on edits or
---- `wrap_width` change alongside the rest of the grapheme cache.
+---   sub_first[r] = first grapheme index in 0-based sub-row r (or nil if
+---       sub-row r is empty)
+---   sub_last[r] = last grapheme index in 0-based sub-row r (or nil if
+---       sub-row r is empty)
+--- Built by walking `widths` once per (gen, wrap_width, li). Uses
+--- word-wrap: when a grapheme would overflow the wrap width, the
+--- algorithm scans backward for the nearest space (U+0020) or tab
+--- (U+0009) in the current row and breaks there instead of mid-word.
+--- If no word boundary exists on the row (single long word), falls back
+--- to grapheme-level break. Cached; invalidated on edits or `wrap_width`
+--- change alongside the rest of the grapheme cache.
 ---
 --- Once built, `wrap_sub_position(li, byte_offset)` becomes O(log N)
 --- (binary search `byte_starts` → array lookup). Critical for the cursor
@@ -2955,6 +2937,8 @@ end
 ---@return integer[] sub_rows
 ---@return integer[] sub_cols
 ---@return integer total_rows
+---@return table|nil sub_first
+---@return table|nil sub_last
 function View:_wrap_graph(li)
 	ensure_graph_gen(self)
 	local ww = self.wrap_width or 0
@@ -2967,15 +2951,15 @@ function View:_wrap_graph(li)
 	end
 	local entry = cache[li + 1]
 	if entry ~= nil then
-		return entry.sub_rows, entry.sub_cols, entry.total_rows
+		return entry.sub_rows, entry.sub_cols, entry.total_rows, entry.sub_first, entry.sub_last
 	end
-	local _, widths, _, _ = self:_graph(li)
+	local bs, widths, _, _ = self:_graph(li)
 	local ng = #widths
 	local sub_rows, sub_cols = {}, {}
 	if ng == 0 then
 		entry = { sub_rows = sub_rows, sub_cols = sub_cols, total_rows = 1 }
 		cache[li + 1] = entry
-		return entry.sub_rows, entry.sub_cols, entry.total_rows
+		return entry.sub_rows, entry.sub_cols, entry.total_rows, nil, nil
 	end
 	-- No wrap_width: everything on sub_row 0; sub_col = the grapheme's
 	-- display column (= prefix[i], which byte_to_col already returns
@@ -2989,39 +2973,87 @@ function View:_wrap_graph(li)
 		end
 		entry = { sub_rows = sub_rows, sub_cols = sub_cols, total_rows = 1 }
 		cache[li + 1] = entry
-		return entry.sub_rows, entry.sub_cols, entry.total_rows
+		return entry.sub_rows, entry.sub_cols, entry.total_rows, nil, nil
 	end
+	-- Cache the line text for space/tab detection.
+	local text = self:_line_text_stripped(li)
+	-- Pre-compute sub-row index spans so sub_row_runs can iterate only
+	-- the graphemes in a given sub-row without scanning the whole line.
+	local sub_first = { [0] = 1 }
+	local sub_last = {}
 	local row, col = 0, 0
+	local row_start = 1
+	local last_space = nil
 	for i = 1, ng do
 		local gw = widths[i]
 		local over_wide = gw > ww
 		if col + gw > ww and col > 0 then
-			row = row + 1
-			col = 0
+			if not over_wide and last_space and last_space > row_start then
+				-- Word-wrap: rewind to break after the last space on this row.
+				-- Graphemes after the space move to the next row; the space
+				-- stays on the current row as its trailing character.
+				local prev_last_space = last_space
+				local old_row = row
+				local new_row = row + 1
+				local new_col = 0
+				for j = prev_last_space + 1, i - 1 do
+					sub_rows[j] = new_row
+					sub_cols[j] = new_col
+					new_col = new_col + widths[j]
+				end
+				-- Fix the old row's last grapheme: the space stays on the
+				-- old row as its trailing character.
+				sub_last[old_row] = prev_last_space
+				row = new_row
+				col = new_col
+				last_space = nil
+				row_start = prev_last_space + 1
+				sub_first[row] = row_start
+			else
+				-- Normal (grapheme-level) wrap: advance the row before
+				-- the current grapheme. Also applies to over-wide graphemes
+				-- (they still split mid-word when no space exists).
+				row = row + 1
+				col = 0
+				last_space = nil
+				row_start = i
+				sub_first[row] = i
+			end
 		end
 		sub_rows[i] = row
 		sub_cols[i] = col
+		sub_last[row] = i
 		if over_wide then
 			-- Over-wide grapheme occupies its own row; the NEXT grapheme
-			-- starts a fresh row. (Mirrors sub_row_runs / wrap_rows.)
+			-- starts a fresh row.
 			row = row + 1
 			col = 0
+			last_space = nil
+			row_start = i + 1
+			sub_first[row] = i + 1
 		else
 			col = col + gw
+			-- Record word boundaries (space or tab) for word-wrap.
+			if text and bs then
+				local b = text:byte(bs[i])
+				if b == 0x20 or b == 0x09 then
+					last_space = i
+				end
+			end
 		end
 	end
-	-- `row` is the LAST sub-row that contains a grapheme start (or, if
-	-- the last grapheme was over-wide, the empty row after it). The
-	-- total sub-row count is (last_grapheme's sub_row) + 1 — unless the
-	-- trailing over-wide case advanced past it (then the last actual
-	-- content sub-row is `row - 1`, so total = row). Both collapse to:
-	-- `row + 1` if the last `i==ng` iteration ended in `col = col + gw`
-	-- (i.e., row was not advanced past ng); or `row` if it was advanced.
-	-- Simpler: take `sub_rows[ng] + 1` (sub_row of the last grapheme + 1).
+	-- `row` always ends at sub_rows[ng] + 1 (the row just past the last
+	-- grapheme), so total = sub_rows[ng] + 1.
 	local total = sub_rows[ng] + 1
-	entry = { sub_rows = sub_rows, sub_cols = sub_cols, total_rows = total }
+	entry = {
+		sub_rows = sub_rows,
+		sub_cols = sub_cols,
+		total_rows = total,
+		sub_first = sub_first,
+		sub_last = sub_last,
+	}
 	cache[li + 1] = entry
-	return entry.sub_rows, entry.sub_cols, entry.total_rows
+	return entry.sub_rows, entry.sub_cols, entry.total_rows, entry.sub_first, entry.sub_last
 end
 
 --- Get the cached stripped line text (without trailing newline). This is
@@ -3644,38 +3676,26 @@ function View:wrap_byte_offset(li, sub_row, sub_col)
 		return self:col_to_byte(li, sub_col)
 	end
 	local bs, widths, _, ll = self:_graph(li)
-	local w = self.wrap_width
-	local row, col = 0, 0
-	for i = 1, #widths do
+	local sub_rows, sub_cols, _, sub_first, sub_last = self:_wrap_graph(li)
+	-- Use the pre-computed sub-row ranges from _wrap_graph to find
+	-- the graphemes in the target sub_row, then locate sub_col within them.
+	local first = sub_first and sub_first[sub_row]
+	if first == nil then
+		return ll
+	end
+	local last = sub_last and sub_last[sub_row]
+	if last == nil then
+		return ll
+	end
+	for i = first, last do
 		local gw = widths[i]
-		local over_wide = gw > w
-		if col + gw > w and col > 0 then
-			-- Wrap to the next row before this grapheme.
-			row = row + 1
-			col = 0
-		end
-		if row == sub_row and col + gw > sub_col then
+		local ccol = sub_cols[i]
+		if ccol + gw > sub_col then
 			-- sub_col falls inside (or exactly at the start of) this grapheme.
 			return bs[i] - 1
 		end
-		if row > sub_row then
-			-- We've passed the target row without hitting sub_col; the
-			-- target column sits past this row's content. Return the
-			-- line's content length (end of the line).
-			return ll
-		end
-		if over_wide then
-			-- Over-wide grapheme occupies its row alone; next grapheme
-			-- starts a fresh row.
-			if row == sub_row then
-				return bs[i] - 1
-			end
-			row = row + 1
-			col = 0
-		else
-			col = col + gw
-		end
 	end
+	-- sub_col is past the last grapheme in this sub-row: return end-of-line.
 	return ll
 end
 
@@ -3751,80 +3771,31 @@ end
 ---@return integer row_width total display width consumed by this sub-row
 function View:sub_row_runs(li, sub_row)
 	local bs, widths, _, ll = self:_graph(li)
+	local sub_rows, sub_cols, _, sub_first, sub_last = self:_wrap_graph(li)
 	local runs = {}
 	if #widths == 0 then
 		return runs, 0
 	end
-	local w = self.wrap_width or ll
-	local n = #widths
-	local bs_n = #bs
-	-- Shared cursor across consecutive calls: as long as the line,
-	-- buffer generation, and wrap_width are unchanged AND the cursor
-	-- hasn't advanced past the requested sub_row, we resume the walk
-	-- from where the previous call broke. The render loop queries
-	-- sub_rows in strictly increasing order (sub_row = scroll_sub_row,
-	-- +1, +2, …), so a single O(N+visible) walk replaces O(visible × N)
-	-- work. If the caller asks for an earlier sub_row (rare: a non-render
-	-- caller iterating out of order, or a scroll/resize changed the
-	-- starting row), the cursor's invariant (c.row <= sub_row) fails
-	-- and we fall back to a full restart walk.
-	local c = self._subrow_cursor
-	local i, row, col
-	if c and c.li == li and c.gen == self._graph_gen and c.wrap_width == w and c.row <= sub_row then
-		i, row, col = c.i, c.row, c.col
-	else
-		i, row, col = 1, 0, 0
+	local first = sub_first and sub_first[sub_row]
+	if first == nil then
+		return runs, 0
+	end
+	local last = sub_last and sub_last[sub_row]
+	if last == nil then
+		return runs, 0
 	end
 	local row_w = 0
-	while i <= n do
+	for i = first, last do
 		local gw = widths[i]
-		local over_wide = gw > w
-		if col + gw > w and col > 0 then
-			row = row + 1
-			col = 0
-		end
-		if row == sub_row then
-			local bstart = bs[i]
-			local bend = (i + 1 <= bs_n) and (bs[i + 1] - 1) or ll
-			runs[#runs + 1] = {
-				byte_start = bstart,
-				byte_end = bend,
-				col = col,
-				width = gw,
-			}
-			row_w = col + gw
-		elseif row > sub_row then
-			break
-		end
-		if over_wide then
-			row = row + 1
-			col = 0
-		else
-			col = col + gw
-		end
-		i = i + 1
-	end
-	-- Persist cursor state for the next call ONLY when we broke out
-	-- via `row > sub_row` (the normal monotonically-ascending case).
-	-- If instead the while-loop exited because `i > n` (line exhausted
-	-- without finding a row greater than `sub_row` — happens when the
-	-- requested sub_row is the LAST in this line), the parked state is
-	-- useless to the next caller: `c.row == sub_row` would pass our
-	-- resume check, but starting from i=n+1 immediately short-circuits
-	-- to an empty runs list (the blank-screen bug after Ctrl-E jumps to
-	-- end-of-line). Drop the cache so the next call restarts from i=1
-	-- and re-derives the runs for this sub_row.
-	if row > sub_row then
-		self._subrow_cursor = {
-			li = li,
-			gen = self._graph_gen,
-			wrap_width = w,
-			i = i,
-			row = row,
-			col = col,
+		local bstart = bs[i]
+		local bend = (i < #bs) and (bs[i + 1] - 1) or ll
+		runs[#runs + 1] = {
+			byte_start = bstart,
+			byte_end = bend,
+			col = sub_cols[i],
+			width = gw,
 		}
-	else
-		self._subrow_cursor = nil
+		row_w = sub_cols[i] + gw
 	end
 	return runs, row_w
 end
@@ -5169,18 +5140,45 @@ end
 --- content run (skipping leading blank lines) to the end of the
 --- content run before the trailing blank lines. If point is on a
 --- blank line, the paragraph is the blank run itself.
---- Returns the conventional (sl,sc,el,ec) plus boundary_len = 0
---- (paragraphs are line-block units; forward motion lands at the
---- blank line after the content, i.e. el+1 col 0 — handled by the
---- caller via the structural registry’s move behavior).
+---
+--- When `dir` is set and point is on a blank line (the gap between
+--- paragraphs), returns the adjacent content paragraph in that
+--- direction — used by drag_step to find the next/prev paragraph.
 ---@param line integer 0-based line
----@return integer sl
----@return integer sc
----@return integer el
----@return integer ec
----@return integer boundary_len
-function View:paragraph_range(line)
+---@param dir integer|nil >0 return next paragraph forward, <0 return
+---      previous paragraph backward, nil/0 return containing
+---@return integer|nil sl
+---@return integer|nil sc
+---@return integer|nil el
+---@return integer|nil ec
+---@return integer|nil boundary_len
+function View:paragraph_range(line, dir)
 	local lc = self:line_count()
+
+	-- When on a blank line and dir asks for an adjacent paragraph,
+	-- walk through the blank run to find the next/prev content line.
+	if self:is_blank_line(line) and dir and dir ~= 0 then
+		if dir > 0 then
+			local i = line
+			while i < lc and self:is_blank_line(i) do
+				i = i + 1
+			end
+			if i >= lc then
+				return nil, nil, nil, nil, nil
+			end
+			return self:paragraph_range(i)
+		else
+			local i = line
+			while i >= 0 and self:is_blank_line(i) do
+				i = i - 1
+			end
+			if i < 0 then
+				return nil, nil, nil, nil, nil
+			end
+			return self:paragraph_range(i)
+		end
+	end
+
 	if self:is_blank_line(line) then
 		local top = line
 		while top > 0 and self:is_blank_line(top - 1) do
@@ -5190,7 +5188,7 @@ function View:paragraph_range(line)
 		while bottom < lc - 1 and self:is_blank_line(bottom + 1) do
 			bottom = bottom + 1
 		end
-		return top, 0, bottom, 0, 0
+		return top, 0, bottom, self:content_len(bottom), 0
 	end
 	local top = line
 	while top > 0 and not self:is_blank_line(top - 1) do
@@ -5200,7 +5198,7 @@ function View:paragraph_range(line)
 	while bottom < lc - 1 and not self:is_blank_line(bottom + 1) do
 		bottom = bottom + 1
 	end
-	return top, 0, bottom, 0, 0
+	return top, 0, bottom, self:content_len(bottom), 0
 end
 
 --- Apply a 0-based half-open range to the primary cursor (mark at

@@ -86,16 +86,20 @@ return {
     --- Paragraph: the block of consecutive non-blank lines containing
     --- `line` (or, if on a blank line, the blank run containing it).
     --- Structural — blank-line runs, not a pattern — so it's a function.
+    --- When `dir` is set and point is on a blank line (the gap between
+    --- paragraphs), returns the adjacent content paragraph in that
+    --- direction (used by drag_step to find the next/prev para).
     ---@param view table
     ---@param line integer 0-based line of point
     ---@param col integer 0-based col of point (unused)
-    ---@return integer sl
-    ---@return integer sc
-    ---@return integer el
-    ---@return integer ec
-    ---@return integer boundary_len
-    paragraph = function(view, line, col)
-        return view:paragraph_range(line)
+    ---@param dir integer|nil >0 next paragraph, <0 previous (from blank gap)
+    ---@return integer|nil sl
+    ---@return integer|nil sc
+    ---@return integer|nil el
+    ---@return integer|nil ec
+    ---@return integer|nil boundary_len
+    paragraph = function(view, line, col, dir)
+        return view:paragraph_range(line, dir)
     end,
 
     --- Line motion: move one full line up or down, preserving the
