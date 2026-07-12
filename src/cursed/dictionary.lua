@@ -27,58 +27,58 @@ local dict_path = nil
 
 --- Candidate system dictionary paths, in preference order.
 local CANDIDATES = {
-	"/usr/share/dict/words",
-	"/usr/dict/words",
-	"/usr/share/dict/web2",
+    "/usr/share/dict/words",
+    "/usr/dict/words",
+    "/usr/share/dict/web2",
 }
 
 --- Resolve the first existing dictionary path, or nil.
 ---@return string|nil
 local function find_dict()
-	for _, p in ipairs(CANDIDATES) do
-		local f = io.open(p, "r")
-		if f ~= nil then
-			f:close()
-			return p
-		end
-	end
-	return nil
+    for _, p in ipairs(CANDIDATES) do
+        local f = io.open(p, "r")
+        if f ~= nil then
+            f:close()
+            return p
+        end
+    end
+    return nil
 end
 
 --- Load all words from the dictionary file into `words[]`, then
 --- re-sort to ASCII collation order (the system dictionary on macOS
 --- is locale-sorted, which breaks binary search).
 local function load_dict()
-	if words ~= nil then
-		return
-	end
-	local path = dict_path or find_dict()
-	if path == nil then
-		log.warn("dictionary", "no_dictionary_found")
-		words = {}
-		return
-	end
-	local f = io.open(path, "r")
-	if f == nil then
-		log.warn("dictionary", "open_failed", { path = path })
-		words = {}
-		return
-	end
-	local t = {} ---@type string[]
-	for line in f:lines() do
-		-- Skip empty lines and possessive entries (e.g. "abbot's").
-		local trimmed = line:match("^%s*(.-)%s*$")
-		if trimmed ~= nil and #trimmed > 0 and trimmed:byte(#trimmed) ~= 39 then
-			---@cast trimmed string
-			t[#t + 1] = trimmed
-		end
-	end
-	f:close()
-	-- Re-sort to ASCII collation.  macOS ships a locale-sorted
-	-- dictionary; binary search requires strict lexicographic order.
-	table.sort(t)
-	words = t
-	log.info("dictionary", "loaded", { path = path, count = #words })
+    if words ~= nil then
+        return
+    end
+    local path = dict_path or find_dict()
+    if path == nil then
+        log.warn("dictionary", "no_dictionary_found")
+        words = {}
+        return
+    end
+    local f = io.open(path, "r")
+    if f == nil then
+        log.warn("dictionary", "open_failed", { path = path })
+        words = {}
+        return
+    end
+    local t = {} ---@type string[]
+    for line in f:lines() do
+        -- Skip empty lines and possessive entries (e.g. "abbot's").
+        local trimmed = line:match("^%s*(.-)%s*$")
+        if trimmed ~= nil and #trimmed > 0 and trimmed:byte(#trimmed) ~= 39 then
+            ---@cast trimmed string
+            t[#t + 1] = trimmed
+        end
+    end
+    f:close()
+    -- Re-sort to ASCII collation.  macOS ships a locale-sorted
+    -- dictionary; binary search requires strict lexicographic order.
+    table.sort(t)
+    words = t
+    log.info("dictionary", "loaded", { path = path, count = #words })
 end
 
 --- Binary search for the first word >= prefix in `ws[]`.
@@ -87,17 +87,17 @@ end
 ---@param ws string[] sorted word list
 ---@return integer index (1-based)
 local function lower_bound(prefix, ws)
-	local lo, hi = 1, #ws
-	while lo <= hi do
-		local mid = math.floor((lo + hi) / 2)
-		---@cast ws string[]
-		if ws[mid] < prefix then
-			lo = mid + 1
-		else
-			hi = mid - 1
-		end
-	end
-	return lo
+    local lo, hi = 1, #ws
+    while lo <= hi do
+        local mid = math.floor((lo + hi) / 2)
+        ---@cast ws string[]
+        if ws[mid] < prefix then
+            lo = mid + 1
+        else
+            hi = mid - 1
+        end
+    end
+    return lo
 end
 
 --- Return up to `limit` dictionary words whose lowercase form starts
@@ -114,70 +114,70 @@ end
 ---@param limit integer? max results (default 50)
 ---@return string[]
 function M.lookup(prefix, limit)
-	load_dict()
-	if words == nil or #words == 0 or prefix == nil or #prefix == 0 then
-		return {}
-	end
-	limit = limit or 50
-	local lower = prefix:lower()
-	local first_lower = lower:sub(1, 1)
-	local results = {} ---@type string[]
-	local seen = {} ---@type table<string,boolean>
+    load_dict()
+    if words == nil or #words == 0 or prefix == nil or #prefix == 0 then
+        return {}
+    end
+    limit = limit or 50
+    local lower = prefix:lower()
+    local first_lower = lower:sub(1, 1)
+    local results = {} ---@type string[]
+    local seen = {} ---@type table<string,boolean>
 
-	-- Build probes.  Under ASCII sort, uppercase-first entries for a
-	-- given first letter sort BEFORE lowercase-first entries, and
-	-- other letters' entries sit between them.  Each probe scans
-	-- forward from its own lower-bound until the case-insensitive
-	-- first letter changes — that covers exactly one block.
-	--
-	-- Priority order: lowercase probe first (common words like "help",
-	-- "head") then the uppercase probe as supplement (proper nouns,
-	-- scientific terms).  Keeps the completion popup useful.
-	local probes = {} ---@type string[]
-	-- Lowercase probe for the common-word block ("aardvark").
-	probes[#probes + 1] = lower
-	local first_byte = lower:byte(1)
-	if first_byte >= 97 and first_byte <= 122 then
-		-- Title-case probe for the uppercase-first block ("Aardvark").
-		probes[#probes + 1] = string.char(first_byte - 32) .. lower:sub(2)
-	end
+    -- Build probes.  Under ASCII sort, uppercase-first entries for a
+    -- given first letter sort BEFORE lowercase-first entries, and
+    -- other letters' entries sit between them.  Each probe scans
+    -- forward from its own lower-bound until the case-insensitive
+    -- first letter changes — that covers exactly one block.
+    --
+    -- Priority order: lowercase probe first (common words like "help",
+    -- "head") then the uppercase probe as supplement (proper nouns,
+    -- scientific terms).  Keeps the completion popup useful.
+    local probes = {} ---@type string[]
+    -- Lowercase probe for the common-word block ("aardvark").
+    probes[#probes + 1] = lower
+    local first_byte = lower:byte(1)
+    if first_byte >= 97 and first_byte <= 122 then
+        -- Title-case probe for the uppercase-first block ("Aardvark").
+        probes[#probes + 1] = string.char(first_byte - 32) .. lower:sub(2)
+    end
 
-	for _, probe in ipairs(probes) do
-		local idx = lower_bound(probe, words)
-		---@cast words string[]
-		for i = idx, #words do
-			if #results >= limit then
-				break
-			end
-			local w = words[i]
-			---@cast w string
-			-- Stop when the word's first letter (case-insensitively) no
-			-- longer matches the prefix's first letter — we've left the
-			-- block for this letter.
-			if w:sub(1, 1):lower() ~= first_lower then
-				break
-			end
-			if w:sub(1, #prefix):lower() == lower and not seen[w] then
-				seen[w] = true
-				results[#results + 1] = w
-			end
-		end
-	end
+    for _, probe in ipairs(probes) do
+        local idx = lower_bound(probe, words)
+        ---@cast words string[]
+        for i = idx, #words do
+            if #results >= limit then
+                break
+            end
+            local w = words[i]
+            ---@cast w string
+            -- Stop when the word's first letter (case-insensitively) no
+            -- longer matches the prefix's first letter — we've left the
+            -- block for this letter.
+            if w:sub(1, 1):lower() ~= first_lower then
+                break
+            end
+            if w:sub(1, #prefix):lower() == lower and not seen[w] then
+                seen[w] = true
+                results[#results + 1] = w
+            end
+        end
+    end
 
-	return results
+    return results
 end
 
 --- Override the dictionary path (for testing).
 ---@param path string
 function M.set_path(path)
-	dict_path = path
-	words = nil
+    dict_path = path
+    words = nil
 end
 
 --- Unload the cached dictionary.
 function M.reset()
-	words = nil
-	dict_path = nil
+    words = nil
+    dict_path = nil
 end
 
 return M

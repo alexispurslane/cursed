@@ -129,36 +129,36 @@ MajorMode.__index = MajorMode
 ---@param spec MajorModeSpec
 ---@return MajorMode
 function MajorMode.new(spec)
-	local tw = spec.tab_width or 8
-	return setmetatable({
-		name = spec.name,
-		keybindings = spec.keybindings or {},
-		textobjects = spec.textobjects or {},
-		tab_width = tw,
-		expand_tab = spec.expand_tab ~= false, -- true by default
-		indent_width = spec.indent_width or tw,
-		margin = spec.margin,
-		language = spec.language,
-		highlight_query = spec.highlight_query,
-		injection_query = spec.injection_query,
-		extra_injected_grammars = spec.extra_injected_grammars,
-		indent_queries = spec.indent_queries,
-		symbol_queries = spec.symbol_queries,
-		input_hooks = spec.input_hooks,
-		lsp_servers = spec.lsp_servers,
-		spellcheck_captures = spec.spellcheck_captures,
-		completer = spec.completer,
-		printable = spec.printable,
-		multi_currency = spec.multi_currency, -- nil defaults to "enabled" via view:multi_currency_enabled()
-		on_enter = spec.on_enter,
-		on_exit = spec.on_exit,
-		no_gutter = spec.no_gutter,
-		no_line_numbers = spec.no_line_numbers,
-		no_wrap = spec.no_wrap,
-		whole_line_cursor = spec.whole_line_cursor,
-		_trie = nil,
-		_listener_editors = nil,
-	}, MajorMode)
+    local tw = spec.tab_width or 8
+    return setmetatable({
+        name = spec.name,
+        keybindings = spec.keybindings or {},
+        textobjects = spec.textobjects or {},
+        tab_width = tw,
+        expand_tab = spec.expand_tab ~= false, -- true by default
+        indent_width = spec.indent_width or tw,
+        margin = spec.margin,
+        language = spec.language,
+        highlight_query = spec.highlight_query,
+        injection_query = spec.injection_query,
+        extra_injected_grammars = spec.extra_injected_grammars,
+        indent_queries = spec.indent_queries,
+        symbol_queries = spec.symbol_queries,
+        input_hooks = spec.input_hooks,
+        lsp_servers = spec.lsp_servers,
+        spellcheck_captures = spec.spellcheck_captures,
+        completer = spec.completer,
+        printable = spec.printable,
+        multi_currency = spec.multi_currency, -- nil defaults to "enabled" via view:multi_currency_enabled()
+        on_enter = spec.on_enter,
+        on_exit = spec.on_exit,
+        no_gutter = spec.no_gutter,
+        no_line_numbers = spec.no_line_numbers,
+        no_wrap = spec.no_wrap,
+        whole_line_cursor = spec.whole_line_cursor,
+        _trie = nil,
+        _listener_editors = nil,
+    }, MajorMode)
 end
 
 --- Create a per-view instance of this mode (prototype delegation).
@@ -167,8 +167,8 @@ end
 --- itself.
 ---@return MajorModeInstance
 function MajorMode:instantiate()
-	---@type MajorModeInstance
-	return setmetatable({ _base = self }, { __index = self })
+    ---@type MajorModeInstance
+    return setmetatable({ _base = self }, { __index = self })
 end
 
 --- Idempotently register `on_enter` / `on_exit` as `mode_enter:<name>` /
@@ -178,41 +178,41 @@ end
 --- template declares neither hook.
 ---@param editor Editor owning editor (must have an event_system)
 function MajorMode:_ensure_listeners(editor)
-	if self.on_enter == nil and self.on_exit == nil then
-		return
-	end
-	if self._listener_editers == nil then
-		self._listener_editers = {}
-	end
-	if self._listener_editers[editor] then
-		return
-	end
-	self._listener_editers[editor] = true
-	local es = editor.event_system
-	if es == nil then
-		return
-	end
-	local name = self.name
-	if self.on_enter then
-		es:on("mode_enter:" .. name, function(ed, inst, view)
-			inst.on_enter(view, ed, inst)
-		end)
-	end
-	if self.on_exit then
-		es:on("mode_exit:" .. name, function(ed, inst, view)
-			inst.on_exit(view, ed, inst)
-		end)
-	end
+    if self.on_enter == nil and self.on_exit == nil then
+        return
+    end
+    if self._listener_editers == nil then
+        self._listener_editers = {}
+    end
+    if self._listener_editers[editor] then
+        return
+    end
+    self._listener_editers[editor] = true
+    local es = editor.event_system
+    if es == nil then
+        return
+    end
+    local name = self.name
+    if self.on_enter then
+        es:on("mode_enter:" .. name, function(ed, inst, view)
+            inst.on_enter(view, ed, inst)
+        end)
+    end
+    if self.on_exit then
+        es:on("mode_exit:" .. name, function(ed, inst, view)
+            inst.on_exit(view, ed, inst)
+        end)
+    end
 end
 
 --- Get (or lazily build) the keybind trie for this mode's keybindings.
 --- Only includes the mode-specific bindings (no defaults merged).
 ---@return table
 function MajorMode:trie()
-	if self._trie == nil then
-		self._trie = keybind.Trie.build(self.keybindings)
-	end
-	return self._trie
+    if self._trie == nil then
+        self._trie = keybind.Trie.build(self.keybindings)
+    end
+    return self._trie
 end
 
 --- An instance of a MajorMode bound to a specific view.

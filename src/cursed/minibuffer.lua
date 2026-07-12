@@ -38,11 +38,11 @@ local COMP_MAX_VISIBLE = 5
 ---@param name string UI concept key in CONCEPT_SLOTS
 ---@return integer color
 local function ui(name)
-	local scheme = ColorScheme.active
-	if scheme == nil then
-		return tb.color_default
-	end
-	return scheme:color(name)
+    local scheme = ColorScheme.active
+    if scheme == nil then
+        return tb.color_default
+    end
+    return scheme:color(name)
 end
 
 ---@class Minibuffer
@@ -75,12 +75,12 @@ Minibuffer.__index = Minibuffer
 --- Matches the empty-file convention used by Buffer.from_mmap.
 ---@return Buffer
 local function make_input_buffer()
-	local buf = Buffer.new()
-	local nl_off = buf:append_add("\n")
-	buf:grow_lines(1)
-	buf:init_line(0, 1, nl_off, 1)
-	buf._ptr.count = 1
-	return buf
+    local buf = Buffer.new()
+    local nl_off = buf:append_add("\n")
+    buf:grow_lines(1)
+    buf:init_line(0, 1, nl_off, 1)
+    buf._ptr.count = 1
+    return buf
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -92,27 +92,27 @@ end
 --- now that Buffer primitives are grouping-naive).
 ---@param text string
 function Minibuffer:_set_text(text)
-	local view = self.view
-	self:_atomic(function()
-		local buf = view.buffer
-		while buf:line_count() > 1 do
-			buf:delete_char(0, 0, buf:line_len(0))
-		end
-		local content_len = buf:line_len(0) - 1
-		if content_len > 0 then
-			buf:delete_char(0, 0, content_len)
-		end
-		if #text > 0 then
-			local rl, rc = buf:insert_char(0, 0, text)
-			view:p().line = rl
-			view:p().col = rc
-			view:_set_goal_col(rc)
-		else
-			view:p().line = 0
-			view:p().col = 0
-			view:_set_goal_col(0)
-		end
-	end)
+    local view = self.view
+    self:_atomic(function()
+        local buf = view.buffer
+        while buf:line_count() > 1 do
+            buf:delete_char(0, 0, buf:line_len(0))
+        end
+        local content_len = buf:line_len(0) - 1
+        if content_len > 0 then
+            buf:delete_char(0, 0, content_len)
+        end
+        if #text > 0 then
+            local rl, rc = buf:insert_char(0, 0, text)
+            view:p().line = rl
+            view:p().col = rc
+            view:_set_goal_col(rc)
+        else
+            view:p().line = 0
+            view:p().col = 0
+            view:_set_goal_col(0)
+        end
+    end)
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -120,35 +120,35 @@ end
 ----------------------------------------------------------------------------------------------------
 
 local function history_completer(mb, text)
-	if #text == 0 then
-		return {}
-	end
-	local ring = mb._histories[mb.prompt]
-	if not ring then
-		return {}
-	end
+    if #text == 0 then
+        return {}
+    end
+    local ring = mb._histories[mb.prompt]
+    if not ring then
+        return {}
+    end
 
-	local fzy = require("cursed.fzy")
-	local lneedle = fzy.lower_needle(text)
-	local scored = {}
+    local fzy = require("cursed.fzy")
+    local lneedle = fzy.lower_needle(text)
+    local scored = {}
 
-	for i = #ring, 1, -1 do
-		local s = fzy.score(text, ring[i], nil, lneedle)
-		if s ~= nil then
-			scored[#scored + 1] = { entry = ring[i], score = s }
-		end
-	end
+    for i = #ring, 1, -1 do
+        local s = fzy.score(text, ring[i], nil, lneedle)
+        if s ~= nil then
+            scored[#scored + 1] = { entry = ring[i], score = s }
+        end
+    end
 
-	table.sort(scored, function(a, b)
-		return a.score > b.score
-	end)
+    table.sort(scored, function(a, b)
+        return a.score > b.score
+    end)
 
-	local limit = math.min(#scored, 20)
-	local results = {}
-	for i = 1, limit do
-		results[i] = scored[i].entry
-	end
-	return results
+    local limit = math.min(#scored, 20)
+    local results = {}
+    for i = 1, limit do
+        results[i] = scored[i].entry
+    end
+    return results
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -161,11 +161,11 @@ end
 --- undo step — Buffer primitives no longer manage grouping themselves.
 ---@param fn fun()
 function Minibuffer:_atomic(fn)
-	local buf = self.view.buffer
-	buf:close_edit()
-	buf:begin_edit()
-	fn()
-	buf:end_edit()
+    local buf = self.view.buffer
+    buf:close_edit()
+    buf:begin_edit()
+    fn()
+    buf:end_edit()
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -175,34 +175,34 @@ end
 --- Create a new Minibuffer with a permanent View+Buffer.
 ---@return Minibuffer
 function Minibuffer.new()
-	local buf = make_input_buffer()
-	local view = View.new(buf)
-	view.file_loaded = true
+    local buf = make_input_buffer()
+    local view = View.new(buf)
+    view.file_loaded = true
 
-	return setmetatable({
-		view = view,
-		active = false,
-		prompt = "",
-		on_submit = nil,
-		on_cancel = nil,
-		on_change = nil,
-		_prev_text = "",
-		_histories = {},
-		_hist_index = nil,
-		_hist_draft = nil,
-		completion = false,
-		completer = nil,
-		_completions = {},
-		_comp_index = 0,
-		_comp_scroll = 0,
-		auto_accept = false,
-		_auto_accepting = false,
-		--- When true the minibuffer renders as a centered floating
-		--- palette (command-palette style) instead of the inline
-		--- bottom strip. Set by callers like M-x; ordinary reads
-		--- (search, find-file, read-char) stay inline.
-		palette = false,
-	}, Minibuffer)
+    return setmetatable({
+        view = view,
+        active = false,
+        prompt = "",
+        on_submit = nil,
+        on_cancel = nil,
+        on_change = nil,
+        _prev_text = "",
+        _histories = {},
+        _hist_index = nil,
+        _hist_draft = nil,
+        completion = false,
+        completer = nil,
+        _completions = {},
+        _comp_index = 0,
+        _comp_scroll = 0,
+        auto_accept = false,
+        _auto_accepting = false,
+        --- When true the minibuffer renders as a centered floating
+        --- palette (command-palette style) instead of the inline
+        --- bottom strip. Set by callers like M-x; ordinary reads
+        --- (search, find-file, read-char) stay inline.
+        palette = false,
+    }, Minibuffer)
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -212,23 +212,23 @@ end
 --- Get the current input text (all lines joined, trailing newline stripped).
 ---@return string
 function Minibuffer:view_text()
-	local buf = self.view.buffer
-	local parts = {}
-	for i = 0, buf:line_count() - 1 do
-		parts[#parts + 1] = buf:line_text(i)
-	end
-	local text = table.concat(parts)
-	-- Strip single trailing newline (the empty-line sentinel)
-	if #text > 0 and text:byte(#text) == 10 then
-		text = text:sub(1, #text - 1)
-	end
-	return text
+    local buf = self.view.buffer
+    local parts = {}
+    for i = 0, buf:line_count() - 1 do
+        parts[#parts + 1] = buf:line_text(i)
+    end
+    local text = table.concat(parts)
+    -- Strip single trailing newline (the empty-line sentinel)
+    if #text > 0 and text:byte(#text) == 10 then
+        text = text:sub(1, #text - 1)
+    end
+    return text
 end
 
 --- Number of rows the minibuffer input requires (one per line).
 ---@return integer
 function Minibuffer:input_rows()
-	return self.view.buffer:line_count()
+    return self.view.buffer:line_count()
 end
 
 --- Fire on_change with the current text + selected completion index.
@@ -239,9 +239,9 @@ end
 --- `self._completions`.
 ---@param text string  the current minibuffer text
 function Minibuffer:_fire_on_change(text)
-	if self.on_change then
-		self.on_change(text, self._comp_index)
-	end
+    if self.on_change then
+        self.on_change(text, self._comp_index)
+    end
 end
 
 --- Re-run the completer against the current text WITHOUT requiring a
@@ -251,20 +251,20 @@ end
 --- lands — the re-render next frame picks up `self._completions`. A
 --- no-op when completion mode is off.
 function Minibuffer:refresh_completions()
-	if not self.active or not self.completion or not self.completer then
-		return
-	end
-	self._completions = self.completer(self:view_text())
-	-- Keep the existing selection if it still falls within bounds; this
-	-- lets an async refresh (results narrowed/expanded/gone) preserve the
-	-- user's highlighted row instead of snapping back to the top.
-	if self._comp_index < 1 or self._comp_index > #self._completions then
-		self._comp_index = #self._completions > 0 and 1 or 0
-		self._comp_scroll = 0
-	else
-		self:_comp_ensure_visible()
-	end
-	self:_fire_on_change(self:view_text())
+    if not self.active or not self.completion or not self.completer then
+        return
+    end
+    self._completions = self.completer(self:view_text())
+    -- Keep the existing selection if it still falls within bounds; this
+    -- lets an async refresh (results narrowed/expanded/gone) preserve the
+    -- user's highlighted row instead of snapping back to the top.
+    if self._comp_index < 1 or self._comp_index > #self._completions then
+        self._comp_index = #self._completions > 0 and 1 or 0
+        self._comp_scroll = 0
+    else
+        self:_comp_ensure_visible()
+    end
+    self:_fire_on_change(self:view_text())
 end
 
 --- If the minibuffer is active, fire on_change and completer when text has changed.
@@ -272,47 +272,47 @@ end
 --- When auto_accept is enabled and the input exactly matches a completion,
 --- the minibuffer auto-submits immediately.
 function Minibuffer:notify_change()
-	if not self.active then
-		return
-	end
-	local text = self:view_text()
-	if text ~= self._prev_text then
-		self._prev_text = text
-		if self.completion and self.completer then
-			self._completions = self.completer(text)
-			self._comp_index = #self._completions > 0 and 1 or 0
-			self._comp_scroll = 0
+    if not self.active then
+        return
+    end
+    local text = self:view_text()
+    if text ~= self._prev_text then
+        self._prev_text = text
+        if self.completion and self.completer then
+            self._completions = self.completer(text)
+            self._comp_index = #self._completions > 0 and 1 or 0
+            self._comp_scroll = 0
 
-			-- Auto-accept: if input exactly matches one completion, submit immediately
-			if
-				self.auto_accept
-				and not self._auto_accepting
-				and #self._completions == 1
-				and comp_text(self._completions[1]) == text
-			then
-				self._auto_accepting = true
-				self:history_push(text)
-				-- Capture callback before deactivate clears it.
-				-- Deactivate FIRST so on_submit can start a new session
-				-- (e.g. query-replace chaining) without this deactivate killing it.
-				local callback = self.on_submit
-				self:deactivate()
-				-- Flag that minibuffer just closed, so stale Enter/Tab
-				-- events don't dispatch to the main view.
-				-- Count: 2 because both Tab and Enter may arrive after
-				-- auto_accept.
-				self._just_closed = 2
-				if callback then
-					callback(text)
-				end
-				return
-			end
-		end
-		-- Fire on_change AFTER completions are refreshed so the callback
-		-- sees the up-to-date comp_index / completion list (live-preview
-		-- callbacks resolve the highlighted completion from this).
-		self:_fire_on_change(text)
-	end
+            -- Auto-accept: if input exactly matches one completion, submit immediately
+            if
+                self.auto_accept
+                and not self._auto_accepting
+                and #self._completions == 1
+                and comp_text(self._completions[1]) == text
+            then
+                self._auto_accepting = true
+                self:history_push(text)
+                -- Capture callback before deactivate clears it.
+                -- Deactivate FIRST so on_submit can start a new session
+                -- (e.g. query-replace chaining) without this deactivate killing it.
+                local callback = self.on_submit
+                self:deactivate()
+                -- Flag that minibuffer just closed, so stale Enter/Tab
+                -- events don't dispatch to the main view.
+                -- Count: 2 because both Tab and Enter may arrive after
+                -- auto_accept.
+                self._just_closed = 2
+                if callback then
+                    callback(text)
+                end
+                return
+            end
+        end
+        -- Fire on_change AFTER completions are refreshed so the callback
+        -- sees the up-to-date comp_index / completion list (live-preview
+        -- callbacks resolve the highlighted completion from this).
+        self:_fire_on_change(text)
+    end
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -322,59 +322,59 @@ end
 --- Get the history ring for the current prompt.
 ---@return string[]
 function Minibuffer:_history_ring()
-	local ring = self._histories[self.prompt]
-	if not ring then
-		ring = {}
-		self._histories[self.prompt] = ring
-	end
-	return ring
+    local ring = self._histories[self.prompt]
+    if not ring then
+        ring = {}
+        self._histories[self.prompt] = ring
+    end
+    return ring
 end
 
 --- Push a value onto the history ring for the current prompt.
 --- Deduplicates: if the value already exists at the top, skip.
 ---@param value string
 function Minibuffer:history_push(value)
-	if #value == 0 then
-		return
-	end
-	local ring = self:_history_ring()
-	if #ring > 0 and ring[#ring] == value then
-		return
-	end
-	ring[#ring + 1] = value
+    if #value == 0 then
+        return
+    end
+    local ring = self:_history_ring()
+    if #ring > 0 and ring[#ring] == value then
+        return
+    end
+    ring[#ring + 1] = value
 end
 
 --- Go up one entry in history (toward older entries).
 function Minibuffer:history_up()
-	local ring = self:_history_ring()
-	if #ring == 0 then
-		return
-	end
-	if self._hist_index == nil then
-		self._hist_draft = self:view_text()
-		self._hist_index = 0
-	end
-	if self._hist_index >= #ring then
-		return
-	end
-	self._hist_index = self._hist_index + 1
-	self:_set_text(ring[#ring - self._hist_index + 1])
+    local ring = self:_history_ring()
+    if #ring == 0 then
+        return
+    end
+    if self._hist_index == nil then
+        self._hist_draft = self:view_text()
+        self._hist_index = 0
+    end
+    if self._hist_index >= #ring then
+        return
+    end
+    self._hist_index = self._hist_index + 1
+    self:_set_text(ring[#ring - self._hist_index + 1])
 end
 
 --- Go down one entry in history (toward newer entries).
 function Minibuffer:history_down()
-	if self._hist_index == nil then
-		return
-	end
-	self._hist_index = self._hist_index - 1
-	if self._hist_index <= 0 then
-		self._hist_index = nil
-		self:_set_text(self._hist_draft or "")
-		self._hist_draft = nil
-	else
-		local ring = self:_history_ring()
-		self:_set_text(ring[#ring - self._hist_index + 1])
-	end
+    if self._hist_index == nil then
+        return
+    end
+    self._hist_index = self._hist_index - 1
+    if self._hist_index <= 0 then
+        self._hist_index = nil
+        self:_set_text(self._hist_draft or "")
+        self._hist_draft = nil
+    else
+        local ring = self:_history_ring()
+        self:_set_text(ring[#ring - self._hist_index + 1])
+    end
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -384,10 +384,10 @@ end
 --- Number of visible completion rows for the current completion list.
 ---@return integer
 function Minibuffer:comp_visible_rows()
-	if not self.completion then
-		return 0
-	end
-	return math.min(#self._completions, COMP_MAX_VISIBLE)
+    if not self.completion then
+        return 0
+    end
+    return math.min(#self._completions, COMP_MAX_VISIBLE)
 end
 
 --- Ensure the current completion selection is within the visible
@@ -396,78 +396,78 @@ end
 --- wrap-around, where the old per-direction checks missed the scrolled
 --- case).
 function Minibuffer:_comp_ensure_visible()
-	local idx = self._comp_index
-	if idx < 1 then
-		return
-	end
-	-- Visible window is (scroll+1 .. scroll+COMP_MAX_VISIBLE), 1-based.
-	if idx <= self._comp_scroll then
-		self._comp_scroll = idx - 1
-	elseif idx > self._comp_scroll + COMP_MAX_VISIBLE then
-		self._comp_scroll = idx - COMP_MAX_VISIBLE
-	end
+    local idx = self._comp_index
+    if idx < 1 then
+        return
+    end
+    -- Visible window is (scroll+1 .. scroll+COMP_MAX_VISIBLE), 1-based.
+    if idx <= self._comp_scroll then
+        self._comp_scroll = idx - 1
+    elseif idx > self._comp_scroll + COMP_MAX_VISIBLE then
+        self._comp_scroll = idx - COMP_MAX_VISIBLE
+    end
 end
 
 --- Move the completion selection up one.
 function Minibuffer:comp_up()
-	if not self.completion or #self._completions == 0 then
-		return
-	end
-	if self._comp_index <= 1 then
-		self._comp_index = #self._completions
-	else
-		self._comp_index = self._comp_index - 1
-	end
-	self:_comp_ensure_visible()
-	-- Fire on_change so live-preview callbacks react to the newly
-	-- highlighted completion (text is unchanged, but comp_index moved).
-	self:_fire_on_change(self:view_text())
+    if not self.completion or #self._completions == 0 then
+        return
+    end
+    if self._comp_index <= 1 then
+        self._comp_index = #self._completions
+    else
+        self._comp_index = self._comp_index - 1
+    end
+    self:_comp_ensure_visible()
+    -- Fire on_change so live-preview callbacks react to the newly
+    -- highlighted completion (text is unchanged, but comp_index moved).
+    self:_fire_on_change(self:view_text())
 end
 
 --- Move the completion selection down one.
 function Minibuffer:comp_down()
-	if not self.completion or #self._completions == 0 then
-		return
-	end
-	if self._comp_index >= #self._completions then
-		self._comp_index = 1
-	else
-		self._comp_index = self._comp_index + 1
-	end
-	self:_comp_ensure_visible()
-	-- Fire on_change so live-preview callbacks react to the newly
-	-- highlighted completion (text is unchanged, but comp_index moved).
-	self:_fire_on_change(self:view_text())
+    if not self.completion or #self._completions == 0 then
+        return
+    end
+    if self._comp_index >= #self._completions then
+        self._comp_index = 1
+    else
+        self._comp_index = self._comp_index + 1
+    end
+    self:_comp_ensure_visible()
+    -- Fire on_change so live-preview callbacks react to the newly
+    -- highlighted completion (text is unchanged, but comp_index moved).
+    self:_fire_on_change(self:view_text())
 end
 
 --- Expand the selected completion into the minibuffer (Tab).
 --- Returns true if a completion was expanded.
 ---@return boolean
 function Minibuffer:comp_expand()
-	if not self.completion or self._comp_index < 1 then
-		return false
-	end
-	local item = self._completions[self._comp_index]
-	if not item then
-		return false
-	end
-	self:_set_text(comp_text(item))
-	return true
+    if not self.completion or self._comp_index < 1 then
+        return false
+    end
+    local item = self._completions[self._comp_index]
+    if not item then
+        return false
+    end
+    self:_set_text(comp_text(item))
+    return true
 end
 
 --- Expand the selected completion and submit (Enter on completion).
 --- Returns true if a completion was chosen.
 ---@return boolean
 function Minibuffer:comp_submit()
-	if not self.completion or self._comp_index < 1 then
-		return false
-	end
-	local item = self._completions[self._comp_index]
-	if not item then
-		return false
-	end
-	self:_set_text(comp_text(item))
-	return true
+    if not self.completion or self._comp_index < 1 then
+        return false
+    end
+    local item = self._completions[self._comp_index]
+    if not item then
+        return false
+    end
+    self:_set_text(comp_text(item))
+    return true
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -478,87 +478,88 @@ end
 --- Resets the buffer content and overwrites callbacks.
 ---@param opts { prompt: string?, on_submit: function?, on_cancel: function?, on_change: function?, initial: string?, completion: boolean?, completer: function?, value: any?, auto_accept: boolean?, palette: boolean? }
 function Minibuffer:activate(opts)
-	local view = self.view
+    local view = self.view
 
-	-- Reset buffer: delete all content back to a single empty line,
-	-- then pre-fill — all as one undo group (caller-managed grouping
-	-- now that Buffer primitives are grouping-naive).
-	self:_atomic(function()
-		local buf = view.buffer
-		while buf:line_count() > 1 do
-			buf:delete_char(0, 0, buf:line_len(0))
-		end
-		local content_len = buf:line_len(0) - 1
-		if content_len > 0 then
-			buf:delete_char(0, 0, content_len)
-		end
-		view:p().line = 0
-		view:p().col = 0
-		view:_set_goal_col(0)
-		view:p().anchor_line = nil
-		view:p().anchor_col = nil
+    -- Reset buffer: delete all content back to a single empty line,
+    -- then pre-fill — all as one undo group (caller-managed grouping
+    -- now that Buffer primitives are grouping-naive).
+    self:_atomic(function()
+        local buf = view.buffer
+        while buf:line_count() > 1 do
+            buf:delete_char(0, 0, buf:line_len(0))
+        end
+        local content_len = buf:line_len(0) - 1
+        if content_len > 0 then
+            buf:delete_char(0, 0, content_len)
+        end
+        view:p().line = 0
+        view:p().col = 0
+        view:_set_goal_col(0)
+        view:p().anchor_line = nil
+        view:p().anchor_col = nil
 
-		if opts.initial and #opts.initial > 0 then
-			local rl, rc = buf:insert_char(0, 0, opts.initial)
-			view:p().line = rl
-			view:p().col = rc
-			view:_set_goal_col(rc)
-		end
-	end)
+        if opts.initial and #opts.initial > 0 then
+            local rl, rc = buf:insert_char(0, 0, opts.initial)
+            view:p().line = rl
+            view:p().col = rc
+            view:_set_goal_col(rc)
+        end
+    end)
 
-	self.active = true
-	self.prompt = opts.prompt or ""
-	self.on_submit = opts.on_submit
-	self.on_cancel = opts.on_cancel
-	self.on_change = opts.on_change
-	self._prev_text = self:view_text()
-	self._hist_index = nil
-	self._hist_draft = nil
+    self.active = true
+    self.prompt = opts.prompt or ""
+    self.on_submit = opts.on_submit
+    self.on_cancel = opts.on_cancel
+    self.on_change = opts.on_change
+    self._prev_text = self:view_text()
+    self._hist_index = nil
+    self._hist_draft = nil
 
-	-- Fire on_change if initial text was provided
-	if opts.initial and #opts.initial > 0 and self.on_change then
-		self.on_change(opts.initial)
-	end
+    -- Fire on_change if initial text was provided
+    if opts.initial and #opts.initial > 0 and self.on_change then
+        self.on_change(opts.initial)
+    end
 
-	-- Completion
-	self.completion = opts.completion or false
-	if self.completion then
-		self.completer = opts.completer or function(text)
-			return history_completer(self, text)
-		end
-		self._completions = self.completer(self:view_text())
-		self._comp_index = #self._completions > 0 and 1 or 0
-		self._comp_scroll = 0
-	else
-		self.completer = nil
-		self._completions = {}
-		self._comp_index = 0
-		self._comp_scroll = 0
-	end
-	self.auto_accept = opts.auto_accept or false
-	self._auto_accepting = false
-	self.palette = opts.palette or false
+    -- Completion
+    self.completion = opts.completion or false
+    if self.completion then
+        self.completer = opts.completer
+            or function(text)
+                return history_completer(self, text)
+            end
+        self._completions = self.completer(self:view_text())
+        self._comp_index = #self._completions > 0 and 1 or 0
+        self._comp_scroll = 0
+    else
+        self.completer = nil
+        self._completions = {}
+        self._comp_index = 0
+        self._comp_scroll = 0
+    end
+    self.auto_accept = opts.auto_accept or false
+    self._auto_accepting = false
+    self.palette = opts.palette or false
 end
 
 --- Deactivate the minibuffer, clearing callbacks.
 --- Buffer+View are kept for next invocation.
 function Minibuffer:deactivate()
-	self.active = false
-	self.prompt = ""
-	self.on_submit = nil
-	self.on_cancel = nil
-	self.on_change = nil
-	self._prev_text = ""
-	self._hist_index = nil
-	self._hist_draft = nil
-	self.completion = false
-	self.completer = nil
-	self._completions = {}
-	self._comp_index = 0
-	self._comp_scroll = 0
-	self.auto_accept = false
-	self._auto_accepting = false
-	self.palette = false
+    self.active = false
+    self.prompt = ""
+    self.on_submit = nil
+    self.on_cancel = nil
+    self.on_change = nil
+    self._prev_text = ""
+    self._hist_index = nil
+    self._hist_draft = nil
+    self.completion = false
+    self.completer = nil
+    self._completions = {}
+    self._comp_index = 0
+    self._comp_scroll = 0
+    self.auto_accept = false
+    self._auto_accepting = false
+    self.palette = false
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -585,19 +586,19 @@ end
 ---@param fp function float-print sink (x, y, text, fg, bg)
 ---@return integer mb_tail rows reserved below the modeline this frame
 function Minibuffer:_render(editor, w, h, fp)
-	if not self.active then
-		return 0
-	end
+    if not self.active then
+        return 0
+    end
 
-	local bg_default = ui("default_bg")
-	if self.palette then
-		self:_render_palette(editor, w, h, fp, bg_default)
-		return 0
-	end
+    local bg_default = ui("default_bg")
+    if self.palette then
+        self:_render_palette(editor, w, h, fp, bg_default)
+        return 0
+    end
 
-	local mb_tail = self:input_rows() + self:comp_visible_rows()
-	self:_render_inline(editor, w, h, fp, bg_default, mb_tail)
-	return mb_tail
+    local mb_tail = self:input_rows() + self:comp_visible_rows()
+    self:_render_inline(editor, w, h, fp, bg_default, mb_tail)
+    return mb_tail
 end
 
 --- Render the inline bottom strip: prompt + multiline input, an
@@ -612,55 +613,55 @@ end
 ---@param bg_default integer default_bg color
 ---@param mb_tail integer total rows this surface reserves (input + comp)
 function Minibuffer:_render_inline(editor, w, h, fp, bg_default, mb_tail)
-	local line_offset = h - mb_tail -- == modeline_y + 1
-	local mb_view = self.view
-	local mb_buf = mb_view.buffer
-	local line_count = mb_buf:line_count()
-	local prompt = self.prompt
-	local prompt_w = cell_len(prompt)
-	local prompt_fg = ui("minibuffer_prompt")
-	local text_fg = ui("minibuffer_text")
+    local line_offset = h - mb_tail -- == modeline_y + 1
+    local mb_view = self.view
+    local mb_buf = mb_view.buffer
+    local line_count = mb_buf:line_count()
+    local prompt = self.prompt
+    local prompt_w = cell_len(prompt)
+    local prompt_fg = ui("minibuffer_prompt")
+    local text_fg = ui("minibuffer_text")
 
-	for li = 0, line_count - 1 do
-		local line_text = mb_buf:line_text(li)
-		-- Strip trailing newline for display.
-		if #line_text > 0 and line_text:byte(#line_text) == 10 then
-			line_text = line_text:sub(1, #line_text - 1)
-		end
-		local row = line_offset + li
-		if li == 0 then
-			-- First line: prompt + text
-			fp(0, row, prompt, prompt_fg, bg_default)
-			fp(prompt_w, row, line_text, text_fg, bg_default)
-		else
-			-- Subsequent lines: full width
-			fp(0, row, line_text, text_fg, bg_default)
-		end
-	end
+    for li = 0, line_count - 1 do
+        local line_text = mb_buf:line_text(li)
+        -- Strip trailing newline for display.
+        if #line_text > 0 and line_text:byte(#line_text) == 10 then
+            line_text = line_text:sub(1, #line_text - 1)
+        end
+        local row = line_offset + li
+        if li == 0 then
+            -- First line: prompt + text
+            fp(0, row, prompt, prompt_fg, bg_default)
+            fp(prompt_w, row, line_text, text_fg, bg_default)
+        else
+            -- Subsequent lines: full width
+            fp(0, row, line_text, text_fg, bg_default)
+        end
+    end
 
-	-- Caret: hardware caret is hidden; drawn as a reverse-video cell
-	-- (underline-bar style here so input contexts read distinctly from
-	-- the main view's block caret) gated on the editor's blink phase.
-	local mb_pos = mb_view:p()
-	local cursor_row = line_offset + mb_pos.line
-	local cursor_col = mb_pos.line == 0 and (prompt_w + mb_pos.col) or mb_pos.col
-	if editor._blink_on and cursor_col < w then
-		local lt = mb_buf:line_text(mb_pos.line)
-		if #lt > 0 and lt:byte(#lt) == 10 then
-			lt = lt:sub(1, #lt - 1)
-		end
-		local ch = lt:sub(mb_pos.col + 1, mb_pos.col + 1)
-		if #ch == 0 then
-			ch = " "
-		end
-		local bar_fg = bit.bor(ui("cursor_bg"), tb.underline)
-		fp(cursor_col, cursor_row, ch, bar_fg, bg_default)
-	end
+    -- Caret: hardware caret is hidden; drawn as a reverse-video cell
+    -- (underline-bar style here so input contexts read distinctly from
+    -- the main view's block caret) gated on the editor's blink phase.
+    local mb_pos = mb_view:p()
+    local cursor_row = line_offset + mb_pos.line
+    local cursor_col = mb_pos.line == 0 and (prompt_w + mb_pos.col) or mb_pos.col
+    if editor._blink_on and cursor_col < w then
+        local lt = mb_buf:line_text(mb_pos.line)
+        if #lt > 0 and lt:byte(#lt) == 10 then
+            lt = lt:sub(1, #lt - 1)
+        end
+        local ch = lt:sub(mb_pos.col + 1, mb_pos.col + 1)
+        if #ch == 0 then
+            ch = " "
+        end
+        local bar_fg = bit.bor(ui("cursor_bg"), tb.underline)
+        fp(cursor_col, cursor_row, ch, bar_fg, bg_default)
+    end
 
-	-- Completion list: full width, starting below the input rows.
-	if self.completion and #self._completions > 0 then
-		self:_paint_completions(0, line_offset + line_count, w, COMP_MAX_VISIBLE, bg_default, fp)
-	end
+    -- Completion list: full width, starting below the input rows.
+    if self.completion and #self._completions > 0 then
+        self:_paint_completions(0, line_offset + line_count, w, COMP_MAX_VISIBLE, bg_default, fp)
+    end
 end
 
 --- Render the floating centered palette (M-x): a solid-bordered box
@@ -672,70 +673,76 @@ end
 ---@param fp function float-print sink
 ---@param bg_default integer default_bg color
 function Minibuffer:_render_palette(editor, w, h, fp, bg_default)
-	local mb_view = self.view
-	local mb_buf = mb_view.buffer
-	local prompt = self.prompt
-	local prompt_w = cell_len(prompt)
+    local mb_view = self.view
+    local mb_buf = mb_view.buffer
+    local prompt = self.prompt
+    local prompt_w = cell_len(prompt)
 
-	-- Box dimensions.
-	local box_w = math.min(math.max(48, prompt_w + 24), w - 4)
-	local box_x = math.floor((w - box_w) / 2)
-	local n_comp = 0
-	if self.completion and #self._completions > 0 then
-		n_comp = math.min(#self._completions - (self._comp_scroll or 0), COMP_MAX_VISIBLE)
-	end
-	local box_h = 2 + 1 + n_comp + 1
-	local box_y = math.floor((h - box_h) / 2)
+    -- Box dimensions.
+    local box_w = math.min(math.max(48, prompt_w + 24), w - 4)
+    local box_x = math.floor((w - box_w) / 2)
+    local n_comp = 0
+    if self.completion and #self._completions > 0 then
+        n_comp = math.min(#self._completions - (self._comp_scroll or 0), COMP_MAX_VISIBLE)
+    end
+    local box_h = 2 + 1 + n_comp + 1
+    local box_y = math.floor((h - box_h) / 2)
 
-	local border_fg = bit.bor(ui("minibuffer_prompt"), tb.bold)
-	local prompt_fg = ui("minibuffer_prompt")
-	local text_fg = ui("minibuffer_text")
+    local border_fg = bit.bor(ui("minibuffer_prompt"), tb.bold)
+    local prompt_fg = ui("minibuffer_prompt")
+    local text_fg = ui("minibuffer_text")
 
-	-- Clear the box interior with default_bg so it floats cleanly.
-	for r = 0, box_h - 1 do
-		fp(box_x, box_y + r, string.rep(" ", box_w), bg_default, bg_default)
-	end
+    -- Clear the box interior with default_bg so it floats cleanly.
+    for r = 0, box_h - 1 do
+        fp(box_x, box_y + r, string.rep(" ", box_w), bg_default, bg_default)
+    end
 
-	-- Top border: ╭─...─╮
-	fp(box_x, box_y, "╭" .. string.rep("─", box_w - 2) .. "╮", border_fg, bg_default)
+    -- Top border: ╭─...─╮
+    fp(box_x, box_y, "╭" .. string.rep("─", box_w - 2) .. "╮", border_fg, bg_default)
 
-	-- Input row: prompt + text.
-	local input_y = box_y + 1
-	fp(box_x + 1, input_y, prompt, prompt_fg, bg_default)
-	do
-		local lt = mb_buf:line_text(0)
-		if #lt > 0 and lt:byte(#lt) == 10 then
-			lt = lt:sub(1, #lt - 1)
-		end
-		local max_text = box_w - 2 - prompt_w
-		fp(box_x + 1 + prompt_w, input_y, truncate_cells(lt, max_text), text_fg, bg_default)
-	end
+    -- Input row: prompt + text.
+    local input_y = box_y + 1
+    fp(box_x + 1, input_y, prompt, prompt_fg, bg_default)
+    do
+        local lt = mb_buf:line_text(0)
+        if #lt > 0 and lt:byte(#lt) == 10 then
+            lt = lt:sub(1, #lt - 1)
+        end
+        local max_text = box_w - 2 - prompt_w
+        fp(box_x + 1 + prompt_w, input_y, truncate_cells(lt, max_text), text_fg, bg_default)
+    end
 
-	-- Caret (underline bar, same as inline strip).
-	if editor._blink_on then
-		local lt = mb_buf:line_text(0)
-		if #lt > 0 and lt:byte(#lt) == 10 then
-			lt = lt:sub(1, #lt - 1)
-		end
-		local bcol = mb_view:p().col
-		local cursor_col = box_x + 1 + prompt_w + bcol
-		if cursor_col < box_x + box_w - 1 then
-			local ch = lt:sub(bcol + 1, bcol + 1)
-			if #ch == 0 then
-				ch = " "
-			end
-			local bar_fg = bit.bor(ui("cursor_bg"), tb.underline)
-			fp(cursor_col, input_y, ch, bar_fg, bg_default)
-		end
-	end
+    -- Caret (underline bar, same as inline strip).
+    if editor._blink_on then
+        local lt = mb_buf:line_text(0)
+        if #lt > 0 and lt:byte(#lt) == 10 then
+            lt = lt:sub(1, #lt - 1)
+        end
+        local bcol = mb_view:p().col
+        local cursor_col = box_x + 1 + prompt_w + bcol
+        if cursor_col < box_x + box_w - 1 then
+            local ch = lt:sub(bcol + 1, bcol + 1)
+            if #ch == 0 then
+                ch = " "
+            end
+            local bar_fg = bit.bor(ui("cursor_bg"), tb.underline)
+            fp(cursor_col, input_y, ch, bar_fg, bg_default)
+        end
+    end
 
-	-- Completions inside the box.
-	if n_comp > 0 then
-		self:_paint_completions(box_x + 1, input_y + 1, box_w - 2, COMP_MAX_VISIBLE, bg_default, fp)
-	end
+    -- Completions inside the box.
+    if n_comp > 0 then
+        self:_paint_completions(box_x + 1, input_y + 1, box_w - 2, COMP_MAX_VISIBLE, bg_default, fp)
+    end
 
-	-- Bottom border: ╰─...─╯
-	fp(box_x, box_y + box_h - 1, "╰" .. string.rep("─", box_w - 2) .. "╯", border_fg, bg_default)
+    -- Bottom border: ╰─...─╯
+    fp(
+        box_x,
+        box_y + box_h - 1,
+        "╰" .. string.rep("─", box_w - 2) .. "╯",
+        border_fg,
+        bg_default
+    )
 end
 
 --- Unified completion-list renderer shared by the inline strip and the
@@ -749,30 +756,30 @@ end
 ---@param bg integer surrounding bg color
 ---@param fp function float-print sink (x, y, text, fg, bg)
 function Minibuffer:_paint_completions(x, y, width, max_visible, bg, fp)
-	local meta_fg = ui("minibuffer_metadata")
-	crender.paint_candidate_list(
-		fp,
-		x,
-		y,
-		width,
-		self._completions,
-		self._comp_index or 0,
-		self._comp_scroll or 0,
-		max_visible,
-		self:view_text(),
-		bg,
-		{
-			cursor_fg = ui("cursor_fg"),
-			cursor_bg = ui("cursor_bg"),
-			norm_fg = ui("minibuffer_prompt"),
-			meta_fg = meta_fg,
-			bright_fg = ui("minibuffer_text"),
-			dim_fg = meta_fg,
-			accent_fg = ui("minibuffer_prompt"),
-			track_fg = ui("scrollbar_track"),
-			thumb_fg = ui("scrollbar_thumb"),
-		}
-	)
+    local meta_fg = ui("minibuffer_metadata")
+    crender.paint_candidate_list(
+        fp,
+        x,
+        y,
+        width,
+        self._completions,
+        self._comp_index or 0,
+        self._comp_scroll or 0,
+        max_visible,
+        self:view_text(),
+        bg,
+        {
+            cursor_fg = ui("cursor_fg"),
+            cursor_bg = ui("cursor_bg"),
+            norm_fg = ui("minibuffer_prompt"),
+            meta_fg = meta_fg,
+            bright_fg = ui("minibuffer_text"),
+            dim_fg = meta_fg,
+            accent_fg = ui("minibuffer_prompt"),
+            track_fg = ui("scrollbar_track"),
+            thumb_fg = ui("scrollbar_thumb"),
+        }
+    )
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -780,7 +787,7 @@ end
 ----------------------------------------------------------------------------------------------------
 
 return {
-	Minibuffer = Minibuffer,
-	comp_text = crender.comp_text,
-	comp_meta = crender.comp_meta,
+    Minibuffer = Minibuffer,
+    comp_text = crender.comp_text,
+    comp_meta = crender.comp_meta,
 }
