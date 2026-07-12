@@ -1,0 +1,9 @@
+no tabs here
+	one tab at start
+		two tabs at start
+normal		then tab
+		tab then lots of text after it that should be far to the right
+	tab		mixture		of	tabs		and text
+a		b	c		d	e		f
+short	→tab
+		two	tabs	→	here

@@ -4105,6 +4105,23 @@ function Editor:_render_layout(mb, view, text_w, term, fp, ov)
 	}
 end
 
+-- Expand a tab grapheme to the appropriate number of spaces for display.
+-- Tab characters are always their own grapheme cluster, so the chunk
+-- is exactly "\t" when it starts with byte 9.
+---@param chunk string
+---@param col integer display column where the run starts
+---@param tab_width integer tab stop width
+---@return string
+local function _expand_tab(chunk, col, tab_width)
+	if chunk:byte(1) == 9 then
+		local tw = tab_width or 8
+		if tw > 0 then
+			return string.rep(" ", tw - (col % tw))
+		end
+	end
+	return chunk
+end
+
 --- Paint a text chunk's base layer with syntax-highlight spans.
 --- Returns the updated seg_idx for the next call on the same logical line.
 ---@param term table
@@ -4126,6 +4143,14 @@ local function _paint_run(term, view, li, row, text_x, line_text, run, row_bg, l
 	local dbg = row_bg or ui("default_bg")
 	dfg, dbg = focus_dim(dfg, dbg)
 	local chunk = line_text:sub(run.byte_start, run.byte_end)
+	-- Expand tab characters to spaces based on tab width
+	if chunk:byte(1) == 9 then
+		local tw = view.tab_width or 8
+		if tw > 0 then
+			local nspaces = tw - (run.col % tw)
+			chunk = string.rep(" ", nspaces)
+		end
+	end
 	local x = text_x + run.col
 	if line_segs == nil or #line_segs == 0 then
 		term:print(x, row, chunk, dfg, dbg)
@@ -4396,7 +4421,11 @@ function Editor:_render_content(view, term, mb, ov, focus_dim, geo, layout)
 										local cbg = ui("cursor_bg")
 										ov:put_float(geo.text_x, row, spaces(row_w), cfg, cbg)
 										for _, run in ipairs(runs) do
-											local chunk = line_text:sub(run.byte_start, run.byte_end)
+											local chunk = _expand_tab(
+												line_text:sub(run.byte_start, run.byte_end),
+												run.col,
+												view.tab_width
+											)
 											if #chunk > 0 then
 												ov:put_float(geo.text_x + run.col, row, chunk, cfg, cbg)
 											end
@@ -4405,7 +4434,11 @@ function Editor:_render_content(view, term, mb, ov, focus_dim, geo, layout)
 										local ch = " "
 										for _, run in ipairs(runs) do
 											if c.col + 1 >= run.byte_start and c.col + 1 <= run.byte_end then
-												ch = line_text:sub(run.byte_start, run.byte_end)
+												ch = _expand_tab(
+													line_text:sub(run.byte_start, run.byte_end),
+													ccol,
+													view.tab_width
+												)
 												break
 											end
 										end
@@ -4441,7 +4474,7 @@ function Editor:_render_content(view, term, mb, ov, focus_dim, geo, layout)
 									ov:put_float(
 										geo.text_x + mcol,
 										row,
-										line_text:sub(run.byte_start, run.byte_end),
+										_expand_tab(line_text:sub(run.byte_start, run.byte_end), mcol, view.tab_width),
 										m_fg,
 										m_bg
 									)
@@ -4474,7 +4507,11 @@ function Editor:_render_content(view, term, mb, ov, focus_dim, geo, layout)
 								local ch = " "
 								for _, run in ipairs(runs) do
 									if c.col + 1 >= run.byte_start and c.col + 1 <= run.byte_end then
-										ch = line_text:sub(run.byte_start, run.byte_end)
+										ch = _expand_tab(
+											line_text:sub(run.byte_start, run.byte_end),
+											ccol,
+											view.tab_width
+										)
 										break
 									end
 								end
