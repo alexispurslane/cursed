@@ -5,8 +5,6 @@
 
 CC       := "clang"
 STYLUA   := "stylua"
-LUALS    := "lua-language-server"
-
 SRC_DIR   := "src"
 BUILD_DIR := "build"
 VENDOR_DIR := "vendor"
@@ -41,18 +39,8 @@ clean-vendor:
     cd {{VENDOR_DIR}}/luajit && make clean 2>/dev/null || true
     cd {{VENDOR_DIR}}/tree-sitter-lib && git clean -fdx 2>/dev/null || true
 
-# ── Lint & Format ──────────────────────────────────────────────────
-
-lint:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    {{LUALS}} check --configpath .luarc.json --check {{SRC_DIR}}/
-
 fmt:
-    {{STYLUA}} {{SRC_DIR}}
-
-fmt-check:
-    {{STYLUA}} --check {{SRC_DIR}}
+    {{STYLUA}} --search-parent-directories {{SRC_DIR}}
 
 # ── Build ──────────────────────────────────────────────────────────
 
@@ -220,6 +208,3 @@ run file="": (build "release")
 run-debug file="": (build "debug")
     {{BINARY}} {{ if file == "" { "" } else { "'" + file + "'" } }}
 
-# ── All checks ─────────────────────────────────────────────────────
-
-check: fmt-check lint

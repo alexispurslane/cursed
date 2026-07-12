@@ -508,37 +508,60 @@ function Editor.new(term)
 	editor.completion_menu = CompletionMenu.new(editor)
 	-- Spell-merge wrapper: when the cursor sits on a flagged word, spell
 	-- suggestions rank first, then the mode-declared source's results
-	-- follow. Delegates trigger_chars/pending to the mode source (spell
+	-- follow, then (when in dabbrev/fallback mode) system dictionary
+	-- completions provide a last-resort source of suggestions.
+	-- Delegates trigger_chars/pending to the mode source (spell
 	-- has no trigger chars / no async state).
 	local mode_source = completers.mode_dispatch(editor)
 	local spell_completer = require("cursed.spell.completers").spell(editor)
+	local dict = require("cursed.dictionary")
 	local merged = setmetatable({}, {
 		__call = function(_, ctx)
+			local prefix = ctx and ctx.prefix or ""
+			-- Fallback (buffer_words / dabbrev) when no mode in the
+			-- chain declares its own completer. We check all modes
+			-- top-to-bottom so a lower mode with a completer counts.
+			local mode_has_completer = false
+			if ctx ~= nil and ctx.view ~= nil and ctx.view._major_modes ~= nil then
+				for i = #ctx.view._major_modes, 1, -1 do
+					if ctx.view._major_modes[i].completer ~= nil then
+						mode_has_completer = true
+						break
+					end
+				end
+			end
+			local mode_is_fallback = not mode_has_completer
+			-- Only consult the system dictionary when the mode source is
+			-- the fallback (buffer_words / dabbrev) — LSP sources already
+			-- provide relevant project symbols.
+			local dict_items
+			if mode_is_fallback and #prefix >= 2 then
+				dict_items = dict.lookup(prefix, 15)
+			else
+				dict_items = nil
+			end
+
 			local spell_items = spell_completer(ctx)
 			local mode_items = mode_source(ctx)
-			if spell_items == nil or #spell_items == 0 then
-				return mode_items or {}
-			end
-			if mode_items == nil or #mode_items == 0 then
-				return spell_items
-			end
-			-- Dedupe: a suggestion may appear in both lists.
+
+			-- Collect into deduped output: spell → mode → dict.
 			local seen = {}
 			local out = {}
-			for _, it in ipairs(spell_items) do
-				local key = type(it) == "table" and it.text or it
-				if key ~= nil and not seen[key] then
-					seen[key] = true
-					out[#out + 1] = it
+			local function add_items(items)
+				if items == nil then
+					return
+				end
+				for _, it in ipairs(items) do
+					local key = type(it) == "table" and it.text or it
+					if key ~= nil and not seen[key] then
+						seen[key] = true
+						out[#out + 1] = it
+					end
 				end
 			end
-			for _, it in ipairs(mode_items) do
-				local key = type(it) == "table" and it.text or it
-				if key ~= nil and not seen[key] then
-					seen[key] = true
-					out[#out + 1] = it
-				end
-			end
+			add_items(spell_items)
+			add_items(mode_items)
+			add_items(dict_items)
 			return out
 		end,
 	})

@@ -539,6 +539,26 @@ function CompletionMenu:accept()
 	local line, col, start_col = ctx.line, ctx.col, ctx.word_start_col
 	view = ctx.view
 	local buf = view.buffer
+
+	-- When the cursor is on a flagged misspelled word (spell store),
+	-- extend the delete range to cover the ENTIRE word bounds, not just
+	-- the typed prefix left of the cursor. Without this, selecting a
+	-- correction leaves the suffix "eling" behind when the cursor was
+	-- mid-word ("missp|eling" + Tab → "misspellingeling").
+	local spell = require("cursed.spell")
+	local store = spell.store(editor)
+	if store ~= nil then
+		local entry = store:word_at(buf, line, col)
+		if entry ~= nil then
+			if entry.s_col < start_col then
+				start_col = entry.s_col
+			end
+			if entry.e_col > col then
+				col = entry.e_col
+			end
+		end
+	end
+
 	self._accepted = true
 	self:close()
 	view:batch_edit(false, function(c)

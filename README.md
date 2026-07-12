@@ -19,7 +19,7 @@ Most of the editor concepts --- and keybindings --- are derived from Emacs, but 
 - The core UI concept (used as the backing for view surfaces --- usually of files --- and the minibuffer prompt) is also a buffer, but buffers are now line-wise piece tables
 - We do JIT syntax highlighting, but it uses incremental tree sitter parsing and querying, with full support for query predicates, and runs on a background thread, so it can never block editor responsiveness.
 - We natively support the full (tweaked) base16 spec, directly reading the YAML files, for color themes, and we use a UI/syntax element -> concept -> base16 mapping designed to keep things as flexible as possible, and the whole UI auto-themes based around whatever theme you choose. Live theme previews with `load-theme` are supported.
-- Modes are now unified: there is no distinction between a major mode and a minor mode, all modes can modify anything they want, including the current keymap of a view, and the last one applicable or started in a view wins. 
+- Modes are now unified: there is no distinction between a major mode and a minor mode, all modes can modify anything they want, including the current keymap of a view, and the last one applicable or started in a view wins.
 - Minibuffers have built in completion capabilities with a callback to determine the list of options and how they are filtered, and can be placed in the center of the screen or at the bottom, and get a scrollbar by default. Minibuffer answers can also be passed as arguments to the relevant commands, so there does not need to be a distinction between interactive and non-interactive functions/commands, or automatic minibuffer filling.
 - Modes and `init.lua` are declarative by default, but can also run arbitrary code, which will be JIT'd and run in the main editor thread, with access to all of the same code, and capable of making all of the same modifications. There is a proper event bus --- not an ad-hoc hooks system --- and an advicing system fully as capable as Emacs Lisp's, and capable of modifying anything in the editor that runs on the main thread.
 - The main editor is single-threaded to allow the extensibility covered in the previous point; however, a proper system of kqueues, message ring buffers, and separate lightweight LuaJIT interpreters running on other pthreads allows the editor to offload longer non-blocking CPU intensive tasks to other threads; meanwhile Lua coroutines allow asynchronous I/O, and a centralized background_tasks system integrated with the core event loop allows timed and non-timed background tasks to execute incrementally across many editor turns.
@@ -44,18 +44,18 @@ Most of the editor concepts --- and keybindings --- are derived from Emacs, but 
 - Generalized, unified in-buffer completion system that can accept the exact same "completer" higher-order-function interface as Minibuffers, uses the same interior rendering of options, is extremely fast and seamless, and supports dabbrev by default.
 - Generalized oveerlay system that allows overlays both anchored to places in the file, and floating at specific places on the screen, and allows layered *modification* of the characters below it. This is used, for instance, to add LSP diagnostic underline (or squiggle, on modern terminals) to file text, without baking it in to the core renderer. We also, of course, support cancellable popups showing the text content of a diagnostic when the cursor is inside it, and the ability to jump to previous/next diagnostics.
 - Structural selection (`expand-region` / `shrink-region`, bound to `Alt-'` / `Alt-"`): a single-chord, repeatable command that progressively selects larger semantic units around each cursor --- subword, word, bigword, sexp, line, defun, buffer --- and, when a tree-sitter parse tree is available for the document, seamlessly transitions into ascending the parse tree node-by-node so you can widen from a token all the way up to the root. `shrink-region` is the symmetric inverse, collapsing back toward the cursor's original position by descending the parse tree (or stepping down the textobject ladder). Both commands are multiple-cursor aware, track the seed point so shrink always returns to where expand started, and re-resolve tree nodes against a freshly acquired parse tree on every invocation so selections never reference freed memory.
-- The core input, command, buffer, and view systems are so flexible that text-based user interfaces (see `examples/picker.lua` for a small example) are trivial to write *inside the editor*, similar to Emacs. 
-   - Modes can simply:
-     - write whatever UI they want to their view's backing buffer,
-     - hijack the insertion of printable characters and the text editing commands with ones that edit the buffer to respond to state
-     - use the cursor's current line and other editor state as forms of input
-     - store backing state information on their mode instance
-     - and introspect by reading their own buffer content
-   - The key benefits of this are that these TUIs can:
-     - reinstate full buffer text editing capabilities in limited locations within the buffer for text boxes and input fields that take full advantage of being inside an editor
-     - use the editor's multithreaded process management system
-     - be converted back to regular text for full editing by the user
-     - share output data between arbitrary full TUI programs by simply converting the UI of a TUI program back to text and then making it the input, or even starting UI, of another TUI program by then enabling a different TUI mode
+- The core input, command, buffer, and view systems are so flexible that text-based user interfaces (see `examples/picker.lua` for a small example) are trivial to write *inside the editor*, similar to Emacs.
+  - Modes can simply:
+    - write whatever UI they want to their view's backing buffer,
+    - hijack the insertion of printable characters and the text editing commands with ones that edit the buffer to respond to state
+    - use the cursor's current line and other editor state as forms of input
+    - store backing state information on their mode instance
+    - and introspect by reading their own buffer content
+  - The key benefits of this are that these TUIs can:
+    - reinstate full buffer text editing capabilities in limited locations within the buffer for text boxes and input fields that take full advantage of being inside an editor
+    - use the editor's multithreaded process management system
+    - be converted back to regular text for full editing by the user
+    - share output data between arbitrary full TUI programs by simply converting the UI of a TUI program back to text and then making it the input, or even starting UI, of another TUI program by then enabling a different TUI mode
 
 ## Screenshots
 
@@ -126,8 +126,7 @@ Only a handful of standard build tools are required:
 
 Optional, for development:
 
-- **[`stylua`](https://github.com/JohnnyMorganz/StyLua)** — code formatting (`just fmt` / `just fmt-check`).
-- **[`lua-language-server`](https://github.com/LuaLS/lua-language-server)** — type/lint checks (`just lint`).
+- **[`stylua`](https://github.com/JohnnyMorganz/StyLua)** — code formatting (`just fmt`).
 
 ### Build
 
@@ -155,27 +154,12 @@ just run 'path/with spaces' # spaces are fine inside quotes
 #   ./build/cursed one two 'three with spaces'
 ```
 
-### Checks
+### Utility
 
 ```bash
-just check    # stylua --check + lua-language-server lint
 just fmt      # format src/ with stylua
 just clean    # remove build/ and clean the TRE build dir
 just clean-vendor # also rebuild vendored LuaJIT / tree-sitter-lib from scratch
 ```
 
 Build artifacts land entirely in `build/`; nothing outside the repo is touched except `~/.config/cursed/` at runtime.
-
-
-
-
-
-
-
-
-
-
-
-
-
-

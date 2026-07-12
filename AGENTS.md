@@ -31,7 +31,11 @@
 
 ## After Every Change
 
-Run `just check`. It must pass with exit code 0.
+No lint/check step; pi-lens handles diagnostics and linting in-editor.
 
+## Stylua Wrapper
 
-
+A `stylua` wrapper in `~/.pi/agent/bin/` injects `--search-parent-directories`
+so pi-lens (which runs stylua from the file's parent dir) picks up the
+project's `stylua.toml` in the root. Without this flag, stylua 2.5.2
+defaults to tabs when run from a subdirectory without its own config.

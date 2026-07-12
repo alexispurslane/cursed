@@ -21,41 +21,41 @@ local M = {}
 ---@param editor Editor
 ---@return table driver
 function M.setup(editor)
-	if editor._spell ~= nil then
-		return editor._spell
-	end
-	local d = driver_mod.new(editor)
-	editor._spell = d
-	local es = editor.event_system
-	-- Edit hook: bump the debounce on every non-trivial edit. Mirrors
-	-- how `completers.buffer_words` invalidates its cache on gen change.
-	es:on("post_command_hook", function(_ed)
-		local view = _ed:current_view()
-		if view == nil or view.buffer == nil then
-			return
-		end
-		d:on_edit(view.buffer)
-	end)
-	-- New buffer / focus-toggled check.
-	es:on("buffer_open", function(_ed, buf)
-		---@diagnostic disable-next-line: unused-local
-		_ed = _ed
-		d:on_buffer_open(buf)
-	end)
-	-- Buffer closed → clear its store + drop any pending check.
-	es:on("buffer_close", function(_ed, buf)
-		---@diagnostic disable-next-line: unused-local
-		_ed = _ed
-		d:store():clear(buf)
-		local k = buf._ptr and tostring(buf._ptr) or nil
-		if k ~= nil and d._pending[k] ~= nil then
-			if d._pending[k].task ~= nil then
-				editor:cancel_task(d._pending[k].task)
-			end
-			d._pending[k] = nil
-		end
-	end)
-	return d
+    if editor._spell ~= nil then
+        return editor._spell
+    end
+    local d = driver_mod.new(editor)
+    editor._spell = d
+    local es = editor.event_system
+    -- Edit hook: bump the debounce on every non-trivial edit. Mirrors
+    -- how `completers.buffer_words` invalidates its cache on gen change.
+    es:on("post_command_hook", function(_ed)
+        local view = _ed:current_view()
+        if view == nil or view.buffer == nil then
+            return
+        end
+        d:on_edit(view.buffer)
+    end)
+    -- New buffer / focus-toggled check.
+    es:on("buffer_open", function(_ed, buf)
+        ---@diagnostic disable-next-line: unused-local
+        _ed = _ed
+        d:on_buffer_open(buf)
+    end)
+    -- Buffer closed → clear its store + drop any pending check.
+    es:on("buffer_close", function(_ed, buf)
+        ---@diagnostic disable-next-line: unused-local
+        _ed = _ed
+        d:store():clear(buf)
+        local k = buf._ptr and tostring(buf._ptr) or nil
+        if k ~= nil and d._pending[k] ~= nil then
+            if d._pending[k].task ~= nil then
+                editor:cancel_task(d._pending[k].task)
+            end
+            d._pending[k] = nil
+        end
+    end)
+    return d
 end
 
 --- Convenience: fetch the active driver's store (or nil when spell
@@ -63,20 +63,20 @@ end
 ---@param editor Editor
 ---@return table|nil
 function M.store(editor)
-	if editor._spell == nil then
-		return nil
-	end
-	return editor._spell:store()
+    if editor._spell == nil then
+        return nil
+    end
+    return editor._spell:store()
 end
 
 --- Convenience: fetch the active driver's client.
 ---@param editor Editor
 ---@return table|nil
 function M.client(editor)
-	if editor._spell == nil then
-		return nil
-	end
-	return editor._spell:client()
+    if editor._spell == nil then
+        return nil
+    end
+    return editor._spell:client()
 end
 
 return M
