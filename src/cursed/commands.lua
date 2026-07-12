@@ -18,6 +18,7 @@ local async = require("cursed.async")
 local ffi = require("ffi")
 local Editor = require("cursed.editor")
 local utf8 = require("cursed.utf8")
+local fzy = require("cursed.fzy")
 local universal_arg = require("cursed.universal_arg")
 local advice = require("cursed.advice")
 
@@ -31,16 +32,16 @@ local _cmd_info_cache = setmetatable({}, { __mode = "k" })
 ---@param fn function
 ---@return {isvararg: boolean, nparams: integer}|nil
 local function get_cmd_info(fn)
-    local cached = _cmd_info_cache[fn]
-    if cached ~= nil then
-        return cached
-    end
-    local info = debug.getinfo(fn, "u")
-    if info then
-        cached = { isvararg = info.isvararg, nparams = info.nparams or 0 }
-        _cmd_info_cache[fn] = cached
-    end
-    return cached
+	local cached = _cmd_info_cache[fn]
+	if cached ~= nil then
+		return cached
+	end
+	local info = debug.getinfo(fn, "u")
+	if info then
+		cached = { isvararg = info.isvararg, nparams = info.nparams or 0 }
+		_cmd_info_cache[fn] = cached
+	end
+	return cached
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -59,43 +60,43 @@ end
 ---@param ... any remaining universal args (numbers or strings)
 ---@return integer count signed repeat count
 local function repeat_count(flag, ...)
-    if flag == nil then
-        -- No universal args at all: default to 1 in normal direction
-        return 1
-    end
-    local n = 1
-    local argc = select("#", ...)
-    for i = 1, argc do
-        local arg = select(i, ...)
-        local ty = type(arg)
-        if ty == "number" then
-            n = n * arg
-        elseif ty == "string" then
-            n = n * #arg
-        end
-    end
-    if not flag then
-        n = -n
-    end
-    return n
+	if flag == nil then
+		-- No universal args at all: default to 1 in normal direction
+		return 1
+	end
+	local n = 1
+	local argc = select("#", ...)
+	for i = 1, argc do
+		local arg = select(i, ...)
+		local ty = type(arg)
+		if ty == "number" then
+			n = n * arg
+		elseif ty == "string" then
+			n = n * #arg
+		end
+	end
+	if not flag then
+		n = -n
+	end
+	return n
 end
 
 commands.move_line_start = function(view, _editor, ...)
-    local flag = ...
-    if flag == false then
-        view:move_line_end()
-    else
-        view:move_line_start()
-    end
+	local flag = ...
+	if flag == false then
+		view:move_line_end()
+	else
+		view:move_line_start()
+	end
 end
 
 commands.move_line_end = function(view, _editor, ...)
-    local flag = ...
-    if flag == false then
-        view:move_line_start()
-    else
-        view:move_line_end()
-    end
+	local flag = ...
+	if flag == false then
+		view:move_line_start()
+	else
+		view:move_line_end()
+	end
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -118,111 +119,111 @@ end
 ----------------------------------------------------------------------------------------------------
 
 commands.arrow_up_select = function(view, editor)
-    local mb = editor.minibuffer
-    if mb and mb.active and mb.completion and #mb._completions > 0 then
-        mb:comp_up()
-        return
-    end
-    commands.backward_visual_line_select(view, editor)
+	local mb = editor.minibuffer
+	if mb and mb.active and mb.completion and #mb._completions > 0 then
+		mb:comp_up()
+		return
+	end
+	commands.backward_visual_line_select(view, editor)
 end
 
 commands.arrow_down_select = function(view, editor)
-    local mb = editor.minibuffer
-    if mb and mb.active and mb.completion and #mb._completions > 0 then
-        mb:comp_down()
-        return
-    end
-    commands.forward_visual_line_select(view, editor)
+	local mb = editor.minibuffer
+	if mb and mb.active and mb.completion and #mb._completions > 0 then
+		mb:comp_down()
+		return
+	end
+	commands.forward_visual_line_select(view, editor)
 end
 
 commands.move_line_start_select = function(view, editor, ...)
-    local flag = ...
-    editor._extend = true
-    view:_begin_shift_select()
-    if flag == false then
-        view:move_line_end()
-    else
-        view:move_line_start()
-    end
+	local flag = ...
+	editor._extend = true
+	view:_begin_shift_select()
+	if flag == false then
+		view:move_line_end()
+	else
+		view:move_line_start()
+	end
 end
 
 commands.move_line_end_select = function(view, editor, ...)
-    local flag = ...
-    editor._extend = true
-    view:_begin_shift_select()
-    if flag == false then
-        view:move_line_start()
-    else
-        view:move_line_end()
-    end
+	local flag = ...
+	editor._extend = true
+	view:_begin_shift_select()
+	if flag == false then
+		view:move_line_start()
+	else
+		view:move_line_end()
+	end
 end
 
 commands.beginning_of_buffer_select = function(view, editor, ...)
-    local flag = ...
-    editor._extend = true
-    view:_begin_shift_select()
-    if flag == false then
-        view:p().line = view:line_count() - 1
-        view:p().col = view:content_len(view:p().line)
-        view:_set_goal_col(view:p().col)
-    else
-        view:p().line = 0
-        view:p().col = 0
-        view:_set_goal_col(0)
-    end
+	local flag = ...
+	editor._extend = true
+	view:_begin_shift_select()
+	if flag == false then
+		view:p().line = view:line_count() - 1
+		view:p().col = view:content_len(view:p().line)
+		view:_set_goal_col(view:p().col)
+	else
+		view:p().line = 0
+		view:p().col = 0
+		view:_set_goal_col(0)
+	end
 end
 
 commands.end_of_buffer_select = function(view, editor, ...)
-    local flag = ...
-    editor._extend = true
-    view:_begin_shift_select()
-    if flag == false then
-        view:p().line = 0
-        view:p().col = 0
-        view:_set_goal_col(0)
-    else
-        view:p().line = view:line_count() - 1
-        view:p().col = view:content_len(view:p().line)
-        view:_set_goal_col(view:p().col)
-    end
+	local flag = ...
+	editor._extend = true
+	view:_begin_shift_select()
+	if flag == false then
+		view:p().line = 0
+		view:p().col = 0
+		view:_set_goal_col(0)
+	else
+		view:p().line = view:line_count() - 1
+		view:p().col = view:content_len(view:p().line)
+		view:_set_goal_col(view:p().col)
+	end
 end
 
 commands.scroll_down = function(view, editor, ...)
-    local n = repeat_count(...)
-    local page_size = editor.term:height() - editor:footer_rows()
-    view:scroll_page(-n, page_size)
+	local n = repeat_count(...)
+	local page_size = editor.term:height() - editor:footer_rows()
+	view:scroll_page(-n, page_size)
 end
 
 commands.scroll_up = function(view, editor, ...)
-    local n = repeat_count(...)
-    local page_size = editor.term:height() - editor:footer_rows()
-    view:scroll_page(n, page_size)
+	local n = repeat_count(...)
+	local page_size = editor.term:height() - editor:footer_rows()
+	view:scroll_page(n, page_size)
 end
 
 commands.beginning_of_buffer = function(view, _editor, ...)
-    local flag = ...
-    if flag == false then
-        view:p().line = view:line_count() - 1
-        view:p().col = view:content_len(view:p().line)
-        view:_set_goal_col(view:p().col)
-    else
-        view:p().line = 0
-        view:p().col = 0
-        view:_set_goal_col(0)
-    end
+	local flag = ...
+	if flag == false then
+		view:p().line = view:line_count() - 1
+		view:p().col = view:content_len(view:p().line)
+		view:_set_goal_col(view:p().col)
+	else
+		view:p().line = 0
+		view:p().col = 0
+		view:_set_goal_col(0)
+	end
 end
 
 commands.end_of_buffer = function(view, _editor, ...)
-    local flag = ...
-    if flag == false then
-        view:p().line = 0
-        view:p().col = 0
-        view:_set_goal_col(0)
-    else
-        view:p().line = view:line_count() - 1
-        view:p().col = view:content_len(view:p().line)
-        view:_set_goal_col(view:p().col)
-    end
+	local flag = ...
+	if flag == false then
+		view:p().line = 0
+		view:p().col = 0
+		view:_set_goal_col(0)
+	else
+		view:p().line = view:line_count() - 1
+		view:p().col = view:content_len(view:p().line)
+		view:_set_goal_col(view:p().col)
+	end
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -230,145 +231,145 @@ end
 ----------------------------------------------------------------------------------------------------
 
 commands.delete_char = function(view, editor, ...)
-    local n = repeat_count(...)
-    view:delete_char(n)
+	local n = repeat_count(...)
+	view:delete_char(n)
 end
 
 commands.backward_delete_char = function(view, editor, ...)
-    if not view:delete_selection() then
-        local n = repeat_count(...)
-        view:delete_char(-n)
-    end
+	if not view:delete_selection() then
+		local n = repeat_count(...)
+		view:delete_char(-n)
+	end
 end
 
 commands.newline = function(view, editor, ...)
-    local n = repeat_count(...)
-    for _ = 1, math.max(1, n) do
-        view:insert_newline()
-    end
+	local n = repeat_count(...)
+	for _ = 1, math.max(1, n) do
+		view:insert_newline()
+	end
 end
 
 commands.self_insert = function(view, _editor, ch)
-    view:delete_selection()
-    -- Note: self_insert is special; the keybinding wrapper passes `ch`
-    -- directly since it comes from __printable. The command form is
-    -- mainly for M-x invocation where there's no character to insert.
+	view:delete_selection()
+	-- Note: self_insert is special; the keybinding wrapper passes `ch`
+	-- directly since it comes from __printable. The command form is
+	-- mainly for M-x invocation where there's no character to insert.
 end
 
 commands.kill_line = function(view, editor, flag, ...)
-    local n = repeat_count(flag, ...)
-    if n < 0 then
-        -- Negative count: kill backward to start of line
-        local count = math.abs(n)
-        for _ = 1, count do
-            if view:p().col == 0 then
-                -- Kill the newline (join with previous line)
-                if view:p().line > 0 then
-                    local killed = "\n"
-                    view:delete_char(-1)
-                    editor:push_kill(killed)
-                end
-            else
-                local killed = view:text_between(view:p().line, 0, view:p().line, view:p().col)
-                view:delete_char(-view:p().col)
-                editor:push_kill(killed)
-            end
-        end
-    else
-        -- Positive count: kill to end of line (or merge with next line)
-        for _ = 1, math.abs(n) do
-            local content_len = view:content_len(view:p().line)
-            local killed
-            if view:p().col < content_len then
-                killed = view:text_between(view:p().line, view:p().col, view:p().line, content_len)
-                view:delete_char(content_len - view:p().col)
-            elseif view:p().line < view:line_count() - 1 then
-                killed = "\n"
-                view:delete_char(1)
-            else
-                break
-            end
-            editor:push_kill(killed)
-        end
-    end
+	local n = repeat_count(flag, ...)
+	if n < 0 then
+		-- Negative count: kill backward to start of line
+		local count = math.abs(n)
+		for _ = 1, count do
+			if view:p().col == 0 then
+				-- Kill the newline (join with previous line)
+				if view:p().line > 0 then
+					local killed = "\n"
+					view:delete_char(-1)
+					editor:push_kill(killed)
+				end
+			else
+				local killed = view:text_between(view:p().line, 0, view:p().line, view:p().col)
+				view:delete_char(-view:p().col)
+				editor:push_kill(killed)
+			end
+		end
+	else
+		-- Positive count: kill to end of line (or merge with next line)
+		for _ = 1, math.abs(n) do
+			local content_len = view:content_len(view:p().line)
+			local killed
+			if view:p().col < content_len then
+				killed = view:text_between(view:p().line, view:p().col, view:p().line, content_len)
+				view:delete_char(content_len - view:p().col)
+			elseif view:p().line < view:line_count() - 1 then
+				killed = "\n"
+				view:delete_char(1)
+			else
+				break
+			end
+			editor:push_kill(killed)
+		end
+	end
 end
 
 commands.open_line = function(view, editor, ...)
-    local n = repeat_count(...)
-    for _ = 1, math.max(1, n) do
-        view:insert_newline()
-        view:cursor_up()
-    end
+	local n = repeat_count(...)
+	for _ = 1, math.max(1, n) do
+		view:insert_newline()
+		view:cursor_up()
+	end
 end
 
 commands.copy_region = function(view, editor)
-    if not view:has_selection() then
-        return
-    end
-    local sl, sc, el, ec = view:selection_range()
-    ---@cast sc integer
-    ---@cast el integer
-    ---@cast ec integer
-    local text = view:text_between(sl, sc, el, ec)
-    view:unset_mark()
-    if #text > 0 then
-        editor:push_kill(text)
-        -- Sync to system clipboard (non-blocking: clipboard module handles
-        -- the subprocess; silent failure is acceptable).
-        clipboard.set_if_different(text)
-    end
+	if not view:has_selection() then
+		return
+	end
+	local sl, sc, el, ec = view:selection_range()
+	---@cast sc integer
+	---@cast el integer
+	---@cast ec integer
+	local text = view:text_between(sl, sc, el, ec)
+	view:unset_mark()
+	if #text > 0 then
+		editor:push_kill(text)
+		-- Sync to system clipboard (non-blocking: clipboard module handles
+		-- the subprocess; silent failure is acceptable).
+		clipboard.set_if_different(text)
+	end
 end
 
 commands.kill_word = function(view, editor, ...)
-    local n = repeat_count(...)
-    for _ = 1, math.abs(n) do
-        if view:has_selection() then
-            local sl, sc, el, ec = view:selection_range()
-            ---@cast sc integer
-            ---@cast el integer
-            ---@cast ec integer
-            local killed = view:text_between(sl, sc, el, ec)
-            view:delete_selection()
-            editor:push_kill(killed)
-        else
-            local start_line = view:p().line
-            local start_col = view:p().col
-            view:move_word(-1, "word")
-            local count = view:chars_between(view:p().line, view:p().col, start_line, start_col)
-            if count > 0 then
-                local killed = view:text_between(view:p().line, view:p().col, start_line, start_col)
-                view:delete_char(count)
-                editor:push_kill(killed)
-            end
-        end
-    end
+	local n = repeat_count(...)
+	for _ = 1, math.abs(n) do
+		if view:has_selection() then
+			local sl, sc, el, ec = view:selection_range()
+			---@cast sc integer
+			---@cast el integer
+			---@cast ec integer
+			local killed = view:text_between(sl, sc, el, ec)
+			view:delete_selection()
+			editor:push_kill(killed)
+		else
+			local start_line = view:p().line
+			local start_col = view:p().col
+			view:move_word(-1, "word")
+			local count = view:chars_between(view:p().line, view:p().col, start_line, start_col)
+			if count > 0 then
+				local killed = view:text_between(view:p().line, view:p().col, start_line, start_col)
+				view:delete_char(count)
+				editor:push_kill(killed)
+			end
+		end
+	end
 end
 
 commands.kill_word_forward = function(view, editor, ...)
-    local n = repeat_count(...)
-    for _ = 1, math.abs(n) do
-        if view:has_selection() then
-            local sl, sc, el, ec = view:selection_range()
-            ---@cast sc integer
-            ---@cast el integer
-            ---@cast ec integer
-            local killed = view:text_between(sl, sc, el, ec)
-            view:delete_selection()
-            editor:push_kill(killed)
-        else
-            local start_line = view:p().line
-            local start_col = view:p().col
-            view:move_word(1, "word")
-            local count = view:chars_between(start_line, start_col, view:p().line, view:p().col)
-            if count > 0 then
-                local killed = view:text_between(start_line, start_col, view:p().line, view:p().col)
-                view:p().line = start_line
-                view:p().col = start_col
-                view:delete_char(count)
-                editor:push_kill(killed)
-            end
-        end
-    end
+	local n = repeat_count(...)
+	for _ = 1, math.abs(n) do
+		if view:has_selection() then
+			local sl, sc, el, ec = view:selection_range()
+			---@cast sc integer
+			---@cast el integer
+			---@cast ec integer
+			local killed = view:text_between(sl, sc, el, ec)
+			view:delete_selection()
+			editor:push_kill(killed)
+		else
+			local start_line = view:p().line
+			local start_col = view:p().col
+			view:move_word(1, "word")
+			local count = view:chars_between(start_line, start_col, view:p().line, view:p().col)
+			if count > 0 then
+				local killed = view:text_between(start_line, start_col, view:p().line, view:p().col)
+				view:p().line = start_line
+				view:p().col = start_col
+				view:delete_char(count)
+				editor:push_kill(killed)
+			end
+		end
+	end
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -376,93 +377,93 @@ end
 ----------------------------------------------------------------------------------------------------
 
 commands.recenter = function(view, editor)
-    local h = editor.term:height() - (editor:footer_rows() - 1)
-    view:recenter(h)
+	local h = editor.term:height() - (editor:footer_rows() - 1)
+	view:recenter(h)
 end
 
 commands.yank = function(view, editor)
-    local text = kill_ring:top()
-    if not text then
-        -- Kill ring is empty: try the system clipboard (interprogram paste).
-        -- This mirrors Emacs' interprogram-paste-function so pasting from
-        -- outside the editor (browser, other apps) works from C-y.
-        text = clipboard.paste()
-        if not text or #text == 0 then
-            editor.status_message = "kill ring and system clipboard are empty"
-            return
-        end
-        -- Push onto kill ring so yank-pop works on the pasted text
-        kill_ring:push(text)
-    end
-    -- Delete selection if present
-    view:delete_selection()
-    -- Remember start position for yank-pop
-    local start_line = view:p().line
-    local start_col = view:p().col
-    view:insert_char(text)
-    view:p().yank_line = start_line
-    view:p().yank_col = start_col
+	local text = kill_ring:top()
+	if not text then
+		-- Kill ring is empty: try the system clipboard (interprogram paste).
+		-- This mirrors Emacs' interprogram-paste-function so pasting from
+		-- outside the editor (browser, other apps) works from C-y.
+		text = clipboard.paste()
+		if not text or #text == 0 then
+			editor.status_message = "kill ring and system clipboard are empty"
+			return
+		end
+		-- Push onto kill ring so yank-pop works on the pasted text
+		kill_ring:push(text)
+	end
+	-- Delete selection if present
+	view:delete_selection()
+	-- Remember start position for yank-pop
+	local start_line = view:p().line
+	local start_col = view:p().col
+	view:insert_char(text)
+	view:p().yank_line = start_line
+	view:p().yank_col = start_col
 end
 
 commands.yank_pop = function(view, editor)
-    -- Only works right after C-y or M-y
-    if view:p().yank_line == nil then
-        editor.status_message = "previous command was not a yank"
-        return
-    end
-    local text = kill_ring:next()
-    if not text then
-        editor.status_message = "no more kill ring entries"
-        return
-    end
-    -- Delete the previously yanked text, then insert the next entry —
-    -- one undo group (caller-managed grouping, Buffer is now naive).
-    local sl = view:p().yank_line
-    local sc = view:p().yank_col
-    local buf = view.buffer
-    buf:close_edit()
-    buf:begin_edit()
-    local el = view:p().line
-    local ec = view:p().col
-    local n = view:chars_between(sl, sc, el, ec)
-    if n > 0 then
-        local rl, rc = buf:delete_char(sl, sc, n)
-        view:p().line = rl
-        view:p().col = rc
-    end
-    -- Insert the next kill ring entry
-    local insert_line = view:p().line
-    local insert_col = view:p().col
-    if #text > 0 then
-        local rl, rc = buf:insert_char(view:p().line, view:p().col, text)
-        view:p().line = rl
-        view:p().col = rc
-        view:_set_goal_col(rc)
-    end
-    buf:end_edit()
-    -- Update yank start for further M-y
-    view:p().yank_line = insert_line
-    view:p().yank_col = insert_col
+	-- Only works right after C-y or M-y
+	if view:p().yank_line == nil then
+		editor.status_message = "previous command was not a yank"
+		return
+	end
+	local text = kill_ring:next()
+	if not text then
+		editor.status_message = "no more kill ring entries"
+		return
+	end
+	-- Delete the previously yanked text, then insert the next entry —
+	-- one undo group (caller-managed grouping, Buffer is now naive).
+	local sl = view:p().yank_line
+	local sc = view:p().yank_col
+	local buf = view.buffer
+	buf:close_edit()
+	buf:begin_edit()
+	local el = view:p().line
+	local ec = view:p().col
+	local n = view:chars_between(sl, sc, el, ec)
+	if n > 0 then
+		local rl, rc = buf:delete_char(sl, sc, n)
+		view:p().line = rl
+		view:p().col = rc
+	end
+	-- Insert the next kill ring entry
+	local insert_line = view:p().line
+	local insert_col = view:p().col
+	if #text > 0 then
+		local rl, rc = buf:insert_char(view:p().line, view:p().col, text)
+		view:p().line = rl
+		view:p().col = rc
+		view:_set_goal_col(rc)
+	end
+	buf:end_edit()
+	-- Update yank start for further M-y
+	view:p().yank_line = insert_line
+	view:p().yank_col = insert_col
 end
 
 --- Yank from the system clipboard instead of the kill ring.
 --- Pushes the clipboard content onto the kill ring so subsequent C-y
 --- yanks from it. Implements Emacs' C-M-y (meta-Shift-y).
 commands.clipboard_yank = function(view, editor)
-    local clipboard_text = clipboard.paste()
-    if not clipboard_text then
-        editor.status_message = "no system clipboard content"
-        return
-    end
-    if #clipboard_text == 0 then
-        editor.status_message = "system clipboard is empty"
-        return
-    end
-    -- Push onto kill ring so subsequent C-y yanks from it
-    editor:push_kill(clipboard_text)
-    -- Delete any selection, then insert
-    view:delete_selection()
-    view:insert_char(clipboard_text)
+	local clipboard_text = clipboard.paste()
+	if not clipboard_text then
+		editor.status_message = "no system clipboard content"
+		return
+	end
+	if #clipboard_text == 0 then
+		editor.status_message = "system clipboard is empty"
+		return
+	end
+	-- Push onto kill ring so subsequent C-y yanks from it
+	editor:push_kill(clipboard_text)
+	-- Delete any selection, then insert
+	view:delete_selection()
+	view:insert_char(clipboard_text)
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -470,61 +471,61 @@ end
 ----------------------------------------------------------------------------------------------------
 
 commands.set_mark = function(view, editor)
-    if view:has_selection() then
-        view:unset_mark()
-        editor.status_message = "mark deactivated"
-    else
-        view:set_mark()
-        editor.status_message = "mark set"
-    end
+	if view:has_selection() then
+		view:unset_mark()
+		editor.status_message = "mark deactivated"
+	else
+		view:set_mark()
+		editor.status_message = "mark set"
+	end
 end
 
 commands.swap_mark_and_cursor = function(view, _editor)
-    if view:has_selection() then
-        view:swap_mark_and_cursor()
-    else
-        view:set_mark()
-    end
+	if view:has_selection() then
+		view:swap_mark_and_cursor()
+	else
+		view:set_mark()
+	end
 end
 
 commands.keyboard_quit = function(view, editor)
-    -- Dismiss the diagnostic hover for the CURRENT span if one is visible.
-    -- Falls through to normal quit behavior afterwards, so C-g still
-    -- cancels digit args / minibuffer / multi-cursor / mark.
-    if editor._diag_hover_visible then
-        editor._diag_hover_dismissed_sig = editor._diag_hover_active_sig
-    end
-    if editor._digit_active then
-        editor:cancel_digit_arg()
-    end
-    if editor._replace_regexp_active then
-        editor:_cancel_replace_regexp()
-        return
-    end
-    if editor.minibuffer and editor.minibuffer.active then
-        editor:minibuffer_cancel()
-        return
-    end
-    local main_view = editor:current_view()
-    if main_view then
-        -- If drop mode is active (pending drops staged): first C-g
-        -- cancels the pending drops without touching live cursors.
-        if main_view:has_pending_cursors() then
-            main_view:cancel_pending_cursors()
-            if editor then
-                editor.status_message = "drop canceled"
-            end
-            return
-        end
-        -- If multi-cursor: first C-g collapses to a single cursor
-        -- (the primary). Subsequent presses also clear the mark.
-        if #main_view.cursors > 1 then
-            commands.single_cursor(main_view, editor)
-            return
-        end
-        main_view:unset_mark()
-    end
-    editor.status_message = nil
+	-- Dismiss the diagnostic hover for the CURRENT span if one is visible.
+	-- Falls through to normal quit behavior afterwards, so C-g still
+	-- cancels digit args / minibuffer / multi-cursor / mark.
+	if editor._diag_hover_visible then
+		editor._diag_hover_dismissed_sig = editor._diag_hover_active_sig
+	end
+	if editor._digit_active then
+		editor:cancel_digit_arg()
+	end
+	if editor._replace_regexp_active then
+		editor:_cancel_replace_regexp()
+		return
+	end
+	if editor.minibuffer and editor.minibuffer.active then
+		editor:minibuffer_cancel()
+		return
+	end
+	local main_view = editor:current_view()
+	if main_view then
+		-- If drop mode is active (pending drops staged): first C-g
+		-- cancels the pending drops without touching live cursors.
+		if main_view:has_pending_cursors() then
+			main_view:cancel_pending_cursors()
+			if editor then
+				editor.status_message = "drop canceled"
+			end
+			return
+		end
+		-- If multi-cursor: first C-g collapses to a single cursor
+		-- (the primary). Subsequent presses also clear the mark.
+		if #main_view.cursors > 1 then
+			commands.single_cursor(main_view, editor)
+			return
+		end
+		main_view:unset_mark()
+	end
+	editor.status_message = nil
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -532,37 +533,37 @@ end
 ----------------------------------------------------------------------------------------------------
 
 commands.undo = function(view, editor, ...)
-    local n = repeat_count(...)
-    for _ = 1, math.abs(n) do
-        editor:undo()
-    end
+	local n = repeat_count(...)
+	for _ = 1, math.abs(n) do
+		editor:undo()
+	end
 end
 
 commands.redo = function(view, editor, ...)
-    local n = repeat_count(...)
-    for _ = 1, math.abs(n) do
-        editor:redo()
-    end
+	local n = repeat_count(...)
+	for _ = 1, math.abs(n) do
+		editor:redo()
+	end
 end
 
 commands.undo_in_selection = function(view, editor, ...)
-    local n = repeat_count(...)
-    for _ = 1, math.abs(n) do
-        if not view:undo_in_selection() then
-            editor.status_message = "no further undo information in selection"
-            break
-        end
-    end
+	local n = repeat_count(...)
+	for _ = 1, math.abs(n) do
+		if not view:undo_in_selection() then
+			editor.status_message = "no further undo information in selection"
+			break
+		end
+	end
 end
 
 commands.redo_in_selection = function(view, editor, ...)
-    local n = repeat_count(...)
-    for _ = 1, math.abs(n) do
-        if not view:redo_in_selection() then
-            editor.status_message = "no further redo information in selection"
-            break
-        end
-    end
+	local n = repeat_count(...)
+	for _ = 1, math.abs(n) do
+		if not view:redo_in_selection() then
+			editor.status_message = "no further redo information in selection"
+			break
+		end
+	end
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -570,7 +571,7 @@ end
 ----------------------------------------------------------------------------------------------------
 
 commands.save = function(view, editor)
-    editor:save()
+	editor:save()
 end
 
 --- Manual completion trigger (Emacs `M-/`-style, here bound to `alt-/`).
@@ -578,42 +579,42 @@ end
 --- auto-popup debounce + min-prefix gate, and forces the active source to
 --- re-query (so a manual request always fires even when stale cache exists).
 commands.complete = function(_view, editor)
-    if editor.completion_menu ~= nil then
-        editor.completion_menu:force_open()
-    end
+	if editor.completion_menu ~= nil then
+		editor.completion_menu:force_open()
+	end
 end
 
 commands.save_as = function(view, editor)
-    local filepath = editor.universal_args and editor.universal_args[2]
-    editor:read_from_minibuffer({
-        prompt = "Write file: ",
-        value = filepath and tostring(filepath),
-        initial = view.buffer:filepath(),
-        completion = true,
-        completer = completers.find_file,
-        on_submit = function(input)
-            if #input == 0 then
-                return
-            end
-            editor:save_as(input)
-        end,
-    })
+	local filepath = editor.universal_args and editor.universal_args[2]
+	editor:read_from_minibuffer({
+		prompt = "Write file: ",
+		value = filepath and tostring(filepath),
+		initial = view.buffer:filepath(),
+		completion = true,
+		completer = completers.find_file,
+		on_submit = function(input)
+			if #input == 0 then
+				return
+			end
+			editor:save_as(input)
+		end,
+	})
 end
 
 commands.find_file = function(view, editor)
-    local filepath = editor.universal_args and editor.universal_args[2]
-    editor:read_from_minibuffer({
-        prompt = "Find file: ",
-        value = filepath and tostring(filepath),
-        completion = true,
-        completer = completers.find_file,
-        on_submit = function(input)
-            if #input == 0 then
-                return
-            end
-            editor:open_file(input)
-        end,
-    })
+	local filepath = editor.universal_args and editor.universal_args[2]
+	editor:read_from_minibuffer({
+		prompt = "Find file: ",
+		value = filepath and tostring(filepath),
+		completion = true,
+		completer = completers.find_file,
+		on_submit = function(input)
+			if #input == 0 then
+				return
+			end
+			editor:open_file(input)
+		end,
+	})
 end
 
 --- Fuzzy find-file: project-wide recursive search with fzy scoring.
@@ -621,17 +622,17 @@ end
 --- they match the query. The file index is TTL-cached (5s default) and
 --- rebuilds lazily on cache expiry.
 commands.fuzzy_find_file = function(view, editor)
-    editor:read_from_minibuffer({
-        prompt = "Fuzzy find file: ",
-        completion = true,
-        completer = completers.fuzzy_find_file(editor),
-        on_submit = function(input)
-            if #input == 0 then
-                return
-            end
-            editor:open_file(input)
-        end,
-    })
+	editor:read_from_minibuffer({
+		prompt = "Fuzzy find file: ",
+		completion = true,
+		completer = completers.fuzzy_find_file(editor),
+		on_submit = function(input)
+			if #input == 0 then
+				return
+			end
+			editor:open_file(input)
+		end,
+	})
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -646,33 +647,33 @@ end
 -- restarting. Errors are surfaced in the status line + the error log.
 ----------------------------------------------------------------------------------------------------
 commands.load_file = function(_view, editor)
-    editor:read_from_minibuffer({
-        prompt = "Load Lua file: ",
-        completion = true,
-        completer = completers.find_file,
-        on_submit = function(input)
-            if #input == 0 then
-                return
-            end
-            local path = find_file_mod.expand_path(input)
-            local chunk, err = loadfile(path)
-            if not chunk then
-                editor.status_message = "load error: " .. tostring(err)
-                return
-            end
-            -- Run fully unsandboxed (default _G env; no setfenv). Globals
-            -- the script defines persist on _G, mirroring init.lua.
-            local ok, runerr = xpcall(chunk, function(e)
-                return debug.traceback(tostring(e), 2)
-            end)
-            if not ok then
-                editor.status_message = "load error: " .. tostring(runerr)
-                log.error("commands", "load_file error", { path = path, error = tostring(runerr) })
-            else
-                editor.status_message = "loaded: " .. path
-            end
-        end,
-    })
+	editor:read_from_minibuffer({
+		prompt = "Load Lua file: ",
+		completion = true,
+		completer = completers.find_file,
+		on_submit = function(input)
+			if #input == 0 then
+				return
+			end
+			local path = find_file_mod.expand_path(input)
+			local chunk, err = loadfile(path)
+			if not chunk then
+				editor.status_message = "load error: " .. tostring(err)
+				return
+			end
+			-- Run fully unsandboxed (default _G env; no setfenv). Globals
+			-- the script defines persist on _G, mirroring init.lua.
+			local ok, runerr = xpcall(chunk, function(e)
+				return debug.traceback(tostring(e), 2)
+			end)
+			if not ok then
+				editor.status_message = "load error: " .. tostring(runerr)
+				log.error("commands", "load_file error", { path = path, error = tostring(runerr) })
+			else
+				editor.status_message = "loaded: " .. path
+			end
+		end,
+	})
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -688,61 +689,61 @@ end
 local lsp = require("cursed.lsp_client")
 
 commands.format = function(view, editor)
-    local buf = view.buffer
-    local cid = buf and buf.lsp_client_id
-    local uri = buf and buf.lsp_uri
-    if cid == nil or uri == nil then
-        editor.status_message = "no language server for this buffer"
-        return
-    end
-    if not lsp.is_ready(cid) then
-        editor.status_message = "language server not ready"
-        return
-    end
-    local opts = {
-        tab_size = view.indent_width or view.tab_width or 4,
-        insert_spaces = view.expand_tab ~= false,
-    }
-    editor.status_message = "formatting…"
-    local result, is_error = async.await(lsp.request_async(editor, cid, "textDocument/formatting", {
-        textDocument = { uri = uri },
-        options = {
-            tabSize = opts.tab_size or 4,
-            insertSpaces = opts.insert_spaces ~= false,
-        },
-    }))
-    if is_error then
-        editor.status_message = "format failed: server error"
-        return
-    end
-    if result == nil then
-        editor.status_message = "nothing to format"
-        return
-    end
-    local applied = buf:apply_lsp_edits(result)
-    if applied == 0 then
-        editor.status_message = "already formatted"
-        return
-    end
-    -- Post-bulk-mutation resync: same sequence as View:undo so the
-    -- cursors, wrap cache, and viewport stay consistent after the
-    -- piece table was mutated out from under them.
-    view:clamp_cursor()
-    view:invalidate_wrap_cache()
-    local c = view:p()
-    local starts = view:_hl_line_starts()
-    local byte = (starts[c.line + 1] or 0) + c.col
-    view:_hl_cold_requery(byte)
-    -- Sync the (now-reformatted) text back to the server so its view
-    -- matches; the post_command_hook debounce doesn't fire for an
-    -- async callback, so push the didChange explicitly.
-    if buf.lsp_client_id ~= nil and buf.lsp_uri ~= nil then
-        local v = buf.lsp_version or 0
-        lsp.sync_change(buf.lsp_client_id, buf.lsp_uri, v, function()
-            return buf:write_text_direct()
-        end)
-    end
-    editor.status_message = ("formatted (%d edits)"):format(applied)
+	local buf = view.buffer
+	local cid = buf and buf.lsp_client_id
+	local uri = buf and buf.lsp_uri
+	if cid == nil or uri == nil then
+		editor.status_message = "no language server for this buffer"
+		return
+	end
+	if not lsp.is_ready(cid) then
+		editor.status_message = "language server not ready"
+		return
+	end
+	local opts = {
+		tab_size = view.indent_width or view.tab_width or 4,
+		insert_spaces = view.expand_tab ~= false,
+	}
+	editor.status_message = "formatting…"
+	local result, is_error = async.await(lsp.request_async(editor, cid, "textDocument/formatting", {
+		textDocument = { uri = uri },
+		options = {
+			tabSize = opts.tab_size or 4,
+			insertSpaces = opts.insert_spaces ~= false,
+		},
+	}))
+	if is_error then
+		editor.status_message = "format failed: server error"
+		return
+	end
+	if result == nil then
+		editor.status_message = "nothing to format"
+		return
+	end
+	local applied = buf:apply_lsp_edits(result)
+	if applied == 0 then
+		editor.status_message = "already formatted"
+		return
+	end
+	-- Post-bulk-mutation resync: same sequence as View:undo so the
+	-- cursors, wrap cache, and viewport stay consistent after the
+	-- piece table was mutated out from under them.
+	view:clamp_cursor()
+	view:invalidate_wrap_cache()
+	local c = view:p()
+	local starts = view:_hl_line_starts()
+	local byte = (starts[c.line + 1] or 0) + c.col
+	view:_hl_cold_requery(byte)
+	-- Sync the (now-reformatted) text back to the server so its view
+	-- matches; the post_command_hook debounce doesn't fire for an
+	-- async callback, so push the didChange explicitly.
+	if buf.lsp_client_id ~= nil and buf.lsp_uri ~= nil then
+		local v = buf.lsp_version or 0
+		lsp.sync_change(buf.lsp_client_id, buf.lsp_uri, v, function()
+			return buf:write_text_direct()
+		end)
+	end
+	editor.status_message = ("formatted (%d edits)"):format(applied)
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -757,140 +758,140 @@ end
 ----------------------------------------------------------------------------------------------------
 
 commands.goto_definition = function(view, editor)
-    local buf = view and view.buffer
-    local cid = buf and buf.lsp_client_id
-    local uri = buf and buf.lsp_uri
-    if cid == nil or uri == nil then
-        editor.status_message = "no language server for this buffer"
-        return
-    end
-    if not lsp.is_ready(cid) then
-        editor.status_message = "language server not ready"
-        return
-    end
-    -- Cursor → LSP position: 0-based line + 0-based UTF-16 code-unit
-    -- offset (spec). The buffer's cursor col is a byte col, so convert.
-    local p = view:p()
-    local text = buf:line_text(p.line) or ""
-    local char = utf8.byte_to_utf16_col(text, p.col)
-    editor.status_message = "finding definition…"
-    local result, is_error = async.await(lsp.request_async(editor, cid, "textDocument/definition", {
-        textDocument = { uri = uri },
-        position = { line = p.line, character = char },
-    }))
-    if is_error then
-        editor.status_message = "definition request failed: server error"
-        return
-    end
-    if result == nil then
-        editor.status_message = "no definition"
-        return
-    end
-    -- Normalize the spec's three result shapes to one Location.
-    -- LSP allows: Location | Location[] | LocationLink[] (the latter
-    -- only if the client declared linkSupport; we didn't, so servers
-    -- return plain Location/Location[] — but handle both safely).
-    local loc = result
-    if type(loc) == "table" then
-        if loc.uri == nil and loc[1] ~= nil then
-            loc = loc[1] -- Location[] / LocationLink[] → first
-        end
-    end
-    if type(loc) ~= "table" or loc.uri == nil then
-        editor.status_message = "no definition"
-        return
-    end
-    -- LocationLink uses targetUri/targetRange; Location uses uri/range.
-    local turi = loc.targetUri or loc.uri
-    local trange = loc.targetSelectionRange or loc.targetRange or loc.range
-    local start = trange and trange.start
-    if turi == nil or start == nil then
-        editor.status_message = "no definition"
-        return
-    end
-    editor:jump_to_location(turi, start.line, start.character)
-    editor.status_message = nil
+	local buf = view and view.buffer
+	local cid = buf and buf.lsp_client_id
+	local uri = buf and buf.lsp_uri
+	if cid == nil or uri == nil then
+		editor.status_message = "no language server for this buffer"
+		return
+	end
+	if not lsp.is_ready(cid) then
+		editor.status_message = "language server not ready"
+		return
+	end
+	-- Cursor → LSP position: 0-based line + 0-based UTF-16 code-unit
+	-- offset (spec). The buffer's cursor col is a byte col, so convert.
+	local p = view:p()
+	local text = buf:line_text(p.line) or ""
+	local char = utf8.byte_to_utf16_col(text, p.col)
+	editor.status_message = "finding definition…"
+	local result, is_error = async.await(lsp.request_async(editor, cid, "textDocument/definition", {
+		textDocument = { uri = uri },
+		position = { line = p.line, character = char },
+	}))
+	if is_error then
+		editor.status_message = "definition request failed: server error"
+		return
+	end
+	if result == nil then
+		editor.status_message = "no definition"
+		return
+	end
+	-- Normalize the spec's three result shapes to one Location.
+	-- LSP allows: Location | Location[] | LocationLink[] (the latter
+	-- only if the client declared linkSupport; we didn't, so servers
+	-- return plain Location/Location[] — but handle both safely).
+	local loc = result
+	if type(loc) == "table" then
+		if loc.uri == nil and loc[1] ~= nil then
+			loc = loc[1] -- Location[] / LocationLink[] → first
+		end
+	end
+	if type(loc) ~= "table" or loc.uri == nil then
+		editor.status_message = "no definition"
+		return
+	end
+	-- LocationLink uses targetUri/targetRange; Location uses uri/range.
+	local turi = loc.targetUri or loc.uri
+	local trange = loc.targetSelectionRange or loc.targetRange or loc.range
+	local start = trange and trange.start
+	if turi == nil or start == nil then
+		editor.status_message = "no definition"
+		return
+	end
+	editor:jump_to_location(turi, start.line, start.character)
+	editor.status_message = nil
 end
 
 commands.insert_file = function(view, editor)
-    local filepath = editor.universal_args and editor.universal_args[2]
-    editor:read_from_minibuffer({
-        prompt = "Insert file: ",
-        value = filepath and tostring(filepath),
-        completion = true,
-        completer = completers.find_file,
-        on_submit = function(input)
-            if #input == 0 then
-                return
-            end
-            editor:insert_file(input)
-        end,
-    })
+	local filepath = editor.universal_args and editor.universal_args[2]
+	editor:read_from_minibuffer({
+		prompt = "Insert file: ",
+		value = filepath and tostring(filepath),
+		completion = true,
+		completer = completers.find_file,
+		on_submit = function(input)
+			if #input == 0 then
+				return
+			end
+			editor:insert_file(input)
+		end,
+	})
 end
 
 commands.ibuffer = function(view, editor)
-    editor:read_from_minibuffer({
-        prompt = "Buffers: ",
-        completion = true,
-        auto_accept = true,
-        completer = completers.ibuffer(editor),
-        on_submit = function(input)
-            local idx = tonumber(input:match("^(%d+)"))
-            if idx and idx >= 1 and idx <= #editor.views then
-                editor:set_active_view(idx)
-                return
-            end
-            editor.status_message = "invalid buffer"
-        end,
-    })
+	editor:read_from_minibuffer({
+		prompt = "Buffers: ",
+		completion = true,
+		auto_accept = true,
+		completer = completers.ibuffer(editor),
+		on_submit = function(input)
+			local idx = tonumber(input:match("^(%d+)"))
+			if idx and idx >= 1 and idx <= #editor.views then
+				editor:set_active_view(idx)
+				return
+			end
+			editor.status_message = "invalid buffer"
+		end,
+	})
 end
 
 commands.kill_buffer = function(view, editor)
-    local current = editor:current_view()
-    editor:read_from_minibuffer({
-        prompt = "Kill buffer: ",
-        initial = current and (current.buffer:filepath() or "[no file]") or nil,
-        completion = true,
-        auto_accept = true,
-        completer = completers.kill_buffer(editor),
-        on_submit = function(input)
-            for _, v in ipairs(editor.views) do
-                local path = v.buffer:filepath()
-                if path and input:find(path, 1, true) then
-                    if #editor.views <= 1 then
-                        editor.status_message = "cannot kill sole buffer"
-                        return
-                    end
-                    editor:close_view(v)
-                    return
-                end
-            end
-            editor.status_message = "no matching buffer"
-        end,
-    })
+	local current = editor:current_view()
+	editor:read_from_minibuffer({
+		prompt = "Kill buffer: ",
+		initial = current and (current.buffer:filepath() or "[no file]") or nil,
+		completion = true,
+		auto_accept = true,
+		completer = completers.kill_buffer(editor),
+		on_submit = function(input)
+			for _, v in ipairs(editor.views) do
+				local path = v.buffer:filepath()
+				if path and input:find(path, 1, true) then
+					if #editor.views <= 1 then
+						editor.status_message = "cannot kill sole buffer"
+						return
+					end
+					editor:close_view(v)
+					return
+				end
+			end
+			editor.status_message = "no matching buffer"
+		end,
+	})
 end
 
 commands.quit = function(_view, _editor)
-    return "quit"
+	return "quit"
 end
 
 commands.goto_line = function(view, editor)
-    local line_num = editor.universal_args and editor.universal_args[2]
-    editor:read_from_minibuffer({
-        prompt = "Goto line: ",
-        value = line_num and tostring(line_num),
-        on_submit = function(input)
-            local n = tonumber(input)
-            if not n or n < 1 then
-                editor.status_message = "invalid line number"
-                return
-            end
-            local line = math.min(n - 1, view:line_count() - 1)
-            view:p().line = line
-            view:p().col = 0
-            view:_set_goal_col(0)
-        end,
-    })
+	local line_num = editor.universal_args and editor.universal_args[2]
+	editor:read_from_minibuffer({
+		prompt = "Goto line: ",
+		value = line_num and tostring(line_num),
+		on_submit = function(input)
+			local n = tonumber(input)
+			if not n or n < 1 then
+				editor.status_message = "invalid line number"
+				return
+			end
+			local line = math.min(n - 1, view:line_count() - 1)
+			view:p().line = line
+			view:p().col = 0
+			view:_set_goal_col(0)
+		end,
+	})
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -898,21 +899,21 @@ end
 ----------------------------------------------------------------------------------------------------
 
 commands.isearch_forward = function(view, editor)
-    local query = editor.universal_args and editor.universal_args[2]
-    if editor.minibuffer and editor.minibuffer.active then
-        editor:isearch_next()
-        return
-    end
-    editor:start_isearch(1, query and tostring(query))
+	local query = editor.universal_args and editor.universal_args[2]
+	if editor.minibuffer and editor.minibuffer.active then
+		editor:isearch_next()
+		return
+	end
+	editor:start_isearch(1, query and tostring(query))
 end
 
 commands.isearch_backward = function(view, editor)
-    local query = editor.universal_args and editor.universal_args[2]
-    if editor.minibuffer and editor.minibuffer.active then
-        editor:isearch_prev()
-        return
-    end
-    editor:start_isearch(-1, query and tostring(query))
+	local query = editor.universal_args and editor.universal_args[2]
+	if editor.minibuffer and editor.minibuffer.active then
+		editor:isearch_prev()
+		return
+	end
+	editor:start_isearch(-1, query and tostring(query))
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -920,59 +921,55 @@ end
 ----------------------------------------------------------------------------------------------------
 
 commands.query_replace = function(view, editor)
-    local query = editor.universal_args and editor.universal_args[2]
-    if not view or not view.file_loaded then
-        return
-    end
-    -- If already in the replace minibuffer, this is a re-invocation; ignore
-    if
-        editor.minibuffer
-        and editor.minibuffer.active
-        and editor.minibuffer.prompt:find("Replace")
-    then
-        return
-    end
-    editor:start_query_replace(query and tostring(query))
+	local query = editor.universal_args and editor.universal_args[2]
+	if not view or not view.file_loaded then
+		return
+	end
+	-- If already in the replace minibuffer, this is a re-invocation; ignore
+	if editor.minibuffer and editor.minibuffer.active and editor.minibuffer.prompt:find("Replace") then
+		return
+	end
+	editor:start_query_replace(query and tostring(query))
 end
 
 --- Incremental query-replace-regexp with capture-group support.
 --- Emacs `query-replace-regexp` (C-M-%). Replacement template may
 --- contain \& (whole match) and \1..\9 (capture groups).
 commands.query_replace_regexp = function(view, editor)
-    local query = editor.universal_args and editor.universal_args[2]
-    if not view or not view.file_loaded then
-        return
-    end
-    editor:start_query_replace_regexp(query and tostring(query))
+	local query = editor.universal_args and editor.universal_args[2]
+	if not view or not view.file_loaded then
+		return
+	end
+	editor:start_query_replace_regexp(query and tostring(query))
 end
 
 --- Promote the candidate at the primary cursor to a real cursor (with
 --- selection if in replace mode), then advance to the next candidate.
 --- Used as the "y" action during query-replace candidate navigation.
 commands.replace_promote_and_next = function(view, editor)
-    if not view:has_pending_cursors() then
-        return
-    end
-    editor:_promote_candidate_at_primary()
-    if #view.pending_cursors == 0 then
-        editor._query_ranges = nil
-        editor.status_message = "all candidates promoted — type to replace"
-    else
-        editor:_nav_candidate(1)
-    end
+	if not view:has_pending_cursors() then
+		return
+	end
+	editor:_promote_candidate_at_primary()
+	if #view.pending_cursors == 0 then
+		editor._query_ranges = nil
+		editor.status_message = "all candidates promoted — type to replace"
+	else
+		editor:_nav_candidate(1)
+	end
 end
 
 --- Skip the candidate at the primary cursor and advance to the next.
 --- Used as the "n" action during query-replace candidate navigation.
 commands.replace_skip_and_next = function(view, editor)
-    if not view:has_pending_cursors() then
-        return
-    end
-    if #view.pending_cursors > 0 then
-        editor:_nav_candidate(1)
-    else
-        editor._query_ranges = nil
-    end
+	if not view:has_pending_cursors() then
+		return
+	end
+	if #view.pending_cursors > 0 then
+		editor:_nav_candidate(1)
+	else
+		editor._query_ranges = nil
+	end
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -980,53 +977,53 @@ end
 ---------------------------------------------------------------------------------------------------
 
 commands.eval_expression = function(view, editor)
-    local expr = editor.universal_args and editor.universal_args[2]
-    editor:read_from_minibuffer({
-        prompt = "M-: ",
-        value = expr and tostring(expr),
-        completion = true,
-        on_submit = function(input)
-            if #input == 0 then
-                return
-            end
-            local chunk, err = load(input)
-            if not chunk then
-                chunk, err = load("return " .. input)
-            end
-            if not chunk then
-                editor._eval_result = "Error: " .. tostring(err)
-                return
-            end
-            local env = { editor = editor, view = editor:current_view() }
-            for k, v in pairs(commands) do
-                if advice.callable(v) then
-                    env[k] = function(...)
-                        return v(view, editor, ...)
-                    end
-                end
-            end
-            -- Unsandboxed (#20): reads fall through to `_G` and writes
-            -- propagate to `_G`. M-: can do anything main-thread code
-            -- can — reach the global `editor`, `require` modules, register
-            -- `editor.event_system` listeners, push background tasks, …
-            -- `editor`, `view`, and command-name shims remain as
-            -- convenience bare names.
-            setmetatable(env, {
-                __index = _G,
-                __newindex = function(_t, k, v)
-                    _G[k] = v
-                end,
-            })
-            ---@diagnostic disable-next-line:deprecated
-            setfenv(chunk, env)
-            local ok, result = pcall(chunk)
-            if not ok then
-                editor._eval_result = "Error: " .. tostring(result)
-            elseif result ~= nil then
-                editor:show_eval_result(result)
-            end
-        end,
-    })
+	local expr = editor.universal_args and editor.universal_args[2]
+	editor:read_from_minibuffer({
+		prompt = "M-: ",
+		value = expr and tostring(expr),
+		completion = true,
+		on_submit = function(input)
+			if #input == 0 then
+				return
+			end
+			local chunk, err = load(input)
+			if not chunk then
+				chunk, err = load("return " .. input)
+			end
+			if not chunk then
+				editor._eval_result = "Error: " .. tostring(err)
+				return
+			end
+			local env = { editor = editor, view = editor:current_view() }
+			for k, v in pairs(commands) do
+				if advice.callable(v) then
+					env[k] = function(...)
+						return v(view, editor, ...)
+					end
+				end
+			end
+			-- Unsandboxed (#20): reads fall through to `_G` and writes
+			-- propagate to `_G`. M-: can do anything main-thread code
+			-- can — reach the global `editor`, `require` modules, register
+			-- `editor.event_system` listeners, push background tasks, …
+			-- `editor`, `view`, and command-name shims remain as
+			-- convenience bare names.
+			setmetatable(env, {
+				__index = _G,
+				__newindex = function(_t, k, v)
+					_G[k] = v
+				end,
+			})
+			---@diagnostic disable-next-line:deprecated
+			setfenv(chunk, env)
+			local ok, result = pcall(chunk)
+			if not ok then
+				editor._eval_result = "Error: " .. tostring(result)
+			elseif result ~= nil then
+				editor:show_eval_result(result)
+			end
+		end,
+	})
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -1034,141 +1031,140 @@ end
 ----------------------------------------------------------------------------------------------------
 
 commands.load_theme = function(view, editor)
-    local xdg = ColorScheme.config_dir()
-    -- List names lazily inside the completer so newly-added files in
-    -- the themes dir are picked up without restarting.
-    local names_fn = function()
-        return ColorScheme.list_names(xdg)
-    end
-    -- Capture the scheme active when the prompt opened so C-g reverts a
-    -- live-previewed (but uncommitted) theme back to what the user had.
-    local saved_scheme = ColorScheme.active
-    local truecolor = saved_scheme and saved_scheme.truecolor or false
-    editor:read_from_minibuffer({
-        prompt = "Load theme: ",
-        completion = true,
-        completer = completers.themes(names_fn),
-        on_change = function(text, comp_index)
-            -- Live preview: resolve the highlighted completion (or the
-            -- typed text if none is selected) and apply it immediately.
-            -- The render loop picks up the new active scheme next frame.
-            local name
-            if comp_index and comp_index > 0 then
-                local item = editor.minibuffer._completions[comp_index]
-                name = item and completers.comp_text(item) or nil
-            elseif #text > 0 then
-                name = text
-            end
-            if name then
-                ColorScheme.apply(name, truecolor)
-            end
-        end,
-        on_cancel = function()
-            -- Restore the scheme that was active when the prompt opened.
-            if saved_scheme ~= nil then
-                ColorScheme.active = saved_scheme
-                ColorScheme.generation = ColorScheme.generation + 1
-            end
-        end,
-        on_submit = function(input)
-            if #input == 0 then
-                -- Empty submit: keep whatever was last previewed.
-                editor.status_message = "theme: "
-                    .. (ColorScheme.active and ColorScheme.active.name or "(none)")
-                return
-            end
-            local scheme, status = ColorScheme.apply(input, truecolor)
-            editor.status_message = status
-            log.info("commands", "theme switched", {
-                name = scheme.name,
-                setting = input,
-            })
-        end,
-    })
+	local xdg = ColorScheme.config_dir()
+	-- List names lazily inside the completer so newly-added files in
+	-- the themes dir are picked up without restarting.
+	local names_fn = function()
+		return ColorScheme.list_names(xdg)
+	end
+	-- Capture the scheme active when the prompt opened so C-g reverts a
+	-- live-previewed (but uncommitted) theme back to what the user had.
+	local saved_scheme = ColorScheme.active
+	local truecolor = saved_scheme and saved_scheme.truecolor or false
+	editor:read_from_minibuffer({
+		prompt = "Load theme: ",
+		completion = true,
+		completer = completers.themes(names_fn),
+		on_change = function(text, comp_index)
+			-- Live preview: resolve the highlighted completion (or the
+			-- typed text if none is selected) and apply it immediately.
+			-- The render loop picks up the new active scheme next frame.
+			local name
+			if comp_index and comp_index > 0 then
+				local item = editor.minibuffer._completions[comp_index]
+				name = item and completers.comp_text(item) or nil
+			elseif #text > 0 then
+				name = text
+			end
+			if name then
+				ColorScheme.apply(name, truecolor)
+			end
+		end,
+		on_cancel = function()
+			-- Restore the scheme that was active when the prompt opened.
+			if saved_scheme ~= nil then
+				ColorScheme.active = saved_scheme
+				ColorScheme.generation = ColorScheme.generation + 1
+			end
+		end,
+		on_submit = function(input)
+			if #input == 0 then
+				-- Empty submit: keep whatever was last previewed.
+				editor.status_message = "theme: " .. (ColorScheme.active and ColorScheme.active.name or "(none)")
+				return
+			end
+			local scheme, status = ColorScheme.apply(input, truecolor)
+			editor.status_message = status
+			log.info("commands", "theme switched", {
+				name = scheme.name,
+				setting = input,
+			})
+		end,
+	})
 end
 
 commands.execute_command = function(view, editor)
-    local cmd_name = editor.universal_args and editor.universal_args[2]
-    editor:read_from_minibuffer({
-        prompt = "M-x ",
-        value = cmd_name and tostring(cmd_name),
-        completion = true,
-        palette = true,
-        completer = completers.commands(commands.names, function(name)
-            -- Resolve the canonical command name to its bound chord via
-            -- the editor's reverse map (rebuilt whenever the active trie
-            -- is rebuilt, so major-mode overrides are reflected).
-            local map = editor._chord_for_command
-            return map and map[name] or nil
-        end),
-        on_submit = function(input)
-            if #input == 0 then
-                return
-            end
-            -- Split on first ":" for inline argument (parsed by
-            -- the universal argument parser).
-            local cmd_part, arg_part = input:match("^(.-):(.+)$")
-            if not cmd_part then
-                cmd_part = input
-                arg_part = nil
-            end
-            local name = cmd_part:gsub(" ", "_"):lower()
-            local cmd = commands[name]
-            if not advice.callable(cmd) or name == "lookup" or name == "names" then
-                editor.status_message = ("no command: %s"):format(cmd_part)
-                return
-            end
-            -- Parse inline args through the universal argument parser
-            -- and set on editor.universal_args for the command to read.
-            if arg_part then
-                local parsed = universal_arg.parse_universal_args(arg_part)
-                editor.universal_args = { true }
-                for i = 1, #parsed do
-                    editor.universal_args[#editor.universal_args + 1] = parsed[i]
-                end
-            else
-                editor.universal_args = nil
-            end
-            -- Dispatch using the same logic as the keybinding path
-            -- in main.lua: if the command is vararg and universal
-            -- args are present, unpack them after view/editor.
-            local info = get_cmd_info(cmd)
-            local ok, result
-            if info and info.isvararg and editor.universal_args then
-                local gap = math.max(0, info.nparams - 2)
-                ---@type table
-                local args = editor.universal_args
-                if gap == 0 then
-                    ---@diagnostic disable-next-line: deprecated
-                    ok, result = pcall(cmd, view, editor, unpack(args))
-                else
-                    local call_args = { view, editor }
-                    for _ = 1, gap do
-                        call_args[#call_args + 1] = nil
-                    end
-                    for i = 1, #args do
-                        ---@cast args table
-                        call_args[#call_args + 1] = args[i]
-                    end
-                    ---@diagnostic disable-next-line: deprecated
-                    ok, result = pcall(cmd, unpack(call_args))
-                end
-            else
-                ok, result = pcall(cmd, view, editor)
-            end
-            editor.universal_args = nil
-            if not ok then
-                editor.status_message = ("command error: %s"):format(tostring(result))
-                local ef = io.open("/tmp/cursed_err.log", "a")
-                if ef then
-                    ef:write(tostring(result) .. "\\n" .. debug.traceback("", 2) .. "\\n====\\n")
-                    ef:close()
-                end
-            elseif result == "quit" then
-                editor:request_quit()
-            end
-        end,
-    })
+	local cmd_name = editor.universal_args and editor.universal_args[2]
+	editor:read_from_minibuffer({
+		prompt = "M-x ",
+		value = cmd_name and tostring(cmd_name),
+		completion = true,
+		palette = true,
+		completer = completers.commands(commands.names, function(name)
+			-- Resolve the canonical command name to its bound chord via
+			-- the editor's reverse map (rebuilt whenever the active trie
+			-- is rebuilt, so major-mode overrides are reflected).
+			local map = editor._chord_for_command
+			return map and map[name] or nil
+		end),
+		on_submit = function(input)
+			if #input == 0 then
+				return
+			end
+			-- Split on first ":" for inline argument (parsed by
+			-- the universal argument parser).
+			local cmd_part, arg_part = input:match("^(.-):(.+)$")
+			if not cmd_part then
+				cmd_part = input
+				arg_part = nil
+			end
+			local name = cmd_part:gsub(" ", "_"):lower()
+			local cmd = commands[name]
+			if not advice.callable(cmd) or name == "lookup" or name == "names" then
+				editor.status_message = ("no command: %s"):format(cmd_part)
+				return
+			end
+			-- Parse inline args through the universal argument parser
+			-- and set on editor.universal_args for the command to read.
+			if arg_part then
+				local parsed = universal_arg.parse_universal_args(arg_part)
+				editor.universal_args = { true }
+				for i = 1, #parsed do
+					editor.universal_args[#editor.universal_args + 1] = parsed[i]
+				end
+			else
+				editor.universal_args = nil
+			end
+			-- Dispatch using the same logic as the keybinding path
+			-- in main.lua: if the command is vararg and universal
+			-- args are present, unpack them after view/editor.
+			local info = get_cmd_info(cmd)
+			local ok, result
+			if info and info.isvararg and editor.universal_args then
+				local gap = math.max(0, info.nparams - 2)
+				---@type table
+				local args = editor.universal_args
+				if gap == 0 then
+					---@diagnostic disable-next-line: deprecated
+					ok, result = pcall(cmd, view, editor, unpack(args))
+				else
+					local call_args = { view, editor }
+					for _ = 1, gap do
+						call_args[#call_args + 1] = nil
+					end
+					for i = 1, #args do
+						---@cast args table
+						call_args[#call_args + 1] = args[i]
+					end
+					---@diagnostic disable-next-line: deprecated
+					ok, result = pcall(cmd, unpack(call_args))
+				end
+			else
+				ok, result = pcall(cmd, view, editor)
+			end
+			editor.universal_args = nil
+			if not ok then
+				editor.status_message = ("command error: %s"):format(tostring(result))
+				local ef = io.open("/tmp/cursed_err.log", "a")
+				if ef then
+					ef:write(tostring(result) .. "\\n" .. debug.traceback("", 2) .. "\\n====\\n")
+					ef:close()
+				end
+			elseif result == "quit" then
+				editor:request_quit()
+			end
+		end,
+	})
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -1176,129 +1172,129 @@ end
 ----------------------------------------------------------------------------------------------------
 
 commands.arrow_up = function(view, editor)
-    local mb = editor.minibuffer
-    if mb and mb.active and mb.completion and #mb._completions > 0 then
-        mb:comp_up()
-        return
-    end
-    commands.backward_visual_line(view, editor)
+	local mb = editor.minibuffer
+	if mb and mb.active and mb.completion and #mb._completions > 0 then
+		mb:comp_up()
+		return
+	end
+	commands.backward_visual_line(view, editor)
 end
 
 commands.arrow_down = function(view, editor)
-    local mb = editor.minibuffer
-    if mb and mb.active and mb.completion and #mb._completions > 0 then
-        mb:comp_down()
-        return
-    end
-    commands.forward_visual_line(view, editor)
+	local mb = editor.minibuffer
+	if mb and mb.active and mb.completion and #mb._completions > 0 then
+		mb:comp_down()
+		return
+	end
+	commands.forward_visual_line(view, editor)
 end
 
 --- Move the primary cursor one screen row down. Wraps across
 --- logical lines via view:move_line (visual / sub-row aware).
 commands.forward_visual_line = function(view, _editor)
-    return view:move_line(1)
+	return view:move_line(1)
 end
 
 --- Move the primary cursor one screen row up.
 commands.backward_visual_line = function(view, _editor)
-    return view:move_line(-1)
+	return view:move_line(-1)
 end
 
 --- Extending variant of forward_visual_line.
 commands.forward_visual_line_select = function(view, editor)
-    editor._extend = true
-    view:_begin_shift_select()
-    return view:move_line(1)
+	editor._extend = true
+	view:_begin_shift_select()
+	return view:move_line(1)
 end
 
 --- Extending variant of backward_visual_line.
 commands.backward_visual_line_select = function(view, editor)
-    editor._extend = true
-    view:_begin_shift_select()
-    return view:move_line(-1)
+	editor._extend = true
+	view:_begin_shift_select()
+	return view:move_line(-1)
 end
 
 commands.enter_key = function(view, editor)
-    if editor.minibuffer and editor.minibuffer.active then
-        if editor.minibuffer.completion then
-            editor.minibuffer:comp_submit()
-        end
-        editor:minibuffer_submit()
-        return
-    end
-    commands.newline(view, editor)
+	if editor.minibuffer and editor.minibuffer.active then
+		if editor.minibuffer.completion then
+			editor.minibuffer:comp_submit()
+		end
+		editor:minibuffer_submit()
+		return
+	end
+	commands.newline(view, editor)
 end
 
 commands.tab_key = function(view, editor, ...)
-    local mb = editor.minibuffer
-    if mb and mb.active and mb.completion then
-        mb:comp_expand()
-        return
-    end
-    -- Main buffer: insert tab or spaces
-    local n = repeat_count(...)
-    for _ = 1, math.max(1, n) do
-        if view.expand_tab then
-            local spaces = string.rep(" ", view.indent_width)
-            view:insert_char(spaces)
-        else
-            view:insert_char("\t")
-        end
-    end
+	local mb = editor.minibuffer
+	if mb and mb.active and mb.completion then
+		mb:comp_expand()
+		return
+	end
+	-- Main buffer: insert tab or spaces
+	local n = repeat_count(...)
+	for _ = 1, math.max(1, n) do
+		if view.expand_tab then
+			local spaces = string.rep(" ", view.indent_width)
+			view:insert_char(spaces)
+		else
+			view:insert_char("\t")
+		end
+	end
 end
 
 commands.universal_argument = function(view, editor)
-    if editor._universal_active then
-        editor:toggle_universal_arg()
-    else
-        editor:start_universal_arg()
-    end
+	if editor._universal_active then
+		editor:toggle_universal_arg()
+	else
+		editor:start_universal_arg()
+	end
 end
 
 commands.history_up = function(view, editor)
-    if editor.minibuffer and editor.minibuffer.active then
-        editor.minibuffer:history_up()
-    end
+	if editor.minibuffer and editor.minibuffer.active then
+		editor.minibuffer:history_up()
+	end
 end
 
 commands.history_down = function(view, editor)
-    if editor.minibuffer and editor.minibuffer.active then
-        editor.minibuffer:history_down()
-    end
+	if editor.minibuffer and editor.minibuffer.active then
+		editor.minibuffer:history_down()
+	end
 end
 
 commands.escape_key = function(view, editor)
-    -- Dismiss the diagnostic hover for the CURRENT span if one is visible.
-    -- Falls through to normal Escape behavior afterwards.
-    if editor._diag_hover_visible then
-        editor._diag_hover_dismissed_sig = editor._diag_hover_active_sig
-    end
-    if editor._digit_active then
-        editor:cancel_digit_arg()
-        return
-    end
-    if editor.minibuffer and editor.minibuffer.active then
-        editor:minibuffer_cancel()
-        return
-    end
-    local main_view = editor:current_view()
-    if main_view then
-        -- If drop mode is active (pending drops staged): first Escape
-        -- cancels the pending drops without touching live cursors.
-        if main_view:has_pending_cursors() then
-            main_view:cancel_pending_cursors()
-            if editor then
-                editor.status_message = "drop canceled"
-            end
-            return
-        end
-        -- If multi-cursor: first Escape collapses to a single cursor.
-        if #main_view.cursors > 1 then
-            commands.single_cursor(main_view, editor)
-            return
-        end
-        main_view:unset_mark()
-    end
+	-- Dismiss the diagnostic hover for the CURRENT span if one is visible.
+	-- Falls through to normal Escape behavior afterwards.
+	if editor._diag_hover_visible then
+		editor._diag_hover_dismissed_sig = editor._diag_hover_active_sig
+	end
+	if editor._digit_active then
+		editor:cancel_digit_arg()
+		return
+	end
+	if editor.minibuffer and editor.minibuffer.active then
+		editor:minibuffer_cancel()
+		return
+	end
+	local main_view = editor:current_view()
+	if main_view then
+		-- If drop mode is active (pending drops staged): first Escape
+		-- cancels the pending drops without touching live cursors.
+		if main_view:has_pending_cursors() then
+			main_view:cancel_pending_cursors()
+			if editor then
+				editor.status_message = "drop canceled"
+			end
+			return
+		end
+		-- If multi-cursor: first Escape collapses to a single cursor.
+		if #main_view.cursors > 1 then
+			commands.single_cursor(main_view, editor)
+			return
+		end
+		main_view:unset_mark()
+	end
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -1306,138 +1302,148 @@ end
 ----------------------------------------------------------------------------------------------------
 
 commands.start_kmacro = function(view, editor)
-    editor._recording = true
-    editor._recorded_commands = {}
-    editor._recorded_mb_inputs = {}
-    editor.status_message = "defining kmacro..."
+	editor._recording = true
+	editor._recorded_commands = {}
+	editor._recorded_mb_inputs = {}
+	editor.status_message = "defining kmacro..."
 end
 
 commands.end_kmacro = function(view, editor)
-    if not editor._recording then
-        editor.status_message = "not defining kmacro"
-        return
-    end
-    editor._recording = false
-    local recorded = editor._recorded_commands
-    local mb_inputs = editor._recorded_mb_inputs
-    editor._recorded_commands = {}
-    editor._recorded_mb_inputs = {}
-    if #recorded == 0 then
-        editor.status_message = "kmacro is empty, discarded"
-        return
-    end
-    editor:read_from_minibuffer({
-        prompt = "Name kmacro: ",
-        on_submit = function(input)
-            if #input == 0 then
-                editor.status_message = "kmacro discarded"
-                return
-            end
-            local saved = {
-                commands = recorded,
-                mb_inputs = mb_inputs,
-            }
-            editor._kmacros[input] = saved
-            editor.status_message = "kmacro '" .. input .. "' defined"
-        end,
-    })
+	if not editor._recording then
+		editor.status_message = "not defining kmacro"
+		return
+	end
+	editor._recording = false
+	local recorded = editor._recorded_commands
+	local mb_inputs = editor._recorded_mb_inputs
+	editor._recorded_commands = {}
+	editor._recorded_mb_inputs = {}
+	if #recorded == 0 then
+		editor.status_message = "kmacro is empty, discarded"
+		return
+	end
+	editor:read_from_minibuffer({
+		prompt = "Name kmacro: ",
+		on_submit = function(input)
+			if #input == 0 then
+				editor.status_message = "kmacro discarded"
+				return
+			end
+			local saved = {
+				commands = recorded,
+				mb_inputs = mb_inputs,
+			}
+			editor._kmacros[input] = saved
+			editor.status_message = "kmacro '" .. input .. "' defined"
+		end,
+	})
 end
 
 commands.run_kmacro = function(view, editor)
-    local names = {}
-    for name, _ in pairs(editor._kmacros) do
-        names[#names + 1] = name
-    end
-    if #names == 0 then
-        editor.status_message = "no kmacros defined"
-        return
-    end
-    table.sort(names)
-    editor:read_from_minibuffer({
-        prompt = "Run kmacro: ",
-        completion = true,
-        auto_accept = true,
-        completer = function(text)
-            if #text == 0 then
-                return names
-            end
-            local results = {}
-            for _, name in ipairs(names) do
-                if name:sub(1, #text) == text then
-                    results[#results + 1] = name
-                end
-            end
-            return results
-        end,
-        on_submit = function(input)
-            local macro = editor._kmacros[input]
-            if not macro then
-                editor.status_message = "no kmacro named '" .. input .. "'"
-                return
-            end
-            local commands = macro.commands
-            -- Set up the minibuffer input stack for replay;
-            -- read_from_minibuffer will pop from this instead of
-            -- opening an interactive prompt.
-            local mb_copy = {}
-            for i, v in ipairs(macro.mb_inputs) do
-                mb_copy[i] = v
-            end
-            editor._mb_input_stack = mb_copy
-            -- Replay the recorded commands onto the current main view
-            local v = editor:current_view()
-            if not v then
-                return
-            end
-            local cmd = require("cursed.commands")
-            for i, entry in ipairs(commands) do
-                if entry.name == "__printable" then
-                    -- Self-insert: just insert the character
-                    v:delete_selection()
-                    local saved_args = editor.universal_args
-                    editor.universal_args = entry.universal_args
-                    local n = 1
-                    if editor.universal_args then
-                        for i = 2, #editor.universal_args do
-                            local arg = editor.universal_args[i]
-                            local ty = type(arg)
-                            if ty == "number" then
-                                n = n * arg
-                            elseif ty == "string" then
-                                n = n * #arg
-                            end
-                        end
-                    end
-                    editor.universal_args = saved_args
-                    n = math.abs(n)
-                    for _ = 1, n do
-                        view:insert_char(entry.ch)
-                    end
-                else
-                    local fn = cmd[entry.name]
-                    if fn then
-                        local saved_args = editor.universal_args
-                        editor.universal_args = entry.universal_args
-                        local ok, result = pcall(fn, v, editor)
-                        editor.universal_args = saved_args
-                        if not ok then
-                            log.error("commands", "kmacro replay error", {
-                                name = entry.name,
-                                error = tostring(result),
-                            })
-                            editor.status_message = "kmacro error: " .. tostring(result)
-                            return
-                        end
-                        if result == "quit" then
-                            editor:request_quit()
-                            return
-                        end
-                    end
-                end
-            end
-            editor._mb_input_stack = {}
-        end,
-    })
+	local names = {}
+	for name, _ in pairs(editor._kmacros) do
+		names[#names + 1] = name
+	end
+	if #names == 0 then
+		editor.status_message = "no kmacros defined"
+		return
+	end
+	table.sort(names)
+	editor:read_from_minibuffer({
+		prompt = "Run kmacro: ",
+		completion = true,
+		auto_accept = true,
+		completer = function(text)
+			if #text == 0 then
+				return names
+			end
+			local lneedle = fzy.lower_needle(text)
+			local scored = {}
+			for _, name in ipairs(names) do
+				local s = fzy.score(text, name, nil, lneedle)
+				if s ~= nil then
+					scored[#scored + 1] = { name = name, score = s }
+				end
+			end
+			table.sort(scored, function(a, b)
+				return a.score > b.score
+			end)
+			local limit = math.min(#scored, 20)
+			local results = {}
+			for i = 1, limit do
+				results[i] = scored[i].name
+			end
+			return results
+		end,
+		on_submit = function(input)
+			local macro = editor._kmacros[input]
+			if not macro then
+				editor.status_message = "no kmacro named '" .. input .. "'"
+				return
+			end
+			local commands = macro.commands
+			-- Set up the minibuffer input stack for replay;
+			-- read_from_minibuffer will pop from this instead of
+			-- opening an interactive prompt.
+			local mb_copy = {}
+			for i, v in ipairs(macro.mb_inputs) do
+				mb_copy[i] = v
+			end
+			editor._mb_input_stack = mb_copy
+			-- Replay the recorded commands onto the current main view
+			local v = editor:current_view()
+			if not v then
+				return
+			end
+			local cmd = require("cursed.commands")
+			for i, entry in ipairs(commands) do
+				if entry.name == "__printable" then
+					-- Self-insert: just insert the character
+					v:delete_selection()
+					local saved_args = editor.universal_args
+					editor.universal_args = entry.universal_args
+					local n = 1
+					if editor.universal_args then
+						for i = 2, #editor.universal_args do
+							local arg = editor.universal_args[i]
+							local ty = type(arg)
+							if ty == "number" then
+								n = n * arg
+							elseif ty == "string" then
+								n = n * #arg
+							end
+						end
+					end
+					editor.universal_args = saved_args
+					n = math.abs(n)
+					for _ = 1, n do
+						view:insert_char(entry.ch)
+					end
+				else
+					local fn = cmd[entry.name]
+					if fn then
+						local saved_args = editor.universal_args
+						editor.universal_args = entry.universal_args
+						local ok, result = pcall(fn, v, editor)
+						editor.universal_args = saved_args
+						if not ok then
+							log.error("commands", "kmacro replay error", {
+								name = entry.name,
+								error = tostring(result),
+							})
+							editor.status_message = "kmacro error: " .. tostring(result)
+							return
+						end
+						if result == "quit" then
+							editor:request_quit()
+							return
+						end
+					end
+				end
+			end
+			editor._mb_input_stack = {}
+		end,
+	})
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -1457,28 +1463,28 @@ end
 ---@param universal_args table|nil args to restore, or nil for none
 ---@return boolean ok dispatch succeeded
 local function rerun_command(editor, name, universal_args)
-    local fn = commands[name]
-    if not advice.callable(fn) then
-        editor.status_message = "cannot repeat: " .. tostring(name)
-        return false
-    end
-    local v = editor:current_view()
-    if not v then
-        return false
-    end
-    local saved_args = editor.universal_args
-    editor.universal_args = universal_args
-    local ok, result = pcall(fn, v, editor)
-    editor.universal_args = saved_args
-    if not ok then
-        log.error("commands", "repeat error", { name = name, error = tostring(result) })
-        editor.status_message = "repeat error: " .. tostring(result)
-        return false
-    end
-    if result == "quit" then
-        editor:request_quit()
-    end
-    return true
+	local fn = commands[name]
+	if not advice.callable(fn) then
+		editor.status_message = "cannot repeat: " .. tostring(name)
+		return false
+	end
+	local v = editor:current_view()
+	if not v then
+		return false
+	end
+	local saved_args = editor.universal_args
+	editor.universal_args = universal_args
+	local ok, result = pcall(fn, v, editor)
+	editor.universal_args = saved_args
+	if not ok then
+		log.error("commands", "repeat error", { name = name, error = tostring(result) })
+		editor.status_message = "repeat error: " .. tostring(result)
+		return false
+	end
+	if result == "quit" then
+		editor:request_quit()
+	end
+	return true
 end
 
 --- Emacs `repeat` (C-x z): rerun the most recent dispatched command.
@@ -1486,23 +1492,23 @@ end
 --- skipped from history tracking, so `last-command` stays pinned to
 --- the original command being repeated.
 commands["repeat"] = function(_view, editor)
-    local last = editor._last_command
-    if last == nil then
-        editor.status_message = "nothing to repeat"
-        return
-    end
-    rerun_command(editor, last, nil)
+	local last = editor._last_command
+	if last == nil then
+		editor.status_message = "nothing to repeat"
+		return
+	end
+	rerun_command(editor, last, nil)
 end
 
 --- Emacs `repeat-complex-command`: rerun the most recent command that
 --- was invoked with a universal argument, restoring those args.
 commands.repeat_complex_command = function(_view, editor)
-    local complex = editor._last_complex_command
-    if complex == nil then
-        editor.status_message = "no complex command to repeat"
-        return
-    end
-    rerun_command(editor, complex.name, complex.universal_args)
+	local complex = editor._last_complex_command
+	if complex == nil then
+		editor.status_message = "no complex command to repeat"
+		return
+	end
+	rerun_command(editor, complex.name, complex.universal_args)
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -1511,87 +1517,86 @@ end
 
 --- Get the selection text of the primary cursor (or empty if none).
 local function primary_selection_text(view)
-    local p = view:p()
-    if not p.anchor_line then
-        return nil
-    end
-    local sl, sc, el, ec = view:selection_ranges_one(p)
-    ---@cast sl integer
-    ---@cast sc integer
-    ---@cast el integer
-    ---@cast ec integer
-    return view:text_between(sl, sc, el, ec)
+	local p = view:p()
+	if not p.anchor_line then
+		return nil
+	end
+	local sl, sc, el, ec = view:selection_ranges_one(p)
+	---@cast sl integer
+	---@cast sc integer
+	---@cast el integer
+	---@cast ec integer
+	return view:text_between(sl, sc, el, ec)
 end
 
 --- Select the next occurrence of the current selection's text.
 --- Adds a new cursor with an anchor at the match start and head at the
 --- match end. Repeats add successive cursors forward.
 commands.select_next_match = function(view, editor)
-    -- If search candidates exist (from isearch submit), navigate through them.
-    if view:has_pending_cursors() then
-        return editor:_nav_candidate(1)
-    end
-    if not view:multi_currency_enabled() then
-        return
-    end
-    local query = primary_selection_text(view)
-    if not query or #query == 0 then
-        -- No selection ("search inactive"): jump diagnostics instead.
-        return commands.next_diagnostic(view, editor)
-    end
-    local p = view:p()
-    -- Search forward from the cursor (end of current selection).
-    local start_pt = { line = p.line, offset = p.col }
-    local iter = view.buffer:search_forward(query, start_pt, true)
-    local m = iter()
-    if not m then
-        -- Wrap around to the top of the document.
-        iter = view.buffer:search_forward(query, { line = 0, offset = 0 }, true)
-        m = iter()
-        if not m then
-            return
-        end
-    end
-    -- Add a new cursor anchoring the matched region.
-    local nc = view:make_cursor(m.end_line, m.end_offset)
-    nc.anchor_line = m.line
-    nc.anchor_col = m.offset
-    nc.shadow_undo = tonumber(view.buffer._ptr.undo.count)
-    nc.shadow_redo = tonumber(view.buffer._ptr.redo.count)
-    table.insert(view.cursors, 1, nc)
+	-- If search candidates exist (from isearch submit), navigate through them.
+	if view:has_pending_cursors() then
+		return editor:_nav_candidate(1)
+	end
+	if not view:multi_currency_enabled() then
+		return
+	end
+	local query = primary_selection_text(view)
+	if not query or #query == 0 then
+		-- No selection ("search inactive"): jump diagnostics instead.
+		return commands.next_diagnostic(view, editor)
+	end
+	local p = view:p()
+	-- Search forward from the cursor (end of current selection).
+	local start_pt = { line = p.line, offset = p.col }
+	local iter = view.buffer:search_forward(query, start_pt, true)
+	local m = iter()
+	if not m then
+		-- Wrap around to the top of the document.
+		iter = view.buffer:search_forward(query, { line = 0, offset = 0 }, true)
+		m = iter()
+		if not m then
+			return
+		end
+	end
+	-- Add a new cursor anchoring the matched region.
+	local nc = view:make_cursor(m.end_line, m.end_offset)
+	nc.anchor_line = m.line
+	nc.anchor_col = m.offset
+	nc.shadow_undo = tonumber(view.buffer._ptr.undo.count)
+	nc.shadow_redo = tonumber(view.buffer._ptr.redo.count)
+	table.insert(view.cursors, 1, nc)
 end
 
 --- Select the previous occurrence of the current selection's text.
 commands.select_prev_match = function(view, editor)
-    -- If search candidates exist (from isearch submit), navigate through them.
-    if view:has_pending_cursors() then
-        return editor:_nav_candidate(-1)
-    end
-    local query = primary_selection_text(view)
-    if not query or #query == 0 then
-        return commands.prev_diagnostic(view, editor)
-    end
-    local p = view:p()
-    -- Search backward from the anchor (start of current selection).
-    local start_pt = { line = p.anchor_line or p.line, offset = p.anchor_col or p.col }
-    local iter = view.buffer:search_backward(query, start_pt, true)
-    local m = iter()
-    if not m then
-        -- Wrap around to the end of the document.
-        local ll = view:line_count() - 1
-        iter =
-            view.buffer:search_backward(query, { line = ll, offset = view:content_len(ll) }, true)
-        m = iter()
-        if not m then
-            return
-        end
-    end
-    local nc = view:make_cursor(m.end_line, m.end_offset)
-    nc.anchor_line = m.line
-    nc.anchor_col = m.offset
-    nc.shadow_undo = tonumber(view.buffer._ptr.undo.count)
-    nc.shadow_redo = tonumber(view.buffer._ptr.redo.count)
-    table.insert(view.cursors, 1, nc)
+	-- If search candidates exist (from isearch submit), navigate through them.
+	if view:has_pending_cursors() then
+		return editor:_nav_candidate(-1)
+	end
+	local query = primary_selection_text(view)
+	if not query or #query == 0 then
+		return commands.prev_diagnostic(view, editor)
+	end
+	local p = view:p()
+	-- Search backward from the anchor (start of current selection).
+	local start_pt = { line = p.anchor_line or p.line, offset = p.anchor_col or p.col }
+	local iter = view.buffer:search_backward(query, start_pt, true)
+	local m = iter()
+	if not m then
+		-- Wrap around to the end of the document.
+		local ll = view:line_count() - 1
+		iter = view.buffer:search_backward(query, { line = ll, offset = view:content_len(ll) }, true)
+		m = iter()
+		if not m then
+			return
+		end
+	end
+	local nc = view:make_cursor(m.end_line, m.end_offset)
+	nc.anchor_line = m.line
+	nc.anchor_col = m.offset
+	nc.shadow_undo = tonumber(view.buffer._ptr.undo.count)
+	nc.shadow_redo = tonumber(view.buffer._ptr.redo.count)
+	table.insert(view.cursors, 1, nc)
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -1614,43 +1619,43 @@ end
 ---@param view View
 ---@return table[]|nil diags each {sl,sc,el,ec,bsc,severity,message,source}
 local function sorted_diagnostics(view)
-    local buf = view.buffer
-    local uri = buf and buf.lsp_uri
-    local entry = uri and lsp.diagnostics_for_uri(uri) or nil
-    if entry == nil or #entry.items == 0 then
-        return nil
-    end
-    local diags = {}
-    for _, d in ipairs(entry.items) do
-        if d.sl ~= nil and d.el ~= nil then
-            local text = buf:line_text(d.sl)
-            local clen = view:content_len(d.sl)
-            local bsc = utf8.utf16_to_byte_col(text, d.sc or 0)
-            if bsc > clen then
-                bsc = clen
-            end
-            diags[#diags + 1] = {
-                sl = d.sl,
-                sc = d.sc or 0,
-                el = d.el,
-                ec = d.ec,
-                bsc = bsc,
-                severity = d.severity,
-                message = d.message,
-                source = d.source,
-            }
-        end
-    end
-    if #diags == 0 then
-        return nil
-    end
-    table.sort(diags, function(a, b)
-        if a.sl ~= b.sl then
-            return a.sl < b.sl
-        end
-        return a.sc < b.sc
-    end)
-    return diags
+	local buf = view.buffer
+	local uri = buf and buf.lsp_uri
+	local entry = uri and lsp.diagnostics_for_uri(uri) or nil
+	if entry == nil or #entry.items == 0 then
+		return nil
+	end
+	local diags = {}
+	for _, d in ipairs(entry.items) do
+		if d.sl ~= nil and d.el ~= nil then
+			local text = buf:line_text(d.sl)
+			local clen = view:content_len(d.sl)
+			local bsc = utf8.utf16_to_byte_col(text, d.sc or 0)
+			if bsc > clen then
+				bsc = clen
+			end
+			diags[#diags + 1] = {
+				sl = d.sl,
+				sc = d.sc or 0,
+				el = d.el,
+				ec = d.ec,
+				bsc = bsc,
+				severity = d.severity,
+				message = d.message,
+				source = d.source,
+			}
+		end
+	end
+	if #diags == 0 then
+		return nil
+	end
+	table.sort(diags, function(a, b)
+		if a.sl ~= b.sl then
+			return a.sl < b.sl
+		end
+		return a.sc < b.sc
+	end)
+	return diags
 end
 
 --- Move the primary cursor to the start of the next (dir = 1) or
@@ -1659,46 +1664,46 @@ end
 --- presses cycle through every diagnostic even when the cursor sits
 --- inside one. Sets a status message when the buffer has none.
 local function jump_diagnostic(view, editor, dir)
-    local diags = sorted_diagnostics(view)
-    if diags == nil then
-        editor.status_message = "no diagnostics in buffer"
-        return
-    end
-    local p = view:p()
-    local cline = p.line
-    local ccol = p.col
-    local pick
-    if dir > 0 then
-        for _, d in ipairs(diags) do
-            if d.sl > cline or (d.sl == cline and d.bsc > ccol) then
-                pick = d
-                break
-            end
-        end
-        pick = pick or diags[1] -- wrap around
-    else
-        for i = #diags, 1, -1 do
-            local d = diags[i]
-            if d.sl < cline or (d.sl == cline and d.bsc < ccol) then
-                pick = d
-                break
-            end
-        end
-        pick = pick or diags[#diags] -- wrap around
-    end
-    p.line = pick.sl
-    p.col = pick.bsc
-    view:_set_goal_col(pick.bsc)
+	local diags = sorted_diagnostics(view)
+	if diags == nil then
+		editor.status_message = "no diagnostics in buffer"
+		return
+	end
+	local p = view:p()
+	local cline = p.line
+	local ccol = p.col
+	local pick
+	if dir > 0 then
+		for _, d in ipairs(diags) do
+			if d.sl > cline or (d.sl == cline and d.bsc > ccol) then
+				pick = d
+				break
+			end
+		end
+		pick = pick or diags[1] -- wrap around
+	else
+		for i = #diags, 1, -1 do
+			local d = diags[i]
+			if d.sl < cline or (d.sl == cline and d.bsc < ccol) then
+				pick = d
+				break
+			end
+		end
+		pick = pick or diags[#diags] -- wrap around
+	end
+	p.line = pick.sl
+	p.col = pick.bsc
+	view:_set_goal_col(pick.bsc)
 end
 
 --- Jump to the next diagnostic (ctrl-x ctrl-n with no selection).
 commands.next_diagnostic = function(view, editor)
-    jump_diagnostic(view, editor, 1)
+	jump_diagnostic(view, editor, 1)
 end
 
 --- Jump to the previous diagnostic (ctrl-x ctrl-p with no selection).
 commands.prev_diagnostic = function(view, editor)
-    jump_diagnostic(view, editor, -1)
+	jump_diagnostic(view, editor, -1)
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -1720,11 +1725,11 @@ end
 --- @param state table {selected = any} mutated in place
 --- @return fun(text: string, comp_index: integer)
 local function make_symbol_tracker(editor, state)
-    return function(_text, comp_index)
-        local mb = editor.minibuffer
-        local item = mb and mb._completions and mb._completions[comp_index] or nil
-        state.selected = item and item.data or nil
-    end
+	return function(_text, comp_index)
+		local mb = editor.minibuffer
+		local item = mb and mb._completions and mb._completions[comp_index] or nil
+		state.selected = item and item.data or nil
+	end
 end
 
 --- Prompt for a symbol in the current buffer (imenu-style) and jump to
@@ -1762,16 +1767,16 @@ end
 --- @param view View?
 --- @return MajorModeInstance|nil
 local function lsp_mode_for_view(view)
-    if view == nil or view._major_modes == nil then
-        return nil
-    end
-    for i = #view._major_modes, 1, -1 do
-        local m = view._major_modes[i]
-        if m.lsp_servers ~= nil and #m.lsp_servers > 0 then
-            return m
-        end
-    end
-    return nil
+	if view == nil or view._major_modes == nil then
+		return nil
+	end
+	for i = #view._major_modes, 1, -1 do
+		local m = view._major_modes[i]
+		if m.lsp_servers ~= nil and #m.lsp_servers > 0 then
+			return m
+		end
+	end
+	return nil
 end
 
 --- Start the language server for the current buffer's mode. Re-emits
@@ -1782,43 +1787,43 @@ end
 --- mode declares a server, when one is already up, or when the editor
 --- has no workspace root.
 commands.lsp_start = function(view, editor)
-    local instance = lsp_mode_for_view(view)
-    if instance == nil then
-        editor.status_message = "no language server configured for this buffer"
-        return
-    end
-    local name, status = lsp.server_status_for(instance.lsp_servers)
-    if status == "ready" or status == "spawning" then
-        editor.status_message = ("language server already running (%s)"):format(name or "?")
-        return
-    end
-    if editor.workspace_dir == nil then
-        editor.status_message = "no workspace directory"
-        return
-    end
-    view:_emit_mode_event("mode_enter", instance)
-    -- Now that mode_enter has synchronously spawn_for_mode'd (binding
-    -- mode_name → a fresh client_id), watch for the lane's settle
-    -- handshake on that new cid and surface it as a status_message so
-    -- the user gets "ready" / "not on PATH" / "failed to start" when
-    -- the spawn actually resolves, instead of a stuck "starting…".
-    local started_cid = lsp.client_for_mode(instance.name)
-    if started_cid ~= nil then
-        local result = async.await(lsp.on_status_async(editor, started_cid))
-        local n = result[1]
-        local st = result[2]
-        if st == "ready" then
-            editor.status_message = ("language server ready (%s)"):format(n or "?")
-        elseif st == "missing" then
-            editor.status_message = ("language server not on PATH (%s)"):format(n or "?")
-        elseif st == "dead" then
-            editor.status_message = ("language server failed to start (%s)"):format(n or "?")
-        elseif st == "killed" then
-            editor.status_message = ("language server stopped (%s)"):format(n or "?")
-        end
-    else
-        editor.status_message = ("starting language server (%s)…"):format(name or "?")
-    end
+	local instance = lsp_mode_for_view(view)
+	if instance == nil then
+		editor.status_message = "no language server configured for this buffer"
+		return
+	end
+	local name, status = lsp.server_status_for(instance.lsp_servers)
+	if status == "ready" or status == "spawning" then
+		editor.status_message = ("language server already running (%s)"):format(name or "?")
+		return
+	end
+	if editor.workspace_dir == nil then
+		editor.status_message = "no workspace directory"
+		return
+	end
+	view:_emit_mode_event("mode_enter", instance)
+	-- Now that mode_enter has synchronously spawn_for_mode'd (binding
+	-- mode_name → a fresh client_id), watch for the lane's settle
+	-- handshake on that new cid and surface it as a status_message so
+	-- the user gets "ready" / "not on PATH" / "failed to start" when
+	-- the spawn actually resolves, instead of a stuck "starting…".
+	local started_cid = lsp.client_for_mode(instance.name)
+	if started_cid ~= nil then
+		local result = async.await(lsp.on_status_async(editor, started_cid))
+		local n = result[1]
+		local st = result[2]
+		if st == "ready" then
+			editor.status_message = ("language server ready (%s)"):format(n or "?")
+		elseif st == "missing" then
+			editor.status_message = ("language server not on PATH (%s)"):format(n or "?")
+		elseif st == "dead" then
+			editor.status_message = ("language server failed to start (%s)"):format(n or "?")
+		elseif st == "killed" then
+			editor.status_message = ("language server stopped (%s)"):format(n or "?")
+		end
+	else
+		editor.status_message = ("starting language server (%s)…"):format(name or "?")
+	end
 end
 
 --- Kill the language server bound to the current buffer (the
@@ -1828,28 +1833,26 @@ end
 --- server binary will see ⛏ srv✝ in their modeline until they too
 --- re-trigger a spawn (or this command is invoked on them).
 commands.lsp_kill = function(view, editor)
-    local buf = view and view.buffer
-    local cid = buf and buf.lsp_client_id
-    if cid == nil then
-        editor.status_message = "no language server bound to this buffer"
-        return
-    end
-    local name = lsp.client_name(cid)
-    local ok = lsp.kill_client(cid)
-    if not ok then
-        editor.status_message = "no language server bound to this buffer"
-        return
-    end
-    -- Drop the buffer's per-doc fields; the start/restart paths re-bind
-    -- them via the mode_enter listener's didOpen.
-    if buf ~= nil then
-        buf.lsp_client_id = nil
-        buf.lsp_uri = nil
-        buf.lsp_language_id = nil
-    end
-    editor.status_message = ("stopped language server%s"):format(
-        name ~= nil and (" (" .. name .. ")") or ""
-    )
+	local buf = view and view.buffer
+	local cid = buf and buf.lsp_client_id
+	if cid == nil then
+		editor.status_message = "no language server bound to this buffer"
+		return
+	end
+	local name = lsp.client_name(cid)
+	local ok = lsp.kill_client(cid)
+	if not ok then
+		editor.status_message = "no language server bound to this buffer"
+		return
+	end
+	-- Drop the buffer's per-doc fields; the start/restart paths re-bind
+	-- them via the mode_enter listener's didOpen.
+	if buf ~= nil then
+		buf.lsp_client_id = nil
+		buf.lsp_uri = nil
+		buf.lsp_language_id = nil
+	end
+	editor.status_message = ("stopped language server%s"):format(name ~= nil and (" (" .. name .. ")") or "")
 end
 
 --- Restart the language server bound to the current buffer: kill it,
@@ -1857,49 +1860,49 @@ end
 --- centralized listener spawns a fresh client + re-binds the buffer
 --- (didOpen). No-op-with-message when no mode declares a server.
 commands.lsp_restart = function(view, editor)
-    local buf = view and view.buffer
-    local instance = lsp_mode_for_view(view)
-    if instance == nil then
-        editor.status_message = "no language server configured for this buffer"
-        return
-    end
-    if editor.workspace_dir == nil then
-        editor.status_message = "no workspace directory"
-        return
-    end
-    local cid = buf and buf.lsp_client_id
-    if cid ~= nil then
-        lsp.kill_client(cid)
-        -- Mirror lsp_kill's buffer-field clear so the re-emitted
-        -- mode_enter's `buf.lsp_client_id == nil` guard re-binds.
-        buf.lsp_client_id = nil
-        buf.lsp_uri = nil
-        buf.lsp_language_id = nil
-    end
-    view:_emit_mode_event("mode_enter", instance)
-    local name = (select(1, lsp.server_status_for(instance.lsp_servers))) or "?"
-    -- Mirror lsp_start: the re-emitted mode_enter synchronously bound a
-    -- fresh client_id; watch for its settle so "restarting…" resolves
-    -- into "ready" / "not on PATH" / "failed to start" when the spawn
-    -- actually lands. (A stray KILLED handshake from the OLD killed cid
-    -- lands on a different event name and never reaches this one.)
-    local restarted_cid = lsp.client_for_mode(instance.name)
-    if restarted_cid ~= nil then
-        local result = async.await(lsp.on_status_async(editor, restarted_cid))
-        local n = result[1]
-        local st = result[2]
-        if st == "ready" then
-            editor.status_message = ("language server ready (%s)"):format(n or "?")
-        elseif st == "missing" then
-            editor.status_message = ("language server not on PATH (%s)"):format(n or "?")
-        elseif st == "dead" then
-            editor.status_message = ("language server failed to start (%s)"):format(n or "?")
-        elseif st == "killed" then
-            editor.status_message = ("language server stopped (%s)"):format(n or "?")
-        end
-    else
-        editor.status_message = ("restarting language server (%s)…"):format(name)
-    end
+	local buf = view and view.buffer
+	local instance = lsp_mode_for_view(view)
+	if instance == nil then
+		editor.status_message = "no language server configured for this buffer"
+		return
+	end
+	if editor.workspace_dir == nil then
+		editor.status_message = "no workspace directory"
+		return
+	end
+	local cid = buf and buf.lsp_client_id
+	if cid ~= nil then
+		lsp.kill_client(cid)
+		-- Mirror lsp_kill's buffer-field clear so the re-emitted
+		-- mode_enter's `buf.lsp_client_id == nil` guard re-binds.
+		buf.lsp_client_id = nil
+		buf.lsp_uri = nil
+		buf.lsp_language_id = nil
+	end
+	view:_emit_mode_event("mode_enter", instance)
+	local name = (select(1, lsp.server_status_for(instance.lsp_servers))) or "?"
+	-- Mirror lsp_start: the re-emitted mode_enter synchronously bound a
+	-- fresh client_id; watch for its settle so "restarting…" resolves
+	-- into "ready" / "not on PATH" / "failed to start" when the spawn
+	-- actually lands. (A stray KILLED handshake from the OLD killed cid
+	-- lands on a different event name and never reaches this one.)
+	local restarted_cid = lsp.client_for_mode(instance.name)
+	if restarted_cid ~= nil then
+		local result = async.await(lsp.on_status_async(editor, restarted_cid))
+		local n = result[1]
+		local st = result[2]
+		if st == "ready" then
+			editor.status_message = ("language server ready (%s)"):format(n or "?")
+		elseif st == "missing" then
+			editor.status_message = ("language server not on PATH (%s)"):format(n or "?")
+		elseif st == "dead" then
+			editor.status_message = ("language server failed to start (%s)"):format(n or "?")
+		elseif st == "killed" then
+			editor.status_message = ("language server stopped (%s)"):format(n or "?")
+		end
+	else
+		editor.status_message = ("restarting language server (%s)…"):format(name)
+	end
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -1933,8 +1936,8 @@ end
 --- @param byte_col integer 0-based BYTE col
 --- @return {line:integer, character:integer}
 local function lsp_position(buf, line, byte_col)
-    local text = buf:line_text(line) or ""
-    return { line = line, character = utf8.byte_to_utf16_col(text, byte_col) }
+	local text = buf:line_text(line) or ""
+	return { line = line, character = utf8.byte_to_utf16_col(text, byte_col) }
 end
 
 --- Does this diagnostic item (in stored flat LSP coords — 0-based line
@@ -1946,7 +1949,7 @@ end
 --- @param eline integer
 --- @return boolean
 local function diag_overlaps(item, sline, eline)
-    return item.sl <= eline and item.el >= sline
+	return item.sl <= eline and item.el >= sline
 end
 
 --- Re-shape a stored diagnostic (flat {sl,sc,el,ec,...}) back to the LSP
@@ -1956,301 +1959,297 @@ end
 --- @param item table
 --- @return table
 local function diag_to_wire(item)
-    return {
-        range = {
-            start = { line = item.sl, character = item.sc },
-            ["end"] = { line = item.el, character = item.ec },
-        },
-        severity = item.severity,
-        message = item.message,
-        source = item.source,
-        code = item.code,
-    }
+	return {
+		range = {
+			start = { line = item.sl, character = item.sc },
+			["end"] = { line = item.el, character = item.ec },
+		},
+		severity = item.severity,
+		message = item.message,
+		source = item.source,
+		code = item.code,
+	}
 end
 
 commands.code_actions = function(view, editor)
-    local buf = view and view.buffer
-    local cid = buf and buf.lsp_client_id
-    local uri = buf and buf.lsp_uri
-    if cid == nil or uri == nil then
-        editor.status_message = "no language server for this buffer"
-        return
-    end
-    if not lsp.is_ready(cid) then
-        editor.status_message = "language server not ready"
-        return
-    end
+	local buf = view and view.buffer
+	local cid = buf and buf.lsp_client_id
+	local uri = buf and buf.lsp_uri
+	if cid == nil or uri == nil then
+		editor.status_message = "no language server for this buffer"
+		return
+	end
+	if not lsp.is_ready(cid) then
+		editor.status_message = "language server not ready"
+		return
+	end
 
-    -- Build the LSP range: selection if anchored, else zero-width at cursor.
-    local p = view:p()
-    local sline, schar, eline, echar
-    if p.anchor_line then
-        local sl, sc, el, ec = view:selection_ranges_one(p)
-        ---@cast sl integer
-        ---@cast sc integer
-        ---@cast el integer
-        ---@cast ec integer
-        -- Empty selection (anchor == cursor): treat as a point at cursor.
-        if sl == el and sc == ec then
-            sline = p.line
-            schar = lsp_position(buf, p.line, p.col).character
-            eline = sline
-            echar = schar
-        else
-            sline = sl
-            schar = lsp_position(buf, sl, sc).character
-            eline = el
-            echar = lsp_position(buf, el, ec).character
-        end
-    else
-        sline = p.line
-        schar = lsp_position(buf, p.line, p.col).character
-        eline = sline
-        echar = schar
-    end
+	-- Build the LSP range: selection if anchored, else zero-width at cursor.
+	local p = view:p()
+	local sline, schar, eline, echar
+	if p.anchor_line then
+		local sl, sc, el, ec = view:selection_ranges_one(p)
+		---@cast sl integer
+		---@cast sc integer
+		---@cast el integer
+		---@cast ec integer
+		-- Empty selection (anchor == cursor): treat as a point at cursor.
+		if sl == el and sc == ec then
+			sline = p.line
+			schar = lsp_position(buf, p.line, p.col).character
+			eline = sline
+			echar = schar
+		else
+			sline = sl
+			schar = lsp_position(buf, sl, sc).character
+			eline = el
+			echar = lsp_position(buf, el, ec).character
+		end
+	else
+		sline = p.line
+		schar = lsp_position(buf, p.line, p.col).character
+		eline = sline
+		echar = schar
+	end
 
-    -- Build the context: explicitly-invoked kind + diagnostics overlapping
-    -- the range (some servers only return fix-all / specific actions
-    -- when the triggering diagnostic is named).
-    local ctx = { triggerKind = 1 } -- 1 = Invoked
-    local stored = lsp.diagnostics_for_uri(uri)
-    if stored ~= nil and stored.items ~= nil then
-        local diags = {}
-        for _, d in ipairs(stored.items) do
-            if diag_overlaps(d, sline, eline) then
-                diags[#diags + 1] = diag_to_wire(d)
-            end
-        end
-        if #diags > 0 then
-            ctx.diagnostics = diags
-        end
-    end
+	-- Build the context: explicitly-invoked kind + diagnostics overlapping
+	-- the range (some servers only return fix-all / specific actions
+	-- when the triggering diagnostic is named).
+	local ctx = { triggerKind = 1 } -- 1 = Invoked
+	local stored = lsp.diagnostics_for_uri(uri)
+	if stored ~= nil and stored.items ~= nil then
+		local diags = {}
+		for _, d in ipairs(stored.items) do
+			if diag_overlaps(d, sline, eline) then
+				diags[#diags + 1] = diag_to_wire(d)
+			end
+		end
+		if #diags > 0 then
+			ctx.diagnostics = diags
+		end
+	end
 
-    -- Clear stale code-action line cache so previous results don't linger
-    -- on the gutter if the response returns empty or errors.
-    editor._code_action_lines_by_uri[uri] = nil
+	-- Clear stale code-action line cache so previous results don't linger
+	-- on the gutter if the response returns empty or errors.
+	editor._code_action_lines_by_uri[uri] = nil
 
-    editor.status_message = "finding code actions…"
-    local result, is_error = async.await(lsp.request_async(editor, cid, "textDocument/codeAction", {
-        textDocument = { uri = uri },
-        range = {
-            start = { line = sline, character = schar },
-            ["end"] = { line = eline, character = echar },
-        },
-        context = ctx,
-    }))
-    if is_error then
-        editor.status_message = "code actions failed: server error"
-        return
-    end
-    if result == nil or #result == 0 then
-        editor.status_message = "no code actions"
-        return
-    end
+	editor.status_message = "finding code actions…"
+	local result, is_error = async.await(lsp.request_async(editor, cid, "textDocument/codeAction", {
+		textDocument = { uri = uri },
+		range = {
+			start = { line = sline, character = schar },
+			["end"] = { line = eline, character = echar },
+		},
+		context = ctx,
+	}))
+	if is_error then
+		editor.status_message = "code actions failed: server error"
+		return
+	end
+	if result == nil or #result == 0 then
+		editor.status_message = "no code actions"
+		return
+	end
 
-    -- Build the picker items: one per returned action/command.
-    local items = {}
-    for _, a in ipairs(result) do
-        if type(a) == "table" and type(a.title) == "string" then
-            items[#items + 1] = { text = a.title, metadata = a.kind, data = a }
-        end
-    end
-    if #items == 0 then
-        editor.status_message = "no code actions"
-        -- Clear stale cache: no actions available for this URI.
-        editor._code_action_lines_by_uri[uri] = nil
-        return
-    end
+	-- Build the picker items: one per returned action/command.
+	local items = {}
+	for _, a in ipairs(result) do
+		if type(a) == "table" and type(a.title) == "string" then
+			items[#items + 1] = { text = a.title, metadata = a.kind, data = a }
+		end
+	end
+	if #items == 0 then
+		editor.status_message = "no code actions"
+		-- Clear stale cache: no actions available for this URI.
+		editor._code_action_lines_by_uri[uri] = nil
+		return
+	end
 
-    -- Populate the code-action line cache for the gutter sign.
-    -- For each action that carries a `diagnostics` field, mark the
-    -- start line of each referenced diagnostic as having an action.
-    -- Also snapshot the buffer version so the gutter sign can detect
-    -- staleness (returns nil when the buffer has been edited since).
-    local lines = {}
-    for _, a in ipairs(result) do
-        if type(a) == "table" and a.diagnostics then
-            for _, d in ipairs(a.diagnostics) do
-                if type(d) == "table" and d.range and d.range.start then
-                    local lnum = d.range.start.line
-                    if lnum ~= nil then
-                        lines[lnum] = true
-                    end
-                end
-            end
-        end
-    end
-    editor._code_action_lines_by_uri[uri] = {
-        lines = lines,
-        version = buf.lsp_version,
-    }
+	-- Populate the code-action line cache for the gutter sign.
+	-- For each action that carries a `diagnostics` field, mark the
+	-- start line of each referenced diagnostic as having an action.
+	-- Also snapshot the buffer version so the gutter sign can detect
+	-- staleness (returns nil when the buffer has been edited since).
+	local lines = {}
+	for _, a in ipairs(result) do
+		if type(a) == "table" and a.diagnostics then
+			for _, d in ipairs(a.diagnostics) do
+				if type(d) == "table" and d.range and d.range.start then
+					local lnum = d.range.start.line
+					if lnum ~= nil then
+						lines[lnum] = true
+					end
+				end
+			end
+		end
+	end
+	editor._code_action_lines_by_uri[uri] = {
+		lines = lines,
+		version = buf.lsp_version,
+	}
 
-    local state = { selected = nil }
-    editor.status_message = nil
-    local mb_result = async.await(editor:read_minibuffer_async({
-        prompt = "Code action: ",
-        completion = true,
-        completer = completers.static_list(items),
-        on_change = make_symbol_tracker(editor, state),
-    }))
-    if mb_result.cancelled then
-        editor.status_message = "no code action selected"
-        return
-    end
-    local action = state.selected
-    if action == nil then
-        editor.status_message = "no code action selected"
-        return
-    end
-    if action.edit ~= nil then
-        -- apply_workspace_edit is async when the edit targets
-        -- a file not open yet (background-opens it); the
-        -- callback fires synchronously when every target was
-        -- already open, and sets the status message either way.
-        editor:apply_workspace_edit(action.edit, function(done)
-            local n = #done.touched
-            if n > 0 then
-                editor.status_message = ("applied (%d doc%s)"):format(n, n == 1 and "" or "s")
-            else
-                editor.status_message = "code action made no in-buffer edits"
-            end
-        end)
-    elseif action.command ~= nil then
-        -- `command` may be a server-side command id (string)
-        -- per the Command shape, OR for a CodeAction it's a
-        -- Command table `{ command=, arguments?= }`.
-        local cmd_id, cmd_args
-        if type(action.command) == "table" then
-            cmd_id = action.command.command
-            cmd_args = action.command.arguments
-        else
-            cmd_id = action.command
-            cmd_args = action.arguments
-        end
-        if type(cmd_id) ~= "string" or cmd_id == "" then
-            editor.status_message = "code action has no executable command"
-            return
-        end
-        editor.status_message = "running command…"
-        local exec_result, exec_err =
-            async.await(lsp.request_async(editor, cid, "workspace/executeCommand", {
-                command = cmd_id,
-                arguments = cmd_args,
-            }))
-        if exec_err then
-            editor.status_message = "code action failed: server error"
-        else
-            editor.status_message = "ran: " .. (action.title or cmd_id)
-        end
-    else
-        editor.status_message = "code action has no edit or command"
-    end
+	local state = { selected = nil }
+	editor.status_message = nil
+	local mb_result = async.await(editor:read_minibuffer_async({
+		prompt = "Code action: ",
+		completion = true,
+		completer = completers.static_list(items),
+		on_change = make_symbol_tracker(editor, state),
+	}))
+	if mb_result.cancelled then
+		editor.status_message = "no code action selected"
+		return
+	end
+	local action = state.selected
+	if action == nil then
+		editor.status_message = "no code action selected"
+		return
+	end
+	if action.edit ~= nil then
+		-- apply_workspace_edit is async when the edit targets
+		-- a file not open yet (background-opens it); the
+		-- callback fires synchronously when every target was
+		-- already open, and sets the status message either way.
+		editor:apply_workspace_edit(action.edit, function(done)
+			local n = #done.touched
+			if n > 0 then
+				editor.status_message = ("applied (%d doc%s)"):format(n, n == 1 and "" or "s")
+			else
+				editor.status_message = "code action made no in-buffer edits"
+			end
+		end)
+	elseif action.command ~= nil then
+		-- `command` may be a server-side command id (string)
+		-- per the Command shape, OR for a CodeAction it's a
+		-- Command table `{ command=, arguments?= }`.
+		local cmd_id, cmd_args
+		if type(action.command) == "table" then
+			cmd_id = action.command.command
+			cmd_args = action.command.arguments
+		else
+			cmd_id = action.command
+			cmd_args = action.arguments
+		end
+		if type(cmd_id) ~= "string" or cmd_id == "" then
+			editor.status_message = "code action has no executable command"
+			return
+		end
+		editor.status_message = "running command…"
+		local exec_result, exec_err = async.await(lsp.request_async(editor, cid, "workspace/executeCommand", {
+			command = cmd_id,
+			arguments = cmd_args,
+		}))
+		if exec_err then
+			editor.status_message = "code action failed: server error"
+		else
+			editor.status_message = "ran: " .. (action.title or cmd_id)
+		end
+	else
+		editor.status_message = "code action has no edit or command"
+	end
 end
 
 commands.goto_symbol = function(view, editor)
-    local buf = view and view.buffer
-    local cid = buf and buf.lsp_client_id
-    local uri = buf and buf.lsp_uri
-    local lsp_ready = cid ~= nil
-        and uri ~= nil
-        and lsp.is_ready(cid)
-        and lsp.doc_sent_version(cid, uri) >= 0
-    if not lsp_ready then
-        -- LSP unavailable: try the tree-sitter document outline. Bail
-        -- with a status message when the buffer has no symbol query or
-        -- parse tree either (e.g. plain-text scratch buffer).
-        local has_query = view ~= nil and view:_symbol_query() ~= nil
-        local has_tree = view ~= nil and view:hl_tree() ~= nil
-        if not (has_query and has_tree) then
-            editor.status_message = "no language server or tree-sitter outline for this buffer"
-            return
-        end
-        local state = { selected = nil }
-        editor:read_from_minibuffer({
-            prompt = "Goto symbol (ts): ",
-            completion = true,
-            completer = completers.ts_document_symbols(editor),
-            on_change = make_symbol_tracker(editor, state),
-            on_submit = function(_input_text)
-                local loc = state.selected
-                if loc == nil then
-                    editor.status_message = "no symbol selected"
-                    return
-                end
-                editor:goto_byte(view, loc.line, loc.char)
-            end,
-        })
-        return
-    end
-    local state = { selected = nil }
-    editor:read_from_minibuffer({
-        prompt = "Goto symbol: ",
-        completion = true,
-        completer = completers.document_symbols(editor),
-        on_change = make_symbol_tracker(editor, state),
-        on_submit = function(_input_text)
-            local loc = state.selected
-            if loc == nil then
-                editor.status_message = "no symbol selected"
-                return
-            end
-            editor:jump_to_location(loc.uri, loc.line, loc.char)
-        end,
-    })
+	local buf = view and view.buffer
+	local cid = buf and buf.lsp_client_id
+	local uri = buf and buf.lsp_uri
+	local lsp_ready = cid ~= nil and uri ~= nil and lsp.is_ready(cid) and lsp.doc_sent_version(cid, uri) >= 0
+	if not lsp_ready then
+		-- LSP unavailable: try the tree-sitter document outline. Bail
+		-- with a status message when the buffer has no symbol query or
+		-- parse tree either (e.g. plain-text scratch buffer).
+		local has_query = view ~= nil and view:_symbol_query() ~= nil
+		local has_tree = view ~= nil and view:hl_tree() ~= nil
+		if not (has_query and has_tree) then
+			editor.status_message = "no language server or tree-sitter outline for this buffer"
+			return
+		end
+		local state = { selected = nil }
+		editor:read_from_minibuffer({
+			prompt = "Goto symbol (ts): ",
+			completion = true,
+			completer = completers.ts_document_symbols(editor),
+			on_change = make_symbol_tracker(editor, state),
+			on_submit = function(_input_text)
+				local loc = state.selected
+				if loc == nil then
+					editor.status_message = "no symbol selected"
+					return
+				end
+				editor:goto_byte(view, loc.line, loc.char)
+			end,
+		})
+		return
+	end
+	local state = { selected = nil }
+	editor:read_from_minibuffer({
+		prompt = "Goto symbol: ",
+		completion = true,
+		completer = completers.document_symbols(editor),
+		on_change = make_symbol_tracker(editor, state),
+		on_submit = function(_input_text)
+			local loc = state.selected
+			if loc == nil then
+				editor.status_message = "no symbol selected"
+				return
+			end
+			editor:jump_to_location(loc.uri, loc.line, loc.char)
+		end,
+	})
 end
 
 --- Prompt for a symbol across the workspace and jump to it. Issues a
 --- debounced `workspace/symbol` per keystroke; the completer re-filters
 --- the (possibly stale) cache while a response is in flight.
 commands.workspace_symbol = function(view, editor)
-    local buf = view and view.buffer
-    local cid = buf and buf.lsp_client_id
-    if cid == nil or not lsp.is_ready(cid) then
-        editor.status_message = "no language server running"
-        return
-    end
-    local state = { selected = nil }
-    editor:read_from_minibuffer({
-        prompt = "Workspace symbol: ",
-        completion = true,
-        completer = completers.workspace_symbols(editor),
-        on_change = make_symbol_tracker(editor, state),
-        on_submit = function(_input_text)
-            local loc = state.selected
-            if loc == nil then
-                editor.status_message = "no symbol selected"
-                return
-            end
-            editor:jump_to_location(loc.uri, loc.line, loc.char)
-        end,
-    })
+	local buf = view and view.buffer
+	local cid = buf and buf.lsp_client_id
+	if cid == nil or not lsp.is_ready(cid) then
+		editor.status_message = "no language server running"
+		return
+	end
+	local state = { selected = nil }
+	editor:read_from_minibuffer({
+		prompt = "Workspace symbol: ",
+		completion = true,
+		completer = completers.workspace_symbols(editor),
+		on_change = make_symbol_tracker(editor, state),
+		on_submit = function(_input_text)
+			local loc = state.selected
+			if loc == nil then
+				editor.status_message = "no symbol selected"
+				return
+			end
+			editor:jump_to_location(loc.uri, loc.line, loc.char)
+		end,
+	})
 end
 
 --- Select every occurrence of the current selection's text.
 --- Replaces cursors with one per match (selections active).
 commands.select_all_matches = function(view, _editor)
-    if not view:multi_currency_enabled() then
-        return
-    end
-    local query = primary_selection_text(view)
-    if not query or #query == 0 then
-        return
-    end
-    local u = tonumber(view.buffer._ptr.undo.count)
-    local r = tonumber(view.buffer._ptr.redo.count)
-    local new_cursors = {}
-    local iter = view.buffer:search_forward(query, { line = 0, offset = 0 }, true)
-    for m in iter do
-        local c = view:make_cursor(m.end_line, m.end_offset)
-        c.anchor_line = m.line
-        c.anchor_col = m.offset
-        c.shadow_undo = u
-        c.shadow_redo = r
-        new_cursors[#new_cursors + 1] = c
-    end
-    if #new_cursors > 0 then
-        view.cursors = new_cursors
-    end
+	if not view:multi_currency_enabled() then
+		return
+	end
+	local query = primary_selection_text(view)
+	if not query or #query == 0 then
+		return
+	end
+	local u = tonumber(view.buffer._ptr.undo.count)
+	local r = tonumber(view.buffer._ptr.redo.count)
+	local new_cursors = {}
+	local iter = view.buffer:search_forward(query, { line = 0, offset = 0 }, true)
+	for m in iter do
+		local c = view:make_cursor(m.end_line, m.end_offset)
+		c.anchor_line = m.line
+		c.anchor_col = m.offset
+		c.shadow_undo = u
+		c.shadow_redo = r
+		new_cursors[#new_cursors + 1] = c
+	end
+	if #new_cursors > 0 then
+		view.cursors = new_cursors
+	end
 end
 
 --- Drop a pending cursor at the primary's position. The cursor is NOT
@@ -2260,19 +2259,15 @@ end
 --- default) promotes all pending drops to live cursors at once so
 --- subsequent motions move every cursor in unison. Escape cancels.
 commands.add_cursor_here = function(view, editor)
-    if not view:multi_currency_enabled() then
-        return
-    end
-    local p = view:p()
-    view:drop_cursor(p.line, p.col)
-    if editor then
-        local n = #view.pending_cursors
-        editor.status_message = (
-            n
-            .. (n == 1 and " drop" or " drops")
-            .. " staged (alt-ret to commit, esc to cancel)"
-        )
-    end
+	if not view:multi_currency_enabled() then
+		return
+	end
+	local p = view:p()
+	view:drop_cursor(p.line, p.col)
+	if editor then
+		local n = #view.pending_cursors
+		editor.status_message = (n .. (n == 1 and " drop" or " drops") .. " staged (alt-ret to commit, esc to cancel)")
+	end
 end
 
 --- Generalized candidate promotion. Promotes an existing pending
@@ -2288,84 +2283,81 @@ end
 --- the match range as its selection, exactly like `y`. After
 --- promoting, the primary advances to the next remaining candidate.
 commands.add_cursor_at_candidate = function(view, editor)
-    if not view:has_pending_cursors() then
-        return
-    end
-    local promoted
-    if view:p().anchor_line then
-        promoted = editor:_promote_candidates_in_region()
-    else
-        local i = editor:_find_nearest_candidate_past_biased()
-        if i then
-            editor:_promote_candidate_at_index(i)
-            promoted = 1
-        else
-            promoted = 0
-        end
-    end
-    -- "Advance to next" is a query-replace-candidate-walk concept: the
-    -- primary steps to the next pending match so successive y/n/grab
-    -- gestures traverse the full match set. It only applies when match
-    -- ranges are active (_query_ranges). In plain drop mode (alt-;
-    -- staged drops, no ranges) there is no walk, so advancing would park
-    -- the primary caret ON an un-selected candidate — placing a live
-    -- caret there that reads as "the outside one got promoted". Leave
-    -- the primary where it is instead.
-    if editor._query_ranges then
-        if view:has_pending_cursors() then
-            editor:_nav_candidate(1)
-        else
-            editor._query_ranges = nil
-            if promoted and promoted > 0 then
-                editor.status_message = "all candidates promoted — type to replace"
-            end
-        end
-    end
-    if editor and promoted and promoted > 0 and not editor.status_message then
-        editor.status_message = ("promoted %d cursor%s"):format(
-            promoted,
-            promoted == 1 and "" or "s"
-        )
-    end
+	if not view:has_pending_cursors() then
+		return
+	end
+	local promoted
+	if view:p().anchor_line then
+		promoted = editor:_promote_candidates_in_region()
+	else
+		local i = editor:_find_nearest_candidate_past_biased()
+		if i then
+			editor:_promote_candidate_at_index(i)
+			promoted = 1
+		else
+			promoted = 0
+		end
+	end
+	-- "Advance to next" is a query-replace-candidate-walk concept: the
+	-- primary steps to the next pending match so successive y/n/grab
+	-- gestures traverse the full match set. It only applies when match
+	-- ranges are active (_query_ranges). In plain drop mode (alt-;
+	-- staged drops, no ranges) there is no walk, so advancing would park
+	-- the primary caret ON an un-selected candidate — placing a live
+	-- caret there that reads as "the outside one got promoted". Leave
+	-- the primary where it is instead.
+	if editor._query_ranges then
+		if view:has_pending_cursors() then
+			editor:_nav_candidate(1)
+		else
+			editor._query_ranges = nil
+			if promoted and promoted > 0 then
+				editor.status_message = "all candidates promoted — type to replace"
+			end
+		end
+	end
+	if editor and promoted and promoted > 0 and not editor.status_message then
+		editor.status_message = ("promoted %d cursor%s"):format(promoted, promoted == 1 and "" or "s")
+	end
 end
 
 --- Promote staged drops to live cursors (in addition to the primary).
 --- Bound to alt-m by default (mnemonic: "more"). After commit,
 --- motions/edits apply to every cursor in unison.
 commands.commit_pending_cursors = function(view, editor)
-    if not view:has_pending_cursors() then
-        return
-    end
-    local n = #view.pending_cursors
-    local old_count = #view.cursors
-    view:commit_pending_cursors()
+	if not view:has_pending_cursors() then
+		return
+	end
+	local n = #view.pending_cursors
+	local old_count = #view.cursors
+	view:commit_pending_cursors()
 
-    -- If this is a query-replace commit, apply match ranges as selections
-    -- on the newly promoted cursors. Each range is parallel to the pending
-    -- cursor list and carries the match's end position.
-    if editor and editor._query_ranges then
-        local ranges = editor._query_ranges
-        for i = 1, n do
-            local c = view.cursors[old_count + i]
-            local r = ranges[i]
-            if c and r then
-                c.anchor_line = c.line
-                c.anchor_col = c.col
-                c.line = r.end_line
-                c.col = r.end_offset
-                c.anchor_transient = nil
-            end
-        end
-        editor._query_ranges = nil
-        if editor then
-            editor.status_message = (n .. " selections active — type to replace")
-        end
-        return
-    end
+	-- If this is a query-replace commit, apply match ranges as selections
+	-- on the newly promoted cursors. Each range is parallel to the pending
+	-- cursor list and carries the match's end position.
+	if editor and editor._query_ranges then
+		local ranges = editor._query_ranges
+		for i = 1, n do
+			local c = view.cursors[old_count + i]
+			local r = ranges[i]
+			if c and r then
+				c.anchor_line = c.line
+				c.anchor_col = c.col
+				c.line = r.end_line
+				c.col = r.end_offset
+				c.anchor_transient = nil
+			end
+		end
+		editor._query_ranges = nil
+		if editor then
+			editor.status_message = (n .. " selections active — type to replace")
+		end
+		return
+	end
 
-    if editor then
-        editor.status_message = (#view.cursors .. " cursors active")
-    end
+	if editor then
+		editor.status_message = (#view.cursors .. " cursors active")
+	end
 end
 
 --- Split the primary selection into one cursor per line.
@@ -2374,76 +2366,76 @@ end
 --- collapses to one cursor per line with no selection.
 --- If the selection is on a single line, this is a no-op.
 commands.split_selection_into_lines = function(view, _editor)
-    local p = view:p()
-    if not p.anchor_line then
-        return
-    end
-    local sl, sc, el, ec = view:selection_ranges_one(p)
-    ---@cast sl integer
-    ---@cast sc integer
-    ---@cast el integer
-    ---@cast ec integer
-    if sl == el then
-        return
-    end
-    local new_cursors = {}
-    for li = sl, el do
-        local cc
-        if li == sl then
-            cc = sc
-        else
-            cc = 0
-        end
-        local c = view:make_cursor(li, cc)
-        new_cursors[#new_cursors + 1] = c
-    end
-    -- last cursor positions at ec on the last line; overwrite
-    if #new_cursors > 0 then
-        new_cursors[#new_cursors].col = ec
-        new_cursors[#new_cursors].goal_col = ec
-    end
-    view.cursors = new_cursors
+	local p = view:p()
+	if not p.anchor_line then
+		return
+	end
+	local sl, sc, el, ec = view:selection_ranges_one(p)
+	---@cast sl integer
+	---@cast sc integer
+	---@cast el integer
+	---@cast ec integer
+	if sl == el then
+		return
+	end
+	local new_cursors = {}
+	for li = sl, el do
+		local cc
+		if li == sl then
+			cc = sc
+		else
+			cc = 0
+		end
+		local c = view:make_cursor(li, cc)
+		new_cursors[#new_cursors + 1] = c
+	end
+	-- last cursor positions at ec on the last line; overwrite
+	if #new_cursors > 0 then
+		new_cursors[#new_cursors].col = ec
+		new_cursors[#new_cursors].goal_col = ec
+	end
+	view.cursors = new_cursors
 end
 
 --- Add a cursor one row (screen row) above the primary, same column.
 --- Implements rectangular column-arrow navigation: cursor is added
 --- (not moved) so the existing cursor stays. Repeat to extend up.
 commands.add_cursor_up = function(view, _editor)
-    if not view:multi_currency_enabled() then
-        return
-    end
-    local p = view:p()
-    if p.line <= 0 then
-        return
-    end
-    local target_line = p.line - 1
-    local col = math.min(p.goal_col, view:content_len(target_line))
-    local nc = view:make_cursor(target_line, col)
-    table.insert(view.cursors, 1, nc)
+	if not view:multi_currency_enabled() then
+		return
+	end
+	local p = view:p()
+	if p.line <= 0 then
+		return
+	end
+	local target_line = p.line - 1
+	local col = math.min(p.goal_col, view:content_len(target_line))
+	local nc = view:make_cursor(target_line, col)
+	table.insert(view.cursors, 1, nc)
 end
 
 --- Add a cursor one row below the primary, same column.
 commands.add_cursor_down = function(view, _editor)
-    if not view:multi_currency_enabled() then
-        return
-    end
-    local p = view:p()
-    if p.line >= view:line_count() - 1 then
-        return
-    end
-    local target_line = p.line + 1
-    local col = math.min(p.goal_col, view:content_len(target_line))
-    local nc = view:make_cursor(target_line, col)
-    table.insert(view.cursors, 1, nc)
+	if not view:multi_currency_enabled() then
+		return
+	end
+	local p = view:p()
+	if p.line >= view:line_count() - 1 then
+		return
+	end
+	local target_line = p.line + 1
+	local col = math.min(p.goal_col, view:content_len(target_line))
+	local nc = view:make_cursor(target_line, col)
+	table.insert(view.cursors, 1, nc)
 end
 
 --- Collapse to a single primary cursor (drop all others). Bound to
 --- escape by default (when no other escape context is active).
 commands.single_cursor = function(view, _editor)
-    local p = view:p()
-    view.cursors = { view:make_cursor(p.line, p.col) }
-    view:unset_mark_all()
-    view:cancel_pending_cursors()
+	local p = view:p()
+	view.cursors = { view:make_cursor(p.line, p.col) }
+	view:unset_mark_all()
+	view:cancel_pending_cursors()
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -2454,32 +2446,32 @@ end
 --- Emacs `back-to-indentation` (bound to M-m in Emacs, but alt-m is
 --- already taken here by commit-pending-cursors; bound to C-x M-m).
 commands.back_to_indentation = function(view, _editor, ...)
-    local n = repeat_count(...)
-    local step = n >= 0 and 1 or -1
-    view:each_cursor(function(c)
-        local line = c.line
-        line = math.min(math.max(0, line + (n - 1) * step), view:line_count() - 1)
-        local text = view.buffer:line_text(line)
-        local content_len = #text
-        if content_len > 0 and text:byte(content_len) == 10 then
-            content_len = content_len - 1
-        end
-        local col = 0
-        while col < content_len do
-            local b = text:byte(col + 1)
-            if b ~= 32 and b ~= 9 then
-                break
-            end
-            col = col + 1
-        end
-        c.line = line
-        c.col = math.min(col, content_len)
-        c.goal_col = c.col
-        c.visual_col = nil
-        c.yank_line = nil
-        c.yank_col = nil
-        return true
-    end)
+	local n = repeat_count(...)
+	local step = n >= 0 and 1 or -1
+	view:each_cursor(function(c)
+		local line = c.line
+		line = math.min(math.max(0, line + (n - 1) * step), view:line_count() - 1)
+		local text = view.buffer:line_text(line)
+		local content_len = #text
+		if content_len > 0 and text:byte(content_len) == 10 then
+			content_len = content_len - 1
+		end
+		local col = 0
+		while col < content_len do
+			local b = text:byte(col + 1)
+			if b ~= 32 and b ~= 9 then
+				break
+			end
+			col = col + 1
+		end
+		c.line = line
+		c.col = math.min(col, content_len)
+		c.goal_col = c.col
+		c.visual_col = nil
+		c.yank_line = nil
+		c.yank_col = nil
+		return true
+	end)
 end
 
 --- Scan from `line` in direction `dir` (+1/-1) for the next paragraph
@@ -2489,46 +2481,46 @@ end
 --- Move forward to the start of the next paragraph (blank-line
 --- separated). Emacs `forward-paragraph` (M-{).
 commands.forward_paragraph = function(view, _editor, ...)
-    local n = repeat_count(...)
-    local dir = n >= 0 and 1 or -1
-    local count = math.abs(n)
-    view:each_cursor(function(c)
-        local line = c.line
-        for _ = 1, count do
-            line = view:paragraph_boundary(line, dir)
-        end
-        c.line = line
-        c.col = 0
-        c.goal_col = 0
-        c.visual_col = nil
-        c.yank_line = nil
-        c.yank_col = nil
-        return true
-    end)
+	local n = repeat_count(...)
+	local dir = n >= 0 and 1 or -1
+	local count = math.abs(n)
+	view:each_cursor(function(c)
+		local line = c.line
+		for _ = 1, count do
+			line = view:paragraph_boundary(line, dir)
+		end
+		c.line = line
+		c.col = 0
+		c.goal_col = 0
+		c.visual_col = nil
+		c.yank_line = nil
+		c.yank_col = nil
+		return true
+	end)
 end
 
 --- Move backward to the start of the previous paragraph.
 --- Emacs `backward-paragraph` (M-}).
 commands.backward_paragraph = function(view, editor, ...)
-    local flag, rest = ...
-    if flag == false then
-        commands.forward_paragraph(view, editor, true, math.abs(rest and -rest or 1))
-    else
-        commands.forward_paragraph(view, editor, true, -math.abs(rest or 1))
-    end
+	local flag, rest = ...
+	if flag == false then
+		commands.forward_paragraph(view, editor, true, math.abs(rest and -rest or 1))
+	else
+		commands.forward_paragraph(view, editor, true, -math.abs(rest or 1))
+	end
 end
 
 --- Move forward over a "bigword" (whitespace-delimited token).
 --- Emacs `forward-word` here maps to the `bigword` textobject.
 commands.forward_bigword = function(view, _editor, ...)
-    local n = repeat_count(...)
-    view:move_word(n, "bigword")
+	local n = repeat_count(...)
+	view:move_word(n, "bigword")
 end
 
 --- Move backward over a bigword.
 commands.backward_bigword = function(view, _editor, ...)
-    local n = repeat_count(...)
-    view:move_word(-n, "bigword")
+	local n = repeat_count(...)
+	view:move_word(-n, "bigword")
 end
 
 --- Like beginning_of_buffer but moves to JUST the last non-newline
@@ -2545,28 +2537,28 @@ commands.end_of_buffer = commands.end_of_buffer
 --- directions to the full word boundaries. Proto expand-region
 --- behavior (not Emacs' [point, word-end)).
 commands.mark_word = function(view, _editor)
-    local p = view:p()
-    view:select_range("word", p.line, p.col)
+	local p = view:p()
+	view:select_range("word", p.line, p.col)
 end
 
 --- Select the bigword (whitespace-delimited token) containing point.
 commands.mark_bigword = function(view, _editor)
-    local p = view:p()
-    view:select_range("bigword", p.line, p.col)
+	local p = view:p()
+	view:select_range("bigword", p.line, p.col)
 end
 
 --- Select the subsentence (clause) containing point.
 commands.mark_subsentence = function(view, _editor)
-    local p = view:p()
-    view:select_range("subsentence", p.line, p.col)
+	local p = view:p()
+	view:select_range("subsentence", p.line, p.col)
 end
 
 --- Select the paragraph containing point: outward in BOTH directions
 --- to the full paragraph (the content run between blank lines). Proto
 --- expand-region behavior.
 commands.mark_paragraph = function(view, _editor, ...)
-    local p = view:p()
-    view:select_range("paragraph", p.line, p.col)
+	local p = view:p()
+	view:select_range("paragraph", p.line, p.col)
 end
 
 --- Select the entire buffer: mark at start, point at end.
@@ -2574,15 +2566,15 @@ end
 --- Operates on the primary cursor; clears other cursors since a
 --- whole-buffer selection is conceptually single-cursor.
 commands.mark_whole_buffer = function(view, _editor)
-    local lc = view:line_count()
-    local last = view:content_len(lc - 1)
-    local p = view:p()
-    view.cursors = { view:make_cursor(0, 0) }
-    view:set_mark()
-    p = view:p()
-    p.line = lc - 1
-    p.col = last
-    view:_set_goal_col(last)
+	local lc = view:line_count()
+	local last = view:content_len(lc - 1)
+	local p = view:p()
+	view.cursors = { view:make_cursor(0, 0) }
+	view:set_mark()
+	p = view:p()
+	p.line = lc - 1
+	p.col = last
+	view:_set_goal_col(last)
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -2613,14 +2605,14 @@ end
 --- textobject name resolvable via View:_textobject_fn. The final
 --- pseudo-unit "whole-buffer" is handled inline (it has no textobject fn).
 local EXPAND_TEXTOBJECT_LADDER = {
-    "word",
-    "bigword",
-    "subsentence",
-    "sentence",
-    "line",
-    "paragraph",
-    "sexp",
-    "buffer",
+	"word",
+	"bigword",
+	"subsentence",
+	"sentence",
+	"line",
+	"paragraph",
+	"sexp",
+	"buffer",
 }
 
 --- Compute the byte window covering the cursor's current position or
@@ -2633,21 +2625,21 @@ local EXPAND_TEXTOBJECT_LADDER = {
 ---@return integer sb
 ---@return integer eb
 local function expand_byte_window(view, c)
-    if c.anchor_line ~= nil then
-        local sl, sc, el, ec = view:selection_ranges_one(c)
-        ---@cast sl integer
-        ---@cast sc integer
-        ---@cast el integer
-        ---@cast ec integer
-        local sb = view:line_col_byte_offset(sl, sc)
-        local eb = view:line_col_byte_offset(el, ec)
-        if eb <= sb then
-            eb = sb + 1
-        end
-        return sb, eb
-    end
-    local sb = view:cursor_byte_offset(c)
-    return sb, sb + 1
+	if c.anchor_line ~= nil then
+		local sl, sc, el, ec = view:selection_ranges_one(c)
+		---@cast sl integer
+		---@cast sc integer
+		---@cast el integer
+		---@cast ec integer
+		local sb = view:line_col_byte_offset(sl, sc)
+		local eb = view:line_col_byte_offset(el, ec)
+		if eb <= sb then
+			eb = sb + 1
+		end
+		return sb, eb
+	end
+	local sb = view:cursor_byte_offset(c)
+	return sb, sb + 1
 end
 
 --- Acquire a FRESH tree-sitter root for this invocation (see
@@ -2659,16 +2651,16 @@ end
 ---@param view View
 ---@return any|nil root
 local function expand_tree_root(view)
-    local tree = view:hl_tree()
-    if tree == nil then
-        return nil
-    end
-    local ts = require("cursed.ts")
-    local root = tree:root()
-    if ts.node_is_null(root) then
-        return nil
-    end
-    return root
+	local tree = view:hl_tree()
+	if tree == nil then
+		return nil
+	end
+	local ts = require("cursed.ts")
+	local root = tree:root()
+	if ts.node_is_null(root) then
+		return nil
+	end
+	return root
 end
 
 --- Select a tree-sitter node's byte range on a cursor, remember its
@@ -2681,21 +2673,21 @@ end
 ---@param node any TSNode (live, from this invocation's tree)
 ---@return boolean ok false if node is null
 local function expand_select_node(view, c, ts_mod, node)
-    if node == nil or ts_mod.node_is_null(node) then
-        return false
-    end
-    local sb, eb = ts_mod.node_byte_range(node)
-    local sl, sc = view:byte_to_line_col(sb)
-    local el, ec = view:byte_to_line_col(eb)
-    view:_apply_expand_selection(c, sl, sc, el, ec)
-    -- A tree-sitter node isn't a named textobject: clear the drag
-    -- attribution so a drag from a tree-shaped expand selection
-    -- falls back to char-by-char instead of bounding over a stale
-    -- textobject from the rung below this node.
-    c._last_textobject = nil
-    c._expand.last_sb = sb
-    c._expand.last_eb = eb
-    return true
+	if node == nil or ts_mod.node_is_null(node) then
+		return false
+	end
+	local sb, eb = ts_mod.node_byte_range(node)
+	local sl, sc = view:byte_to_line_col(sb)
+	local el, ec = view:byte_to_line_col(eb)
+	view:_apply_expand_selection(c, sl, sc, el, ec)
+	-- A tree-sitter node isn't a named textobject: clear the drag
+	-- attribution so a drag from a tree-shaped expand selection
+	-- falls back to char-by-char instead of bounding over a stale
+	-- textobject from the rung below this node.
+	c._last_textobject = nil
+	c._expand.last_sb = sb
+	c._expand.last_eb = eb
+	return true
 end
 
 --- Reset and re-seed the per-cursor expand-region state. Called on the
@@ -2709,36 +2701,36 @@ end
 ---@param c Cursor
 ---@param use_tree boolean
 local function expand_region_seed(view, c, use_tree)
-    if use_tree then
-        local root = expand_tree_root(view)
-        if root == nil then
-            return
-        end
-        local ts = require("cursed.ts")
-        local sb, eb = expand_byte_window(view, c)
-        local node = ts.smallest_enclosing_node(root, sb, eb)
-        if ts.node_is_null(node) then
-            return
-        end
-        local nsb, neb = ts.node_byte_range(node)
-        -- seed_byte is the point we GREW outward from; shrink-region
-        -- descends back toward it (the deepest descendant of the
-        -- current node containing this byte). Use the cursor's byte for
-        -- a zero-width cursor, or the selection START for an existing
-        -- selection (so shrinking a mark_word selection heads back to
-        -- the word's start, not the cursor at its end).
-        local seed_byte = sb
-        c._expand = { mode = "tree", last_sb = nsb, last_eb = neb, seed_byte = seed_byte }
-    else
-        -- Textobject ladder: a no-selection cursor / fresh invocation
-        -- starts at the smallest rung; expand_region_apply advances.
-        -- seed_line/seed_col pin the point we grew from so shrink can
-        -- re-resolve smaller rungs from the SAME position (the cursor
-        -- moves to the selection end during expand, so the current
-        -- cursor position can't drive shrink).
-        local line, col = c.line, c.col
-        c._expand = { mode = "textobject", index = 0, seed_line = line, seed_col = col }
-    end
+	if use_tree then
+		local root = expand_tree_root(view)
+		if root == nil then
+			return
+		end
+		local ts = require("cursed.ts")
+		local sb, eb = expand_byte_window(view, c)
+		local node = ts.smallest_enclosing_node(root, sb, eb)
+		if ts.node_is_null(node) then
+			return
+		end
+		local nsb, neb = ts.node_byte_range(node)
+		-- seed_byte is the point we GREW outward from; shrink-region
+		-- descends back toward it (the deepest descendant of the
+		-- current node containing this byte). Use the cursor's byte for
+		-- a zero-width cursor, or the selection START for an existing
+		-- selection (so shrinking a mark_word selection heads back to
+		-- the word's start, not the cursor at its end).
+		local seed_byte = sb
+		c._expand = { mode = "tree", last_sb = nsb, last_eb = neb, seed_byte = seed_byte }
+	else
+		-- Textobject ladder: a no-selection cursor / fresh invocation
+		-- starts at the smallest rung; expand_region_apply advances.
+		-- seed_line/seed_col pin the point we grew from so shrink can
+		-- re-resolve smaller rungs from the SAME position (the cursor
+		-- moves to the selection end during expand, so the current
+		-- cursor position can't drive shrink).
+		local line, col = c.line, c.col
+		c._expand = { mode = "textobject", index = 0, seed_line = line, seed_col = col }
+	end
 end
 
 --- Apply the expand-region selection for a cursor at its current
@@ -2747,69 +2739,69 @@ end
 ---@param c Cursor
 ---@return boolean selected false if there is no further unit to expand to
 local function expand_region_apply(view, c)
-    local st = c._expand
-    if st == nil then
-        return false
-    end
-    if st.mode == "tree" then
-        local ts = require("cursed.ts")
-        -- Re-acquire a fresh tree each call (the cached node is NOT
-        -- live — TSNode embeds a TSTree* that dangles once the prior
-        -- call's RAII Tree was GC'd). Re-resolve by byte range.
-        local root = expand_tree_root(view)
-        if root == nil then
-            return false
-        end
-        local node = ts.smallest_enclosing_node(root, st.last_sb, st.last_eb)
-        return expand_select_node(view, c, ts, node)
-    else
-        -- textobject: st.index points at the NEXT ladder unit to try.
-        local line, col = c.line, c.col
-        for i = st.index + 1, #EXPAND_TEXTOBJECT_LADDER do
-            local name = EXPAND_TEXTOBJECT_LADDER[i]
-            local fn = view:_textobject_fn(name)
-            if fn ~= nil then
-                local sl, sc, el, ec = fn(view, line, col, nil)
-                if sl ~= nil then
-                    ---@cast sc integer
-                    ---@cast el integer
-                    ---@cast ec integer
-                    view:_apply_expand_selection(c, sl, sc, el, ec)
-                    st.index = i
-                    -- Attribution: this selection is a `name` textobject
-                    -- unit, so a drag bounds over adjacent `name` units.
-                    c._last_textobject = name
-                    return true
-                end
-            end
-        end
-        -- Past the top rung (`buffer`, which selects the whole
-        -- file). If a tree-sitter parse tree is available, transition
-        -- to the tree path so further widens ascend parse-tree nodes
-        -- above the whole-buffer node (the root). If no tree, there's
-        -- nothing larger: reselect the buffer and report ceiling.
-        local root = expand_tree_root(view)
-        if root ~= nil then
-            local ts = require("cursed.ts")
-            local sb, eb = expand_byte_window(view, c)
-            local node = ts.smallest_enclosing_node(root, sb, eb)
-            if not ts.node_is_null(node) then
-                local nsb, neb = ts.node_byte_range(node)
-                st.mode = "tree"
-                st.last_sb = nsb
-                st.last_eb = neb
-                st.seed_byte = sb
-                return expand_select_node(view, c, ts, node)
-            end
-        end
-        local lc = view:line_count()
-        local last = view:content_len(lc - 1)
-        view:_apply_expand_selection(c, 0, 0, lc - 1, last)
-        st.index = #EXPAND_TEXTOBJECT_LADDER + 1
-        -- Whole-buffer fallback: the "buffer" textobject (top rung).
-        c._last_textobject = "buffer"
-        return true
-    end
+	local st = c._expand
+	if st == nil then
+		return false
+	end
+	if st.mode == "tree" then
+		local ts = require("cursed.ts")
+		-- Re-acquire a fresh tree each call (the cached node is NOT
+		-- live — TSNode embeds a TSTree* that dangles once the prior
+		-- call's RAII Tree was GC'd). Re-resolve by byte range.
+		local root = expand_tree_root(view)
+		if root == nil then
+			return false
+		end
+		local node = ts.smallest_enclosing_node(root, st.last_sb, st.last_eb)
+		return expand_select_node(view, c, ts, node)
+	else
+		-- textobject: st.index points at the NEXT ladder unit to try.
+		local line, col = c.line, c.col
+		for i = st.index + 1, #EXPAND_TEXTOBJECT_LADDER do
+			local name = EXPAND_TEXTOBJECT_LADDER[i]
+			local fn = view:_textobject_fn(name)
+			if fn ~= nil then
+				local sl, sc, el, ec = fn(view, line, col, nil)
+				if sl ~= nil then
+					---@cast sc integer
+					---@cast el integer
+					---@cast ec integer
+					view:_apply_expand_selection(c, sl, sc, el, ec)
+					st.index = i
+					-- Attribution: this selection is a `name` textobject
+					-- unit, so a drag bounds over adjacent `name` units.
+					c._last_textobject = name
+					return true
+				end
+			end
+		end
+		-- Past the top rung (`buffer`, which selects the whole
+		-- file). If a tree-sitter parse tree is available, transition
+		-- to the tree path so further widens ascend parse-tree nodes
+		-- above the whole-buffer node (the root). If no tree, there's
+		-- nothing larger: reselect the buffer and report ceiling.
+		local root = expand_tree_root(view)
+		if root ~= nil then
+			local ts = require("cursed.ts")
+			local sb, eb = expand_byte_window(view, c)
+			local node = ts.smallest_enclosing_node(root, sb, eb)
+			if not ts.node_is_null(node) then
+				local nsb, neb = ts.node_byte_range(node)
+				st.mode = "tree"
+				st.last_sb = nsb
+				st.last_eb = neb
+				st.seed_byte = sb
+				return expand_select_node(view, c, ts, node)
+			end
+		end
+		local lc = view:line_count()
+		local last = view:content_len(lc - 1)
+		view:_apply_expand_selection(c, 0, 0, lc - 1, last)
+		st.index = #EXPAND_TEXTOBJECT_LADDER + 1
+		-- Whole-buffer fallback: the "buffer" textobject (top rung).
+		c._last_textobject = "buffer"
+		return true
+	end
 end
 
 --- Widen the per-cursor progression by one step and apply it.
@@ -2818,46 +2810,46 @@ end
 ---@param view View
 ---@param c Cursor
 local function expand_region_widen(view, c)
-    local st = c._expand
-    if st == nil then
-        return false
-    end
-    if st.mode == "tree" then
-        local ts = require("cursed.ts")
-        -- Re-acquire a fresh tree (the cached node is NOT live; see
-        -- expand_region_apply). Re-resolve the last-selected node by its
-        -- byte range, then ascend to its parent and select the parent.
-        local root = expand_tree_root(view)
-        if root == nil then
-            return false
-        end
-        local node = ts.smallest_enclosing_node(root, st.last_sb, st.last_eb)
-        if ts.node_is_null(node) then
-            return false
-        end
-        -- Ascend past any ancestors that share the SAME byte range as
-        -- the re-resolved node (tree-sitter frequently wraps a node in
-        -- a parent of identical span, e.g. assignment_statement /
-        -- assignment, program / first stmt). Without this, re-resolving
-        -- an identical-range parent returns the inner node again,
-        -- node_parent returns the same-range parent, and we'd loop.
-        -- Stop at the first ancestor STRICTLY larger than the current
-        -- selection — that's the next expand step.
-        local cur_sb = st.last_sb
-        local cur_eb = st.last_eb
-        local parent = ts.node_parent(node)
-        while parent ~= nil and not ts.node_is_null(parent) do
-            local psb, peb = ts.node_byte_range(parent)
-            if psb < cur_sb or peb > cur_eb then
-                return expand_select_node(view, c, ts, parent)
-            end
-            -- Same range: keep climbing to find a strictly larger ancestor.
-            parent = ts.node_parent(parent)
-        end
-        return false
-    else
-        return expand_region_apply(view, c)
-    end
+	local st = c._expand
+	if st == nil then
+		return false
+	end
+	if st.mode == "tree" then
+		local ts = require("cursed.ts")
+		-- Re-acquire a fresh tree (the cached node is NOT live; see
+		-- expand_region_apply). Re-resolve the last-selected node by its
+		-- byte range, then ascend to its parent and select the parent.
+		local root = expand_tree_root(view)
+		if root == nil then
+			return false
+		end
+		local node = ts.smallest_enclosing_node(root, st.last_sb, st.last_eb)
+		if ts.node_is_null(node) then
+			return false
+		end
+		-- Ascend past any ancestors that share the SAME byte range as
+		-- the re-resolved node (tree-sitter frequently wraps a node in
+		-- a parent of identical span, e.g. assignment_statement /
+		-- assignment, program / first stmt). Without this, re-resolving
+		-- an identical-range parent returns the inner node again,
+		-- node_parent returns the same-range parent, and we'd loop.
+		-- Stop at the first ancestor STRICTLY larger than the current
+		-- selection — that's the next expand step.
+		local cur_sb = st.last_sb
+		local cur_eb = st.last_eb
+		local parent = ts.node_parent(node)
+		while parent ~= nil and not ts.node_is_null(parent) do
+			local psb, peb = ts.node_byte_range(parent)
+			if psb < cur_sb or peb > cur_eb then
+				return expand_select_node(view, c, ts, parent)
+			end
+			-- Same range: keep climbing to find a strictly larger ancestor.
+			parent = ts.node_parent(parent)
+		end
+		return false
+	else
+		return expand_region_apply(view, c)
+	end
 end
 
 --- Shrink the per-cursor progression by one step and apply it (the
@@ -2882,155 +2874,154 @@ end
 ---@param c Cursor
 ---@return boolean shrunk true if a smaller unit was selected
 local function expand_region_shrink(view, c)
-    local st = c._expand
-    if st == nil then
-        return false
-    end
-    if st.mode == "tree" then
-        local ts = require("cursed.ts")
-        local root = expand_tree_root(view)
-        if root == nil then
-            return false
-        end
-        local node = ts.smallest_enclosing_node(root, st.last_sb, st.last_eb)
-        if ts.node_is_null(node) then
-            return false
-        end
-        local seed_sb = st.seed_byte
-        local seed_eb = seed_sb + 1
-        -- Descend to the deepest descendant of `node` that contains the
-        -- seed byte. Because we call descendant_for_byte_range ON node
-        -- (not root), the result is strictly within node's subtree. This
-        -- is the natural inverse of expand's node_parent ascent.
-        local desc = ts.node_descendant_for_byte_range(node, seed_sb, seed_eb)
-        if ts.node_is_null(desc) then
-            return false
-        end
-        local csb, ceb = ts.node_byte_range(desc)
-        -- If the deepest seed-containing descendant is STRICTLY smaller
-        -- than the current selection, shrink to it. (A descendant with
-        -- an identical span to its parent — common in tree-sitter
-        -- wrappers — has been skipped by descendant_for_byte_range:
-        -- it returns the deepest, which is never a same-range wrapper.)
-        if csb > st.last_sb or ceb < st.last_eb then
-            return expand_select_node(view, c, ts, desc)
-        end
-        -- No strictly-smaller tree descendant contains the seed.
-        -- This happens in two cases:
-        --  (a) we're at the ROOT (whole-buffer node), reached by widening
-        --      past `buffer` via the textobject->tree handoff; OR
-        --  (b) we're at an ordinary tree leaf, reached by descending
-        --      within the tree after the textobject->tree handoff.
-        -- Only in case (a) can we hand shrink back to the textobject
-        -- ladder (descending buffer -> sexp -> ... -> word); in case (b)
-        -- there's no larger-than-leaf textobject rung the cursor's seed
-        -- point would resolve to, so we collapse straight to a cursor.
-        local is_whole_buffer = st.last_sb == 0
-        if is_whole_buffer then
-            local seed_line, seed_col = view:byte_to_line_col(st.seed_byte)
-            st.mode = "textobject"
-            st.index = #EXPAND_TEXTOBJECT_LADDER
-            st.seed_line = seed_line
-            st.seed_col = seed_col
-            -- Re-select the top textobject rung from the seed so the
-            -- transition lands on a concrete selection (buffer == whole
-            -- file); the next shrink steps down the ladder.
-            local top_name = EXPAND_TEXTOBJECT_LADDER[#EXPAND_TEXTOBJECT_LADDER]
-            local fn = view:_textobject_fn(top_name)
-            if fn ~= nil then
-                local sl, sc, el, ec = fn(view, seed_line, seed_col, nil)
-                if sl ~= nil then
-                    ---@cast sc integer
-                    ---@cast el integer
-                    ---@cast ec integer
-                    view:_apply_expand_selection(c, sl, sc, el, ec)
-                    -- Attribution: top rung (`buffer`).
-                    c._last_textobject = top_name
-                    return true
-                end
-            end
-        end
-        -- Collapse to the seed cursor (case (b), or the top-rung
-        -- textobject failed to resolve).
-        local sl, sc = view:byte_to_line_col(st.seed_byte)
-        c.line = sl
-        c.col = sc
-        c.goal_col = sc
-        c.anchor_line = nil
-        c.anchor_col = nil
-        c._last_textobject = nil
-        c._expand = nil
-        return false
-    else
-        -- textobject: walk the ladder DOWN from the current index.
-        if st.index == nil or st.index <= 1 then
-            -- Below the smallest rung: collapse to a cursor at the seed
-            -- and clear the progression.
-            c.line = st.seed_line
-            c.col = st.seed_col
-            c.goal_col = st.seed_col
-            c.anchor_line = nil
-            c.anchor_col = nil
-            c._last_textobject = nil
-            c._expand = nil
-            return false
-        end
-        local target = st.index - 1
-        local line, col = st.seed_line, st.seed_col
-        for i = target, 1, -1 do
-            local name = EXPAND_TEXTOBJECT_LADDER[i]
-            local fn = view:_textobject_fn(name)
-            if fn ~= nil then
-                local sl, sc, el, ec = fn(view, line, col, nil)
-                if sl ~= nil then
-                    ---@cast sc integer
-                    ---@cast el integer
-                    ---@cast ec integer
-                    view:_apply_expand_selection(c, sl, sc, el, ec)
-                    st.index = i
-                    -- Attribution: `name` textobject rung.
-                    c._last_textobject = name
-                    return true
-                end
-            end
-        end
-        -- No smaller rung resolved: collapse to a cursor at the seed.
-        c.line = st.seed_line
-        c.col = st.seed_col
-        c.goal_col = st.seed_col
-        c.anchor_line = nil
-        c.anchor_col = nil
-        c._last_textobject = nil
-        c._expand = nil
-        return false
-    end
+	local st = c._expand
+	if st == nil then
+		return false
+	end
+	if st.mode == "tree" then
+		local ts = require("cursed.ts")
+		local root = expand_tree_root(view)
+		if root == nil then
+			return false
+		end
+		local node = ts.smallest_enclosing_node(root, st.last_sb, st.last_eb)
+		if ts.node_is_null(node) then
+			return false
+		end
+		local seed_sb = st.seed_byte
+		local seed_eb = seed_sb + 1
+		-- Descend to the deepest descendant of `node` that contains the
+		-- seed byte. Because we call descendant_for_byte_range ON node
+		-- (not root), the result is strictly within node's subtree. This
+		-- is the natural inverse of expand's node_parent ascent.
+		local desc = ts.node_descendant_for_byte_range(node, seed_sb, seed_eb)
+		if ts.node_is_null(desc) then
+			return false
+		end
+		local csb, ceb = ts.node_byte_range(desc)
+		-- If the deepest seed-containing descendant is STRICTLY smaller
+		-- than the current selection, shrink to it. (A descendant with
+		-- an identical span to its parent — common in tree-sitter
+		-- wrappers — has been skipped by descendant_for_byte_range:
+		-- it returns the deepest, which is never a same-range wrapper.)
+		if csb > st.last_sb or ceb < st.last_eb then
+			return expand_select_node(view, c, ts, desc)
+		end
+		-- No strictly-smaller tree descendant contains the seed.
+		-- This happens in two cases:
+		--  (a) we're at the ROOT (whole-buffer node), reached by widening
+		--      past `buffer` via the textobject->tree handoff; OR
+		--  (b) we're at an ordinary tree leaf, reached by descending
+		--      within the tree after the textobject->tree handoff.
+		-- Only in case (a) can we hand shrink back to the textobject
+		-- ladder (descending buffer -> sexp -> ... -> word); in case (b)
+		-- there's no larger-than-leaf textobject rung the cursor's seed
+		-- point would resolve to, so we collapse straight to a cursor.
+		local is_whole_buffer = st.last_sb == 0
+		if is_whole_buffer then
+			local seed_line, seed_col = view:byte_to_line_col(st.seed_byte)
+			st.mode = "textobject"
+			st.index = #EXPAND_TEXTOBJECT_LADDER
+			st.seed_line = seed_line
+			st.seed_col = seed_col
+			-- Re-select the top textobject rung from the seed so the
+			-- transition lands on a concrete selection (buffer == whole
+			-- file); the next shrink steps down the ladder.
+			local top_name = EXPAND_TEXTOBJECT_LADDER[#EXPAND_TEXTOBJECT_LADDER]
+			local fn = view:_textobject_fn(top_name)
+			if fn ~= nil then
+				local sl, sc, el, ec = fn(view, seed_line, seed_col, nil)
+				if sl ~= nil then
+					---@cast sc integer
+					---@cast el integer
+					---@cast ec integer
+					view:_apply_expand_selection(c, sl, sc, el, ec)
+					-- Attribution: top rung (`buffer`).
+					c._last_textobject = top_name
+					return true
+				end
+			end
+		end
+		-- Collapse to the seed cursor (case (b), or the top-rung
+		-- textobject failed to resolve).
+		local sl, sc = view:byte_to_line_col(st.seed_byte)
+		c.line = sl
+		c.col = sc
+		c.goal_col = sc
+		c.anchor_line = nil
+		c.anchor_col = nil
+		c._last_textobject = nil
+		c._expand = nil
+		return false
+	else
+		-- textobject: walk the ladder DOWN from the current index.
+		if st.index == nil or st.index <= 1 then
+			-- Below the smallest rung: collapse to a cursor at the seed
+			-- and clear the progression.
+			c.line = st.seed_line
+			c.col = st.seed_col
+			c.goal_col = st.seed_col
+			c.anchor_line = nil
+			c.anchor_col = nil
+			c._last_textobject = nil
+			c._expand = nil
+			return false
+		end
+		local target = st.index - 1
+		local line, col = st.seed_line, st.seed_col
+		for i = target, 1, -1 do
+			local name = EXPAND_TEXTOBJECT_LADDER[i]
+			local fn = view:_textobject_fn(name)
+			if fn ~= nil then
+				local sl, sc, el, ec = fn(view, line, col, nil)
+				if sl ~= nil then
+					---@cast sc integer
+					---@cast el integer
+					---@cast ec integer
+					view:_apply_expand_selection(c, sl, sc, el, ec)
+					st.index = i
+					-- Attribution: `name` textobject rung.
+					c._last_textobject = name
+					return true
+				end
+			end
+		end
+		-- No smaller rung resolved: collapse to a cursor at the seed.
+		c.line = st.seed_line
+		c.col = st.seed_col
+		c.goal_col = st.seed_col
+		c.anchor_line = nil
+		c.anchor_col = nil
+		c._last_textobject = nil
+		c._expand = nil
+		return false
+	end
 end
 
 --- Tree-sitter path driver: seed from the current cursor, then on
 --- repeats ascend the parse tree. shrink_region (bound to alt-") is the
 --- symmetric inverse.
 commands.expand_region = function(view, editor)
-    local tree = view:hl_tree()
-    local use_tree = tree ~= nil
-    local prev_was_expand = editor._last_command == "expand_region"
-        or editor._last_command == "shrink_region"
-    for _, c in ipairs(view.cursors) do
-        local st = c._expand
-        local seed = st == nil or st.mode ~= (use_tree and "tree" or "textobject")
-        if prev_was_expand and not seed then
-            -- Continue widening.
-            if not expand_region_widen(view, c) then
-                editor.status_message = "already at the largest unit"
-            end
-        else
-            -- Fresh seed: drop any prior selection progression and start
-            -- from the smallest unit around the cursor.
-            expand_region_seed(view, c, use_tree)
-            if not expand_region_apply(view, c) then
-                editor.status_message = "nothing to expand here"
-            end
-        end
-    end
+	local tree = view:hl_tree()
+	local use_tree = tree ~= nil
+	local prev_was_expand = editor._last_command == "expand_region" or editor._last_command == "shrink_region"
+	for _, c in ipairs(view.cursors) do
+		local st = c._expand
+		local seed = st == nil or st.mode ~= (use_tree and "tree" or "textobject")
+		if prev_was_expand and not seed then
+			-- Continue widening.
+			if not expand_region_widen(view, c) then
+				editor.status_message = "already at the largest unit"
+			end
+		else
+			-- Fresh seed: drop any prior selection progression and start
+			-- from the smallest unit around the cursor.
+			expand_region_seed(view, c, use_tree)
+			if not expand_region_apply(view, c) then
+				editor.status_message = "nothing to expand here"
+			end
+		end
+	end
 end
 
 --- Shrink-region: the symmetric inverse of expand-region. Each
@@ -3041,17 +3032,16 @@ end
 --- a no-op (nothing to shrink). Collapsing past the smallest unit drops
 --- the selection entirely (cursor returns to the seed point).
 commands.shrink_region = function(view, editor)
-    local prev_was_expand = editor._last_command == "expand_region"
-        or editor._last_command == "shrink_region"
-    if not prev_was_expand then
-        editor.status_message = "nothing to shrink"
-        return
-    end
-    for _, c in ipairs(view.cursors) do
-        if not expand_region_shrink(view, c) then
-            editor.status_message = "already at the smallest unit"
-        end
-    end
+	local prev_was_expand = editor._last_command == "expand_region" or editor._last_command == "shrink_region"
+	if not prev_was_expand then
+		editor.status_message = "nothing to shrink"
+		return
+	end
+	for _, c in ipairs(view.cursors) do
+		if not expand_region_shrink(view, c) then
+			editor.status_message = "already at the smallest unit"
+		end
+	end
 end
 
 --- Kill the active selection(s), pushing the deleted text onto the
@@ -3059,21 +3049,21 @@ end
 --- group, each region pushed to the kill ring. If no region is
 --- active, this is a no-op. Emacs `kill-region` (C-w).
 commands.kill_region = function(view, editor)
-    if not view:has_selection() then
-        return
-    end
-    local parts = {}
-    for sl, sc, el, ec in view:selection_ranges() do
-        ---@cast sl integer
-        ---@cast sc integer
-        ---@cast el integer
-        ---@cast ec integer
-        parts[#parts + 1] = view:text_between(sl, sc, el, ec)
-    end
-    view:delete_selection()
-    for _, text in ipairs(parts) do
-        editor:push_kill(text)
-    end
+	if not view:has_selection() then
+		return
+	end
+	local parts = {}
+	for sl, sc, el, ec in view:selection_ranges() do
+		---@cast sl integer
+		---@cast sc integer
+		---@cast el integer
+		---@cast ec integer
+		parts[#parts + 1] = view:text_between(sl, sc, el, ec)
+	end
+	view:delete_selection()
+	for _, text in ipairs(parts) do
+		editor:push_kill(text)
+	end
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -3093,46 +3083,46 @@ end
 --- Kill the current sentence region [`sl,sc`, `el,ec`) as one undo
 --- group, pushing the deleted text onto the kill ring.
 local function kill_sentence_region(view, editor, sl, sc, el, ec)
-    local count = view:chars_between(sl, sc, el, ec)
-    if count <= 0 then
-        return
-    end
-    local killed = view:text_between(sl, sc, el, ec)
-    view:p().line = sl
-    view:p().col = sc
-    view:_set_goal_col(sc)
-    view:delete_char(count)
-    editor:push_kill(killed)
+	local count = view:chars_between(sl, sc, el, ec)
+	if count <= 0 then
+		return
+	end
+	local killed = view:text_between(sl, sc, el, ec)
+	view:p().line = sl
+	view:p().col = sc
+	view:_set_goal_col(sc)
+	view:delete_char(count)
+	editor:push_kill(killed)
 end
 
 --- Kill from point to the end of the current sentence.
 --- Emacs `kill-sentence` (M-k). Universal arg repeats.
 commands.kill_sentence = function(view, editor, ...)
-    local n = repeat_count(...)
-    local p = view:p()
-    local fn = view:_textobject_fn("sentence")
-    for _ = 1, math.abs(n) do
-        local _, _, el, ec = fn(view, p.line, p.col, 1)
-        if not el then
-            return
-        end
-        kill_sentence_region(view, editor, p.line, p.col, el, ec)
-    end
+	local n = repeat_count(...)
+	local p = view:p()
+	local fn = view:_textobject_fn("sentence")
+	for _ = 1, math.abs(n) do
+		local _, _, el, ec = fn(view, p.line, p.col, 1)
+		if not el then
+			return
+		end
+		kill_sentence_region(view, editor, p.line, p.col, el, ec)
+	end
 end
 
 --- Kill from point back to the start of the current sentence.
 --- Emacs `backward-kill-sentence` (C-M-k / C-x DEL). Universal arg repeats.
 commands.backward_kill_sentence = function(view, editor, ...)
-    local n = repeat_count(...)
-    local p = view:p()
-    local fn = view:_textobject_fn("sentence")
-    for _ = 1, math.abs(n) do
-        local sl, sc = fn(view, p.line, p.col, -1)
-        if not sl then
-            return
-        end
-        kill_sentence_region(view, editor, sl, sc, p.line, p.col)
-    end
+	local n = repeat_count(...)
+	local p = view:p()
+	local fn = view:_textobject_fn("sentence")
+	for _ = 1, math.abs(n) do
+		local sl, sc = fn(view, p.line, p.col, -1)
+		if not sl then
+			return
+		end
+		kill_sentence_region(view, editor, sl, sc, p.line, p.col)
+	end
 end
 
 --- Copy the sentence containing point (from the end of the previous
@@ -3142,20 +3132,20 @@ end
 --- (M-w). Multi-cursor: operates on the primary cursor.
 --- Emacs idiom for the same effect is `M-x mark-sentence` then M-w.
 commands.copy_sentence = function(view, editor)
-    local p = view:p()
-    local fn = view:_textobject_fn("sentence")
-    local sl, sc, el, ec = fn(view, p.line, p.col, nil)
-    if not sl then
-        editor.status_message = "empty sentence"
-        return
-    end
-    local text = view:text_between(sl, sc, el, ec)
-    if #text == 0 then
-        editor.status_message = "empty sentence"
-        return
-    end
-    editor:push_kill(text)
-    editor.status_message = "sentence copied"
+	local p = view:p()
+	local fn = view:_textobject_fn("sentence")
+	local sl, sc, el, ec = fn(view, p.line, p.col, nil)
+	if not sl then
+		editor.status_message = "empty sentence"
+		return
+	end
+	local text = view:text_between(sl, sc, el, ec)
+	if #text == 0 then
+		editor.status_message = "empty sentence"
+		return
+	end
+	editor:push_kill(text)
+	editor.status_message = "sentence copied"
 end
 
 --- Set the mark at the end of the current sentence and move point to
@@ -3163,8 +3153,8 @@ end
 --- Emacs `mark-sentence` (M-x). No default key; reachable via M-x
 --- so the selection can then be killed (C-w) or copied (M-w).
 commands.mark_sentence = function(view, _editor)
-    local p = view:p()
-    view:select_range("sentence", p.line, p.col)
+	local p = view:p()
+	view:select_range("sentence", p.line, p.col)
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -3177,48 +3167,48 @@ end
 --- the kill ring, merging with prior consecutive kills. Emacs
 --- `kill-whole-line` (C-S-backspace; bound here to C-x C-k C-k).
 commands.kill_whole_line = function(view, editor, ...)
-    local n = repeat_count(...)
-    local count = math.abs(n)
-    local killed_parts = {}
-    for _ = 1, count do
-        local line = view:p().line
-        if line >= view:line_count() then
-            break
-        end
-        local content_len = view:content_len(line)
-        local text = view:text_between(line, 0, line, content_len)
-        local at_last = line == view:line_count() - 1
-        if at_last then
-            -- Final line: kill the content but not a phantom newline.
-            if content_len > 0 then
-                killed_parts[#killed_parts + 1] = text
-                view:p().col = 0
-                view:delete_char(content_len)
-            end
-        else
-            killed_parts[#killed_parts + 1] = text .. "\n"
-            -- Move to col 0 then delete forward across the line + newline.
-            view:p().col = 0
-            view:delete_char(content_len + 1)
-        end
-        view:_set_goal_col(view:p().col)
-    end
-    for _, t in ipairs(killed_parts) do
-        editor:push_kill(t)
-    end
+	local n = repeat_count(...)
+	local count = math.abs(n)
+	local killed_parts = {}
+	for _ = 1, count do
+		local line = view:p().line
+		if line >= view:line_count() then
+			break
+		end
+		local content_len = view:content_len(line)
+		local text = view:text_between(line, 0, line, content_len)
+		local at_last = line == view:line_count() - 1
+		if at_last then
+			-- Final line: kill the content but not a phantom newline.
+			if content_len > 0 then
+				killed_parts[#killed_parts + 1] = text
+				view:p().col = 0
+				view:delete_char(content_len)
+			end
+		else
+			killed_parts[#killed_parts + 1] = text .. "\n"
+			-- Move to col 0 then delete forward across the line + newline.
+			view:p().col = 0
+			view:delete_char(content_len + 1)
+		end
+		view:_set_goal_col(view:p().col)
+	end
+	for _, t in ipairs(killed_parts) do
+		editor:push_kill(t)
+	end
 end
 
 --- Kill from point to the end of the current paragraph.
 --- Composes forward_paragraph with kill_region. Emacs idiom (no
 --- standard binding; bound to C-x M-k).
 commands.kill_paragraph = function(view, editor, ...)
-    local n = repeat_count(...)
-    local count = math.abs(n)
-    view:set_mark()
-    for _ = 1, count do
-        commands.forward_paragraph(view, editor, true, 1)
-    end
-    commands.kill_region(view, editor)
+	local n = repeat_count(...)
+	local count = math.abs(n)
+	view:set_mark()
+	for _ = 1, count do
+		commands.forward_paragraph(view, editor, true, 1)
+	end
+	commands.kill_region(view, editor)
 end
 
 --- Join the current line with the previous one, deleting the
@@ -3230,49 +3220,49 @@ end
 --- (forward). Operates on the primary cursor as a single edit group
 --- (Emacs `delete-indentation` is single-cursor).
 commands.delete_indentation = function(view, _editor, ...)
-    local flag = ...
-    local forward = flag == false
-    local p = view:p()
-    local line = p.line
-    local target
-    if forward then
-        if line >= view:line_count() - 1 then
-            return
-        end
-        target = line + 1
-    else
-        if line <= 0 then
-            return
-        end
-        target = line - 1
-    end
-    local buf = view.buffer
-    -- Compute the deletion point and count in PRE-edit coordinates,
-    -- then perform a single direct buffer mutation as one edit group
-    -- (no nested batch_edit / each_cursor).
-    local del_line, del_col, del_n, new_line, new_col
-    if forward then
-        local cl = view:content_len(line)
-        local ttext = buf:line_text(target)
-        local lead = ttext:match("^%s*") or ""
-        del_line, del_col = line, cl
-        del_n = 1 + #lead
-        new_line, new_col = line, cl
-    else
-        local tlen = view:content_len(target)
-        local ctext = buf:line_text(line)
-        local lead = ctext:match("^%s*") or ""
-        del_line, del_col = target, tlen
-        del_n = 1 + #lead
-        new_line, new_col = target, tlen
-    end
-    buf:close_edit()
-    buf:begin_edit()
-    local rl, rc = buf:delete_char(del_line, del_col, del_n)
-    buf:end_edit()
-    p.line = rl
-    p.col = rc
-    view:_set_goal_col(rc)
+	local flag = ...
+	local forward = flag == false
+	local p = view:p()
+	local line = p.line
+	local target
+	if forward then
+		if line >= view:line_count() - 1 then
+			return
+		end
+		target = line + 1
+	else
+		if line <= 0 then
+			return
+		end
+		target = line - 1
+	end
+	local buf = view.buffer
+	-- Compute the deletion point and count in PRE-edit coordinates,
+	-- then perform a single direct buffer mutation as one edit group
+	-- (no nested batch_edit / each_cursor).
+	local del_line, del_col, del_n, new_line, new_col
+	if forward then
+		local cl = view:content_len(line)
+		local ttext = buf:line_text(target)
+		local lead = ttext:match("^%s*") or ""
+		del_line, del_col = line, cl
+		del_n = 1 + #lead
+		new_line, new_col = line, cl
+	else
+		local tlen = view:content_len(target)
+		local ctext = buf:line_text(line)
+		local lead = ctext:match("^%s*") or ""
+		del_line, del_col = target, tlen
+		del_n = 1 + #lead
+		new_line, new_col = target, tlen
+	end
+	buf:close_edit()
+	buf:begin_edit()
+	local rl, rc = buf:delete_char(del_line, del_col, del_n)
+	buf:end_edit()
+	p.line = rl
+	p.col = rc
+	view:_set_goal_col(rc)
 end
 
 --- Delete all spaces and tabs around point on the current line.
@@ -3280,105 +3270,105 @@ end
 --- Multi-cursor aware: each cursor's surrounding whitespace is
 --- removed in one undo group via batch_edit.
 commands.delete_horizontal_space = function(view, _editor)
-    local buf = view.buffer
-    -- Pre-compute each cursor's whitespace span from PRE-edit state.
-    local spans = {}
-    for _, c in ipairs(view.cursors) do
-        local text = buf:line_text(c.line)
-        local len = #text
-        if len > 0 and text:byte(len) == 10 then
-            len = len - 1
-        end
-        local left = c.col
-        while left > 0 do
-            local b = text:byte(left)
-            if b ~= 32 and b ~= 9 then
-                break
-            end
-            left = left - 1
-        end
-        local right = c.col
-        while right < len do
-            local b = text:byte(right + 1)
-            if b ~= 32 and b ~= 9 then
-                break
-            end
-            right = right + 1
-        end
-        spans[c] = { left = left, right = right }
-    end
-    view:batch_edit(false, function(c)
-        local s = spans[c]
-        local del_n = s.right - s.left
-        if del_n <= 0 then
-            return c.line, c.col, c.line, c.col, { c.line, c.col }
-        end
-        local sl, sc = c.line, s.left
-        c.col = s.left
-        -- Single-line deletion (horizontal whitespace only): the
-        -- region end is (sl, sc + del_n) with no line change.
-        local el, ec = sl, sc + del_n
-        local rl, rc = buf:delete_char(sl, sc, del_n)
-        return sl, sc, rl, rc, { el, ec }
-    end)
-    view:_set_goal_col(view:p().col)
+	local buf = view.buffer
+	-- Pre-compute each cursor's whitespace span from PRE-edit state.
+	local spans = {}
+	for _, c in ipairs(view.cursors) do
+		local text = buf:line_text(c.line)
+		local len = #text
+		if len > 0 and text:byte(len) == 10 then
+			len = len - 1
+		end
+		local left = c.col
+		while left > 0 do
+			local b = text:byte(left)
+			if b ~= 32 and b ~= 9 then
+				break
+			end
+			left = left - 1
+		end
+		local right = c.col
+		while right < len do
+			local b = text:byte(right + 1)
+			if b ~= 32 and b ~= 9 then
+				break
+			end
+			right = right + 1
+		end
+		spans[c] = { left = left, right = right }
+	end
+	view:batch_edit(false, function(c)
+		local s = spans[c]
+		local del_n = s.right - s.left
+		if del_n <= 0 then
+			return c.line, c.col, c.line, c.col, { c.line, c.col }
+		end
+		local sl, sc = c.line, s.left
+		c.col = s.left
+		-- Single-line deletion (horizontal whitespace only): the
+		-- region end is (sl, sc + del_n) with no line change.
+		local el, ec = sl, sc + del_n
+		local rl, rc = buf:delete_char(sl, sc, del_n)
+		return sl, sc, rl, rc, { el, ec }
+	end)
+	view:_set_goal_col(view:p().col)
 end
 
 --- Collapse all whitespace around point to a single space.
 --- Emacs `just-one-space` (M-SPC). If universal arg is non-default,
 --- leaves N spaces instead of one. Multi-cursor aware via batch_edit.
 commands.just_one_space = function(view, _editor, ...)
-    local n = repeat_count(...)
-    local target = math.max(1, math.abs(n))
-    local buf = view.buffer
-    local spaces = string.rep(" ", target)
-    local spans = {}
-    for _, c in ipairs(view.cursors) do
-        local text = buf:line_text(c.line)
-        local len = #text
-        if len > 0 and text:byte(len) == 10 then
-            len = len - 1
-        end
-        local left = c.col
-        while left > 0 do
-            local b = text:byte(left)
-            if b ~= 32 and b ~= 9 then
-                break
-            end
-            left = left - 1
-        end
-        local right = c.col
-        while right < len do
-            local b = text:byte(right + 1)
-            if b ~= 32 and b ~= 9 then
-                break
-            end
-            right = right + 1
-        end
-        spans[c] = { left = left, right = right }
-    end
-    view:batch_edit(false, function(c)
-        local s = spans[c]
-        local del_n = s.right - s.left
-        local sl, sc = c.line, s.left
-        c.col = s.left
-        local el, ec
-        if del_n > 0 then
-            -- Single-line deletion (horizontal whitespace only).
-            el, ec = sl, sc + del_n
-            buf:delete_char(sl, sc, del_n)
-        else
-            el, ec = sl, sc
-        end
-        local rl, rc
-        if #spaces > 0 then
-            rl, rc = buf:insert_char(sl, sc, spaces)
-        else
-            rl, rc = sl, sc
-        end
-        return sl, sc, rl, rc, "replace", el, ec
-    end)
-    view:_set_goal_col(view:p().col)
+	local n = repeat_count(...)
+	local target = math.max(1, math.abs(n))
+	local buf = view.buffer
+	local spaces = string.rep(" ", target)
+	local spans = {}
+	for _, c in ipairs(view.cursors) do
+		local text = buf:line_text(c.line)
+		local len = #text
+		if len > 0 and text:byte(len) == 10 then
+			len = len - 1
+		end
+		local left = c.col
+		while left > 0 do
+			local b = text:byte(left)
+			if b ~= 32 and b ~= 9 then
+				break
+			end
+			left = left - 1
+		end
+		local right = c.col
+		while right < len do
+			local b = text:byte(right + 1)
+			if b ~= 32 and b ~= 9 then
+				break
+			end
+			right = right + 1
+		end
+		spans[c] = { left = left, right = right }
+	end
+	view:batch_edit(false, function(c)
+		local s = spans[c]
+		local del_n = s.right - s.left
+		local sl, sc = c.line, s.left
+		c.col = s.left
+		local el, ec
+		if del_n > 0 then
+			-- Single-line deletion (horizontal whitespace only).
+			el, ec = sl, sc + del_n
+			buf:delete_char(sl, sc, del_n)
+		else
+			el, ec = sl, sc
+		end
+		local rl, rc
+		if #spaces > 0 then
+			rl, rc = buf:insert_char(sl, sc, spaces)
+		else
+			rl, rc = sl, sc
+		end
+		return sl, sc, rl, rc, "replace", el, ec
+	end)
+	view:_set_goal_col(view:p().col)
 end
 
 --- Delete blank lines around the current line. If the current line is
@@ -3386,59 +3376,59 @@ end
 --- if it's non-blank, deletes any blank lines immediately after it.
 --- Emacs `delete-blank-lines` (C-x C-o).
 commands.delete_blank_lines = function(view, _editor)
-    local buf = view.buffer
-    local lc = view:line_count()
-    local function is_blank(li)
-        local t = buf:line_text(li)
-        local n = #t
-        if n == 0 then
-            return true
-        end
-        if t:byte(n) == 10 then
-            n = n - 1
-        end
-        return n == 0 or t:match("^%s*$") ~= nil
-    end
-    local line = view:p().line
-    -- Determine the range of consecutive blank lines containing `line`,
-    -- expanding upward and downward through blanks.
-    local top = line
-    while top > 0 and is_blank(top - 1) do
-        top = top - 1
-    end
-    local bottom = line
-    while bottom < lc - 1 and is_blank(bottom + 1) do
-        bottom = bottom + 1
-    end
-    local cur_blank = is_blank(line)
-    if cur_blank then
-        -- leave exactly one blank line: delete blanks (top+1..bottom)
-        if bottom > top then
-            view:p().line = top
-            view:p().col = 0
-            view:_set_goal_col(0)
-            local chars = 0
-            for li = top, bottom - 1 do
-                chars = chars + view:content_len(li) + 1 -- +1 for newline
-            end
-            if chars > 0 then
-                view:delete_char(chars)
-            end
-        end
-    else
-        -- delete blank lines immediately after this content line
-        if bottom > line then
-            view:p().col = view:content_len(line)
-            view:_set_goal_col(view:p().col)
-            local chars = 0
-            for li = line + 1, bottom do
-                chars = chars + view:content_len(li) + 1
-            end
-            if chars > 0 then
-                view:delete_char(chars)
-            end
-        end
-    end
+	local buf = view.buffer
+	local lc = view:line_count()
+	local function is_blank(li)
+		local t = buf:line_text(li)
+		local n = #t
+		if n == 0 then
+			return true
+		end
+		if t:byte(n) == 10 then
+			n = n - 1
+		end
+		return n == 0 or t:match("^%s*$") ~= nil
+	end
+	local line = view:p().line
+	-- Determine the range of consecutive blank lines containing `line`,
+	-- expanding upward and downward through blanks.
+	local top = line
+	while top > 0 and is_blank(top - 1) do
+		top = top - 1
+	end
+	local bottom = line
+	while bottom < lc - 1 and is_blank(bottom + 1) do
+		bottom = bottom + 1
+	end
+	local cur_blank = is_blank(line)
+	if cur_blank then
+		-- leave exactly one blank line: delete blanks (top+1..bottom)
+		if bottom > top then
+			view:p().line = top
+			view:p().col = 0
+			view:_set_goal_col(0)
+			local chars = 0
+			for li = top, bottom - 1 do
+				chars = chars + view:content_len(li) + 1 -- +1 for newline
+			end
+			if chars > 0 then
+				view:delete_char(chars)
+			end
+		end
+	else
+		-- delete blank lines immediately after this content line
+		if bottom > line then
+			view:p().col = view:content_len(line)
+			view:_set_goal_col(view:p().col)
+			local chars = 0
+			for li = line + 1, bottom do
+				chars = chars + view:content_len(li) + 1
+			end
+			if chars > 0 then
+				view:delete_char(chars)
+			end
+		end
+	end
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -3449,18 +3439,18 @@ end
 --- first. Useful when you want to replace a selection with the most
 --- recent kill in one step.
 commands.browse_kill_region = function(view, editor)
-    if not view:has_selection() then
-        return
-    end
-    local text = kill_ring:top()
-    if not text then
-        editor.status_message = "kill ring is empty"
-        return
-    end
-    view:replace_selections(function(_t)
-        return text
-    end)
-    kill_ring.yank_idx = 1
+	if not view:has_selection() then
+		return
+	end
+	local text = kill_ring:top()
+	if not text then
+		editor.status_message = "kill ring is empty"
+		return
+	end
+	view:replace_selections(function(_t)
+		return text
+	end)
+	kill_ring.yank_idx = 1
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -3471,50 +3461,60 @@ end
 --- one at point (or replace the selection). Emacs `browse-kill-ring`
 --- (M-x browse-kill-ring).
 commands.browse_kill_ring = function(view, editor)
-    if #kill_ring.ring == 0 then
-        editor.status_message = "kill ring is empty"
-        return
-    end
-    local entries = {}
-    for i, text in ipairs(kill_ring.ring) do
-        local one_line = text:gsub("\n", "\\n")
-        if #one_line > 60 then
-            one_line = one_line:sub(1, 57) .. "..."
-        end
-        entries[i] = string.format("%d: %s", i, one_line)
-    end
-    editor:read_from_minibuffer({
-        prompt = "Kill ring: ",
-        completion = true,
-        auto_accept = true,
-        completer = function(text)
-            if #text == 0 then
-                return entries
-            end
-            local results = {}
-            for _, e in ipairs(entries) do
-                if e:sub(1, #text) == text then
-                    results[#results + 1] = e
-                end
-            end
-            return results
-        end,
-        on_submit = function(input)
-            local idx_str = input:match("^(%d+):")
-            local idx = idx_str and tonumber(idx_str) or tonumber(input:match("^(%d+)"))
-            if not idx or idx < 1 or idx > #kill_ring.ring then
-                editor.status_message = "invalid kill ring index"
-                return
-            end
-            local text = kill_ring.ring[idx]
-            view:delete_selection()
-            local sl = view:p().line
-            local sc = view:p().col
-            view:insert_char(text)
-            view:p().yank_line = sl
-            view:p().yank_col = sc
-        end,
-    })
+	if #kill_ring.ring == 0 then
+		editor.status_message = "kill ring is empty"
+		return
+	end
+	local entries = {}
+	for i, text in ipairs(kill_ring.ring) do
+		local one_line = text:gsub("\n", "\\n")
+		if #one_line > 60 then
+			one_line = one_line:sub(1, 57) .. "..."
+		end
+		entries[i] = string.format("%d: %s", i, one_line)
+	end
+	editor:read_from_minibuffer({
+		prompt = "Kill ring: ",
+		completion = true,
+		auto_accept = true,
+		completer = function(text)
+			if #text == 0 then
+				return entries
+			end
+			local lneedle = fzy.lower_needle(text)
+			local scored = {}
+			for _, e in ipairs(entries) do
+				local s = fzy.score(text, e, nil, lneedle)
+				if s ~= nil then
+					scored[#scored + 1] = { entry = e, score = s }
+				end
+			end
+			table.sort(scored, function(a, b)
+				return a.score > b.score
+			end)
+			local limit = math.min(#scored, 20)
+			local results = {}
+			for i = 1, limit do
+				results[i] = scored[i].entry
+			end
+			return results
+		end,
+		on_submit = function(input)
+			local idx_str = input:match("^(%d+):")
+			local idx = idx_str and tonumber(idx_str) or tonumber(input:match("^(%d+)"))
+			if not idx or idx < 1 or idx > #kill_ring.ring then
+				editor.status_message = "invalid kill ring index"
+				return
+			end
+			local text = kill_ring.ring[idx]
+			view:delete_selection()
+			local sl = view:p().line
+			local sc = view:p().col
+			view:insert_char(text)
+			view:p().yank_line = sl
+			view:p().yank_col = sc
+		end,
+	})
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -3525,106 +3525,106 @@ end
 --- search forward/backward, kill from point to (or just before) the
 --- match, push onto the kill ring.
 local function zap_impl(view, editor, up_to, direction)
-    local main = editor:current_view()
-    if not main or not main.file_loaded then
-        return
-    end
-    local prompt = (up_to and "Zap up to char: " or "Zap to char: ")
-    if direction < 0 then
-        prompt = (up_to and "Zap back up to char: " or "Zap back to char: ")
-    end
-    editor:read_char(prompt, function(ch)
-        if ch == nil then
-            return
-        end
-        local p = view:p()
-        local start_pt = { line = p.line, offset = p.col }
-        local iter, find_dir
-        local ncount = 1
-        if editor.universal_args then
-            for i = 2, #editor.universal_args do
-                local arg = editor.universal_args[i]
-                if type(arg) == "number" then
-                    ncount = ncount * arg
-                elseif type(arg) == "string" then
-                    ncount = ncount * #arg
-                end
-            end
-        end
-        if direction > 0 then
-            find_dir = 1
-            iter = view.buffer:search_forward(ch, start_pt, true)
-        else
-            find_dir = -1
-            iter = view.buffer:search_backward(ch, start_pt, true)
-        end
-        local m
-        for _ = 1, math.max(1, ncount) do
-            m = iter()
-            if not m then
-                break
-            end
-            -- advance the search start for the next iteration
-            if find_dir > 0 then
-                start_pt = { line = m.end_line, offset = m.end_offset }
-            else
-                start_pt = { line = m.line, offset = m.offset - 1 }
-            end
-        end
-        if not m then
-            editor.status_message = "search failed"
-            return
-        end
-        local sl, sc, el, ec
-        if find_dir > 0 then
-            -- forward: region is [point, match-end-up-to-or-inclusive)
-            sl, sc = p.line, p.col
-            if up_to then
-                el, ec = m.line, m.offset
-            else
-                el, ec = m.end_line, m.end_offset
-            end
-        else
-            -- backward: match is BEFORE point. The matched char is at
-            -- [m.line, m.offset .. m.end_offset). Region ends at point.
-            el, ec = p.line, p.col
-            if up_to then
-                -- zap-up-to-char: exclude the matched char (start at its end)
-                sl, sc = m.end_line, m.end_offset
-            else
-                -- zap-to-char: include the matched char (start at its start)
-                sl, sc = m.line, m.offset
-            end
-        end
-        local count = view:chars_between(sl, sc, el, ec)
-        if count <= 0 then
-            return
-        end
-        local killed = view:text_between(sl, sc, el, ec)
-        view:p().line = sl
-        view:p().col = sc
-        view:_set_goal_col(sc)
-        -- Region start is (sl, sc) in normalized order regardless of
-        -- direction, so always delete forward by `count`.
-        view:delete_char(count)
-        editor:push_kill(killed)
-    end)
+	local main = editor:current_view()
+	if not main or not main.file_loaded then
+		return
+	end
+	local prompt = (up_to and "Zap up to char: " or "Zap to char: ")
+	if direction < 0 then
+		prompt = (up_to and "Zap back up to char: " or "Zap back to char: ")
+	end
+	editor:read_char(prompt, function(ch)
+		if ch == nil then
+			return
+		end
+		local p = view:p()
+		local start_pt = { line = p.line, offset = p.col }
+		local iter, find_dir
+		local ncount = 1
+		if editor.universal_args then
+			for i = 2, #editor.universal_args do
+				local arg = editor.universal_args[i]
+				if type(arg) == "number" then
+					ncount = ncount * arg
+				elseif type(arg) == "string" then
+					ncount = ncount * #arg
+				end
+			end
+		end
+		if direction > 0 then
+			find_dir = 1
+			iter = view.buffer:search_forward(ch, start_pt, true)
+		else
+			find_dir = -1
+			iter = view.buffer:search_backward(ch, start_pt, true)
+		end
+		local m
+		for _ = 1, math.max(1, ncount) do
+			m = iter()
+			if not m then
+				break
+			end
+			-- advance the search start for the next iteration
+			if find_dir > 0 then
+				start_pt = { line = m.end_line, offset = m.end_offset }
+			else
+				start_pt = { line = m.line, offset = m.offset - 1 }
+			end
+		end
+		if not m then
+			editor.status_message = "search failed"
+			return
+		end
+		local sl, sc, el, ec
+		if find_dir > 0 then
+			-- forward: region is [point, match-end-up-to-or-inclusive)
+			sl, sc = p.line, p.col
+			if up_to then
+				el, ec = m.line, m.offset
+			else
+				el, ec = m.end_line, m.end_offset
+			end
+		else
+			-- backward: match is BEFORE point. The matched char is at
+			-- [m.line, m.offset .. m.end_offset). Region ends at point.
+			el, ec = p.line, p.col
+			if up_to then
+				-- zap-up-to-char: exclude the matched char (start at its end)
+				sl, sc = m.end_line, m.end_offset
+			else
+				-- zap-to-char: include the matched char (start at its start)
+				sl, sc = m.line, m.offset
+			end
+		end
+		local count = view:chars_between(sl, sc, el, ec)
+		if count <= 0 then
+			return
+		end
+		local killed = view:text_between(sl, sc, el, ec)
+		view:p().line = sl
+		view:p().col = sc
+		view:_set_goal_col(sc)
+		-- Region start is (sl, sc) in normalized order regardless of
+		-- direction, so always delete forward by `count`.
+		view:delete_char(count)
+		editor:push_kill(killed)
+	end)
 end
 
 --- Kill from point up to (and including) the next occurrence of a
 --- char read from the user. Emacs `zap-to-char` (M-z).
 commands.zap_to_char = function(view, editor, ...)
-    local flag = ...
-    local dir = (flag == false) and -1 or 1
-    zap_impl(view, editor, false, dir)
+	local flag = ...
+	local dir = (flag == false) and -1 or 1
+	zap_impl(view, editor, false, dir)
 end
 
 --- Kill from point up to (but NOT including) the next occurrence of a
 --- char read from the user. Emacs `zap-up-to-char` variant.
 commands.zap_up_to_char = function(view, editor, ...)
-    local flag = ...
-    local dir = (flag == false) and -1 or 1
-    zap_impl(view, editor, true, dir)
+	local flag = ...
+	local dir = (flag == false) and -1 or 1
+	zap_impl(view, editor, true, dir)
 end
 
 --- Find the word [`start`,`end`) on `line` that contains or is is is
@@ -3632,22 +3632,22 @@ end
 --- (s, e) byte offsets (1-based inclusive start, 1-based exclusive
 --- end) for the word, or nil if there is none on this line.
 local function find_word_at(line_text, c)
-    local pos = 1
-    local cb = c + 1
-    while true do
-        local s, e = line_text:find("%w+", pos)
-        if not s then
-            break
-        end
-        -- Point is "inside" a word only if strictly past its start
-        -- (s < cb), so that a point sitting on the first char of a
-        -- word is treated as between-word (before = prev word).
-        if s < cb and cb <= e then
-            return s, e
-        end
-        pos = e + 1
-    end
-    return nil
+	local pos = 1
+	local cb = c + 1
+	while true do
+		local s, e = line_text:find("%w+", pos)
+		if not s then
+			break
+		end
+		-- Point is "inside" a word only if strictly past its start
+		-- (s < cb), so that a point sitting on the first char of a
+		-- word is treated as between-word (before = prev word).
+		if s < cb and cb <= e then
+			return s, e
+		end
+		pos = e + 1
+	end
+	return nil
 end
 
 --- Rename the LSP symbol at the cursor (textDocument/rename).
@@ -3673,81 +3673,74 @@ end
 --- prepareSupport, so no prepareRename two-step; a server that can't
 --- rename at the position returns an error → "rename failed: server error".
 commands.lsp_rename = function(view, editor)
-    local buf = view and view.buffer
-    local cid = buf and buf.lsp_client_id
-    local uri = buf and buf.lsp_uri
-    if cid == nil or uri == nil then
-        editor.status_message = "no language server for this buffer"
-        return
-    end
-    if not lsp.is_ready(cid) then
-        editor.status_message = "language server not ready"
-        return
-    end
-    -- Capture the cursor (0-based line + byte col) at invocation: the
-    -- minibuffer owns input while the prompt is up, so the main view's
-    -- cursor can't move before on_submit.
-    local p = view:p()
-    local line_text = buf:line_text(p.line) or ""
-    -- Default name = the word at the cursor (identifier chars). Good
-    -- enough as a pre-fill for the common edit-the-suffix case; LSP
-    -- symbols can include more punctuation but the user edits anyway.
-    local default_name = ""
-    local ws, we = find_word_at(line_text, p.col)
-    if ws ~= nil then
-        default_name = line_text:sub(ws, we)
-    end
-    local mb_result = async.await(editor:read_minibuffer_async({
-        prompt = "Rename symbol: ",
-        initial = default_name,
-    }))
-    if mb_result.cancelled then
-        editor.status_message = "rename cancelled (empty name)"
-        return
-    end
-    local new_name = mb_result.value
-    if new_name == nil or #new_name == 0 then
-        editor.status_message = "rename cancelled (empty name)"
-        return
-    end
-    -- Recompute the UTF-16 char at submit time (line unchanged,
-    -- but cheap + robust if anything shifted).
-    local text = buf:line_text(p.line) or ""
-    local char = utf8.byte_to_utf16_col(text, p.col)
-    editor.status_message = "renaming…"
-    local result, is_error = async.await(lsp.request_async(editor, cid, "textDocument/rename", {
-        textDocument = { uri = uri },
-        position = { line = p.line, character = char },
-        newName = new_name,
-    }))
-    if is_error then
-        editor.status_message = "rename failed: server error"
-        return
-    end
-    if result == nil then
-        editor.status_message = "nothing to rename at cursor"
-        return
-    end
-    -- result is a WorkspaceEdit; apply across open +
-    -- background-opened docs. on_complete fires synchronously
-    -- (all-open) or after the last background open settles.
-    editor:apply_workspace_edit(result, function(r)
-        local n = #r.touched
-        if n > 0 then
-            editor.status_message = ('renamed "%s" (%d doc%s)'):format(
-                new_name,
-                n,
-                n == 1 and "" or "s"
-            )
-        elseif #r.skipped > 0 then
-            editor.status_message = ('rename "%s": no open docs (%d skipped)'):format(
-                new_name,
-                #r.skipped
-            )
-        else
-            editor.status_message = "rename made no in-buffer edits"
-        end
-    end)
+	local buf = view and view.buffer
+	local cid = buf and buf.lsp_client_id
+	local uri = buf and buf.lsp_uri
+	if cid == nil or uri == nil then
+		editor.status_message = "no language server for this buffer"
+		return
+	end
+	if not lsp.is_ready(cid) then
+		editor.status_message = "language server not ready"
+		return
+	end
+	-- Capture the cursor (0-based line + byte col) at invocation: the
+	-- minibuffer owns input while the prompt is up, so the main view's
+	-- cursor can't move before on_submit.
+	local p = view:p()
+	local line_text = buf:line_text(p.line) or ""
+	-- Default name = the word at the cursor (identifier chars). Good
+	-- enough as a pre-fill for the common edit-the-suffix case; LSP
+	-- symbols can include more punctuation but the user edits anyway.
+	local default_name = ""
+	local ws, we = find_word_at(line_text, p.col)
+	if ws ~= nil then
+		default_name = line_text:sub(ws, we)
+	end
+	local mb_result = async.await(editor:read_minibuffer_async({
+		prompt = "Rename symbol: ",
+		initial = default_name,
+	}))
+	if mb_result.cancelled then
+		editor.status_message = "rename cancelled (empty name)"
+		return
+	end
+	local new_name = mb_result.value
+	if new_name == nil or #new_name == 0 then
+		editor.status_message = "rename cancelled (empty name)"
+		return
+	end
+	-- Recompute the UTF-16 char at submit time (line unchanged,
+	-- but cheap + robust if anything shifted).
+	local text = buf:line_text(p.line) or ""
+	local char = utf8.byte_to_utf16_col(text, p.col)
+	editor.status_message = "renaming…"
+	local result, is_error = async.await(lsp.request_async(editor, cid, "textDocument/rename", {
+		textDocument = { uri = uri },
+		position = { line = p.line, character = char },
+		newName = new_name,
+	}))
+	if is_error then
+		editor.status_message = "rename failed: server error"
+		return
+	end
+	if result == nil then
+		editor.status_message = "nothing to rename at cursor"
+		return
+	end
+	-- result is a WorkspaceEdit; apply across open +
+	-- background-opened docs. on_complete fires synchronously
+	-- (all-open) or after the last background open settles.
+	editor:apply_workspace_edit(result, function(r)
+		local n = #r.touched
+		if n > 0 then
+			editor.status_message = ('renamed "%s" (%d doc%s)'):format(new_name, n, n == 1 and "" or "s")
+		elseif #r.skipped > 0 then
+			editor.status_message = ('rename "%s": no open docs (%d skipped)'):format(new_name, #r.skipped)
+		else
+			editor.status_message = "rename made no in-buffer edits"
+		end
+	end)
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -3758,78 +3751,76 @@ end
 --- negative prefix arg, the word preceding point). Count repeats.
 --- Emacs `upcase-word` (M-u), `downcase-word` (M-l), `capitalize-word` (M-c).
 local function case_word(view, editor, transform, ...)
-    local n = repeat_count(...)
-    local count = math.abs(n)
-    local forward = n >= 0
-    for _ = 1, count do
-        if view:has_selection() then
-            view:replace_selections(transform)
-        else
-            local start_line = view:p().line
-            local start_col = view:p().col
-            if forward then
-                view:move_word(1, "word")
-            else
-                view:move_word(-1, "word")
-            end
-            local el, ec = view:p().line, view:p().col
-            local sl, sc
-            if forward then
-                sl, sc = start_line, start_col
-            else
-                sl, sc = el, ec
-                el, ec = start_line, start_col
-            end
-            local cnt = view:chars_between(sl, sc, el, ec)
-            if cnt > 0 then
-                local text = view:text_between(sl, sc, el, ec)
-                view:p().line = sl
-                view:p().col = sc
-                view:_set_goal_col(sc)
-                view:delete_char(cnt)
-                view:insert_char(transform(text))
-            end
-        end
-    end
+	local n = repeat_count(...)
+	local count = math.abs(n)
+	local forward = n >= 0
+	for _ = 1, count do
+		if view:has_selection() then
+			view:replace_selections(transform)
+		else
+			local start_line = view:p().line
+			local start_col = view:p().col
+			if forward then
+				view:move_word(1, "word")
+			else
+				view:move_word(-1, "word")
+			end
+			local el, ec = view:p().line, view:p().col
+			local sl, sc
+			if forward then
+				sl, sc = start_line, start_col
+			else
+				sl, sc = el, ec
+				el, ec = start_line, start_col
+			end
+			local cnt = view:chars_between(sl, sc, el, ec)
+			if cnt > 0 then
+				local text = view:text_between(sl, sc, el, ec)
+				view:p().line = sl
+				view:p().col = sc
+				view:_set_goal_col(sc)
+				view:delete_char(cnt)
+				view:insert_char(transform(text))
+			end
+		end
+	end
 end
 
 commands.upcase_word = function(view, editor, ...)
-    case_word(view, editor, function(s)
-        return s:upper()
-    end, ...)
+	case_word(view, editor, function(s)
+		return s:upper()
+	end, ...)
 end
 
 commands.downcase_word = function(view, editor, ...)
-    case_word(view, editor, function(s)
-        return s:lower()
-    end, ...)
+	case_word(view, editor, function(s)
+		return s:lower()
+	end, ...)
 end
 
 commands.capitalize_word = function(view, editor, ...)
-    case_word(view, editor, function(s)
-        -- Capitalize first alphanumeric char, lowercase the rest.
-        return (
-            s:gsub("^(.-)(%w)(.*)$", function(pre, ch, rest)
-                return pre .. ch:upper() .. rest:lower()
-            end)
-        )
-    end, ...)
+	case_word(view, editor, function(s)
+		-- Capitalize first alphanumeric char, lowercase the rest.
+		return (s:gsub("^(.-)(%w)(.*)$", function(pre, ch, rest)
+			return pre .. ch:upper() .. rest:lower()
+		end))
+	end, ...)
 end
 
 --- Convert the region to upper case. Emacs `upcase-region`
 --- (C-x C-u). Multi-cursor: each selection is transformed.
 commands.upcase_region = function(view, _editor)
-    view:replace_selections(function(text)
-        return text:upper()
-    end)
+	view:replace_selections(function(text)
+		return text:upper()
+	end)
 end
 
 --- Convert the region to lower case. Emacs `downcase-region`
 --- (C-x C-l). Multi-cursor: each selection is transformed.
 commands.downcase_region = function(view, _editor)
-    view:replace_selections(function(text)
-        return text:lower()
-    end)
+	view:replace_selections(function(text)
+		return text:lower()
+	end)
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -3845,81 +3836,81 @@ end
 --- kebab/snake/whitespace delimiters. Returns an array of lowercase
 --- word strings (empties filtered).
 local function split_words(s)
-    -- Insert boundary before an uppercase letter that follows a
-    -- lowercase letter or digit (camelCase / digitThenUpper).
-    s = s:gsub("([%l%d])(%u)", "%1 %2")
-    -- Insert boundary before an uppercase run that's followed by a
-    -- lowercase (so "HTTPRequest" -> "HTTP Request").
-    s = s:gsub("(%u)(%u%l)", "%1 %2")
-    -- Replace every non-alphanumeric run with a space, then collect.
-    local words = {}
-    for w in s:gmatch("%w+") do
-        words[#words + 1] = w:lower()
-    end
-    return words
+	-- Insert boundary before an uppercase letter that follows a
+	-- lowercase letter or digit (camelCase / digitThenUpper).
+	s = s:gsub("([%l%d])(%u)", "%1 %2")
+	-- Insert boundary before an uppercase run that's followed by a
+	-- lowercase (so "HTTPRequest" -> "HTTP Request").
+	s = s:gsub("(%u)(%u%l)", "%1 %2")
+	-- Replace every non-alphanumeric run with a space, then collect.
+	local words = {}
+	for w in s:gmatch("%w+") do
+		words[#words + 1] = w:lower()
+	end
+	return words
 end
 
 --- snake_case: lowercased words joined by underscores.
 commands.snake_case_region = function(view, _editor)
-    view:replace_selections(function(text)
-        return table.concat(split_words(text), "_")
-    end)
+	view:replace_selections(function(text)
+		return table.concat(split_words(text), "_")
+	end)
 end
 
 --- kebab-case (lisp-case): lowercased words joined by hyphens.
 commands.kebab_case_region = function(view, _editor)
-    view:replace_selections(function(text)
-        return table.concat(split_words(text), "-")
-    end)
+	view:replace_selections(function(text)
+		return table.concat(split_words(text), "-")
+	end)
 end
 
 --- camelCase: first word lowercase, subsequent words capitalized,
 --- concatenated with no separators.
 commands.camelcase_region = function(view, _editor)
-    view:replace_selections(function(text)
-        local words = split_words(text)
-        if #words == 0 then
-            return ""
-        end
-        for i = 2, #words do
-            words[i] = words[i]:sub(1, 1):upper() .. words[i]:sub(2)
-        end
-        return table.concat(words)
-    end)
+	view:replace_selections(function(text)
+		local words = split_words(text)
+		if #words == 0 then
+			return ""
+		end
+		for i = 2, #words do
+			words[i] = words[i]:sub(1, 1):upper() .. words[i]:sub(2)
+		end
+		return table.concat(words)
+	end)
 end
 
 --- Minor words skipped inside a title (always capitalized at the
 --- start and end of the title).
 local TITLE_MINOR = {
-    ["a"] = true,
-    ["an"] = true,
-    ["the"] = true,
-    ["and"] = true,
-    ["but"] = true,
-    ["or"] = true,
-    ["nor"] = true,
-    ["for"] = true,
-    ["yet"] = true,
-    ["so"] = true,
-    ["on"] = true,
-    ["in"] = true,
-    ["at"] = true,
-    ["to"] = true,
-    ["from"] = true,
-    ["by"] = true,
-    ["of"] = true,
-    ["with"] = true,
-    ["as"] = true,
-    ["into"] = true,
-    ["onto"] = true,
-    ["upon"] = true,
-    ["over"] = true,
-    ["under"] = true,
-    ["per"] = true,
-    ["via"] = true,
-    ["is"] = true,
-    ["it"] = true,
-    ["be"] = true,
+	["a"] = true,
+	["an"] = true,
+	["the"] = true,
+	["and"] = true,
+	["but"] = true,
+	["or"] = true,
+	["nor"] = true,
+	["for"] = true,
+	["yet"] = true,
+	["so"] = true,
+	["on"] = true,
+	["in"] = true,
+	["at"] = true,
+	["to"] = true,
+	["from"] = true,
+	["by"] = true,
+	["of"] = true,
+	["with"] = true,
+	["as"] = true,
+	["into"] = true,
+	["onto"] = true,
+	["upon"] = true,
+	["over"] = true,
+	["under"] = true,
+	["per"] = true,
+	["via"] = true,
+	["is"] = true,
+	["it"] = true,
+	["be"] = true,
 }
 
 --- Title Case: capitalize the first letter of each word, lowercasing
@@ -3927,52 +3918,52 @@ local TITLE_MINOR = {
 --- conjunctions) are left lowercase inside the title. The first and
 --- last words are always capitalized.
 commands.title_case_region = function(view, _editor)
-    view:replace_selections(function(text)
-        -- Split preserving word tokens and the non-word separators
-        -- between them, so spaces / punctuation survive the transform.
-        local out = {}
-        local word_idx = 0
-        local last_i = 1
-        local i = 1
-        local len = #text
-        -- First pass: collect words to know first/last for the
-        -- first/last-word rule.
-        local words = split_words(text)
-        local last_word = words[#words]
-        while i <= len do
-            local s, e = text:find("%w+", i)
-            if not s then
-                break
-            end
-            if s > last_i then
-                out[#out + 1] = text:sub(last_i, s - 1)
-            end
-            local w = text:sub(s, e)
-            local lower = w:lower()
-            word_idx = word_idx + 1
-            local is_first = word_idx == 1
-            local is_last = lower == last_word and word_idx == #words
-            if is_first or is_last or not TITLE_MINOR[lower] then
-                out[#out + 1] = lower:sub(1, 1):upper() .. lower:sub(2)
-            else
-                out[#out + 1] = lower
-            end
-            last_i = e + 1
-            i = e + 1
-        end
-        if last_i <= len then
-            out[#out + 1] = text:sub(last_i)
-        end
-        return table.concat(out)
-    end)
+	view:replace_selections(function(text)
+		-- Split preserving word tokens and the non-word separators
+		-- between them, so spaces / punctuation survive the transform.
+		local out = {}
+		local word_idx = 0
+		local last_i = 1
+		local i = 1
+		local len = #text
+		-- First pass: collect words to know first/last for the
+		-- first/last-word rule.
+		local words = split_words(text)
+		local last_word = words[#words]
+		while i <= len do
+			local s, e = text:find("%w+", i)
+			if not s then
+				break
+			end
+			if s > last_i then
+				out[#out + 1] = text:sub(last_i, s - 1)
+			end
+			local w = text:sub(s, e)
+			local lower = w:lower()
+			word_idx = word_idx + 1
+			local is_first = word_idx == 1
+			local is_last = lower == last_word and word_idx == #words
+			if is_first or is_last or not TITLE_MINOR[lower] then
+				out[#out + 1] = lower:sub(1, 1):upper() .. lower:sub(2)
+			else
+				out[#out + 1] = lower
+			end
+			last_i = e + 1
+			i = e + 1
+		end
+		if last_i <= len then
+			out[#out + 1] = text:sub(last_i)
+		end
+		return table.concat(out)
+	end)
 end
 
 --- Remove all whitespace between words in the selection (squeeze the
 --- words together). Useful for joining tokens / stripping spaces.
 commands.remove_spaces_region = function(view, _editor)
-    view:replace_selections(function(text)
-        return (text:gsub("%s+", ""))
-    end)
+	view:replace_selections(function(text)
+		return (text:gsub("%s+", ""))
+	end)
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -3999,64 +3990,64 @@ end
 --- Returns the callable textobject.fn or nil if no sexp is defined.
 ---@return function|nil
 local function sexp_fn(view)
-    return view:_textobject_fn("sexp")
+	return view:_textobject_fn("sexp")
 end
 
 --- Select the innermost balanced pair enclosing point (or the next
 --- pair forward when between pairs). Proto expand-region semantics.
 --- Emacs `mark-sexp` variant.
 commands.mark_sexp = function(view, _editor)
-    local p = view:p()
-    view:select_range("sexp", p.line, p.col)
+	local p = view:p()
+	view:select_range("sexp", p.line, p.col)
 end
 
 --- Kill the innermost balanced pair enclosing point (incl. delimiters).
 --- Emacs `kill-sexp`-ish. Single undo group; pushes the killed text.
 commands.kill_sexp = function(view, editor)
-    local p = view:p()
-    local fn = sexp_fn(view)
-    if not fn then
-        return
-    end
-    local sl, sc, el, ec = fn(view, p.line, p.col, nil)
-    if not sl then
-        return
-    end
-    local n = view:chars_between(sl, sc, el, ec)
-    if n <= 0 then
-        return
-    end
-    local killed = view:text_between(sl, sc, el, ec)
-    local buf = view.buffer
-    buf:close_edit()
-    buf:begin_edit()
-    local rl, rc = buf:delete_char(sl, sc, n)
-    buf:end_edit()
-    p.line = rl
-    p.col = rc
-    view:_set_goal_col(rc)
-    editor:push_kill(killed)
+	local p = view:p()
+	local fn = sexp_fn(view)
+	if not fn then
+		return
+	end
+	local sl, sc, el, ec = fn(view, p.line, p.col, nil)
+	if not sl then
+		return
+	end
+	local n = view:chars_between(sl, sc, el, ec)
+	if n <= 0 then
+		return
+	end
+	local killed = view:text_between(sl, sc, el, ec)
+	local buf = view.buffer
+	buf:close_edit()
+	buf:begin_edit()
+	local rl, rc = buf:delete_char(sl, sc, n)
+	buf:end_edit()
+	p.line = rl
+	p.col = rc
+	view:_set_goal_col(rc)
+	editor:push_kill(killed)
 end
 
 --- Copy the innermost balanced pair enclosing point (incl. delimiters)
 --- to the kill ring without deleting.
 commands.copy_sexp = function(view, editor)
-    local p = view:p()
-    local fn = sexp_fn(view)
-    if not fn then
-        return
-    end
-    local sl, sc, el, ec = fn(view, p.line, p.col, nil)
-    if not sl then
-        return
-    end
-    local text = view:text_between(sl, sc, el, ec)
-    if #text == 0 then
-        editor.status_message = "empty sexp"
-        return
-    end
-    editor:push_kill(text)
-    editor.status_message = "sexp copied"
+	local p = view:p()
+	local fn = sexp_fn(view)
+	if not fn then
+		return
+	end
+	local sl, sc, el, ec = fn(view, p.line, p.col, nil)
+	if not sl then
+		return
+	end
+	local text = view:text_between(sl, sc, el, ec)
+	if #text == 0 then
+		editor.status_message = "empty sexp"
+		return
+	end
+	editor:push_kill(text)
+	editor.status_message = "sexp copied"
 end
 
 --- Move point forward past the next balanced pair (or the one
@@ -4064,16 +4055,16 @@ end
 --- Pure range composition via View:move_word, which lands at
 --- (el, ec + boundary_len) = just past the closer (boundary_len=0).
 commands.forward_sexp = function(view, _editor, ...)
-    local n = repeat_count(...)
-    view:move_word(n, "sexp")
+	local n = repeat_count(...)
+	view:move_word(n, "sexp")
 end
 
 --- Move point backward before the previous balanced pair (or the one
 --- containing point). Emacs `backward-sexp` (C-M-b). Pure range
 --- composition via View:move_word, which lands at the range's (sl, sc).
 commands.backward_sexp = function(view, _editor, ...)
-    local n = repeat_count(...)
-    view:move_word(-math.abs(n), "sexp")
+	local n = repeat_count(...)
+	view:move_word(-math.abs(n), "sexp")
 end
 
 --- Move point INTO the next nested pair: forward to the next opener
@@ -4081,44 +4072,44 @@ end
 --- dir=2 asks the sexp fn for the next opener after point as a
 --- degenerate range; landing at (sl, sc+1) steps just past the opener.
 commands.down_list = function(view, _editor, ...)
-    local n = repeat_count(...)
-    local count = math.abs(n) or 1
-    local p = view:p()
-    local fn = sexp_fn(view)
-    if not fn then
-        return
-    end
-    for _ = 1, count do
-        local sl, sc = fn(view, p.line, p.col, 2)
-        if not sl then
-            return
-        end
-        p.line = sl
-        p.col = sc + 1
-    end
-    view:_set_goal_col(p.col)
+	local n = repeat_count(...)
+	local count = math.abs(n) or 1
+	local p = view:p()
+	local fn = sexp_fn(view)
+	if not fn then
+		return
+	end
+	for _ = 1, count do
+		local sl, sc = fn(view, p.line, p.col, 2)
+		if not sl then
+			return
+		end
+		p.line = sl
+		p.col = sc + 1
+	end
+	view:_set_goal_col(p.col)
 end
 
 --- Move point OUT of the current pair (forward to just past its
 --- closing delimiter). Emacs `up-list`. dir=0 = containing-only: a
 --- no-op when point isn't inside any pair. Lands at the range's end.
 commands.up_list = function(view, _editor, ...)
-    local n = repeat_count(...)
-    local count = math.abs(n)
-    local p = view:p()
-    local fn = sexp_fn(view)
-    if not fn then
-        return
-    end
-    for _ = 1, count do
-        local _, _, el, ec = fn(view, p.line, p.col, 0)
-        if not el then
-            return
-        end
-        p.line = el
-        p.col = ec
-    end
-    view:_set_goal_col(p.col)
+	local n = repeat_count(...)
+	local count = math.abs(n)
+	local p = view:p()
+	local fn = sexp_fn(view)
+	if not fn then
+		return
+	end
+	for _ = 1, count do
+		local _, _, el, ec = fn(view, p.line, p.col, 0)
+		if not el then
+			return
+		end
+		p.line = el
+		p.col = ec
+	end
+	view:_set_goal_col(p.col)
 end
 
 --- Move point OUT of the current pair backward (to before its opening
@@ -4130,40 +4121,40 @@ end
 --- backward-up climbs out — the symmetric counterpart of up_list
 --- always landing *past* the closer.
 commands.backward_up_list = function(view, _editor, ...)
-    local n = repeat_count(...)
-    local count = math.abs(n)
-    local p = view:p()
-    local fn = sexp_fn(view)
-    if not fn then
-        return
-    end
-    for _ = 1, count do
-        local sl, sc = fn(view, p.line, p.col, 0)
-        if not sl then
-            return
-        end
-        if sl == p.line and sc == p.col then
-            -- Sitting on the opener: re-query from one char before to
-            -- escape this pair's delimiter and get the parent pair.
-            local bl, bc = sl, sc - 1
-            if bc < 0 then
-                if bl > 0 then
-                    bl = bl - 1
-                    bc = view:content_len(bl)
-                else
-                    return
-                end
-            end
-            local sl2, sc2 = fn(view, bl, bc, 0)
-            if not sl2 then
-                return
-            end
-            sl, sc = sl2, sc2
-        end
-        p.line = sl
-        p.col = sc
-    end
-    view:_set_goal_col(p.col)
+	local n = repeat_count(...)
+	local count = math.abs(n)
+	local p = view:p()
+	local fn = sexp_fn(view)
+	if not fn then
+		return
+	end
+	for _ = 1, count do
+		local sl, sc = fn(view, p.line, p.col, 0)
+		if not sl then
+			return
+		end
+		if sl == p.line and sc == p.col then
+			-- Sitting on the opener: re-query from one char before to
+			-- escape this pair's delimiter and get the parent pair.
+			local bl, bc = sl, sc - 1
+			if bc < 0 then
+				if bl > 0 then
+					bl = bl - 1
+					bc = view:content_len(bl)
+				else
+					return
+				end
+			end
+			local sl2, sc2 = fn(view, bl, bc, 0)
+			if not sl2 then
+				return
+			end
+			sl, sc = sl2, sc2
+		end
+		p.line = sl
+		p.col = sc
+	end
+	view:_set_goal_col(p.col)
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -4174,17 +4165,17 @@ end
 --- normally a control character such as Tab, Newline, or C-g).
 --- Emacs `quoted-insert` (C-q).
 commands.quoted_insert = function(view, editor)
-    editor:read_char("Quoted insert: ", function(ch)
-        if ch == nil then
-            return
-        end
-        view:delete_selection()
-        -- Translate a few printable control aliases the user might
-        -- type via C-q <letter> (terminals deliver these as ctrl
-        -- tokens, which read_char can't see as a printable byte).
-        -- The common ones (Tab, Newline) map to their literal chars.
-        view:insert_char(ch)
-    end)
+	editor:read_char("Quoted insert: ", function(ch)
+		if ch == nil then
+			return
+		end
+		view:delete_selection()
+		-- Translate a few printable control aliases the user might
+		-- type via C-q <letter> (terminals deliver these as ctrl
+		-- tokens, which read_char can't see as a printable byte).
+		-- The common ones (Tab, Newline) map to their literal chars.
+		view:insert_char(ch)
+	end)
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -4194,23 +4185,23 @@ end
 --- Incremental forward regexp search. Emacs `isearch-forward-regexp`
 --- (C-M-s).
 commands.isearch_forward_regexp = function(view, editor)
-    local query = editor.universal_args and editor.universal_args[2]
-    if editor.minibuffer and editor.minibuffer.active then
-        editor:isearch_next()
-        return
-    end
-    editor:start_isearch(1, query and tostring(query), { regex = true })
+	local query = editor.universal_args and editor.universal_args[2]
+	if editor.minibuffer and editor.minibuffer.active then
+		editor:isearch_next()
+		return
+	end
+	editor:start_isearch(1, query and tostring(query), { regex = true })
 end
 
 --- Incremental backward regexp search. Emacs `isearch-backward-regexp`
 --- (C-M-r).
 commands.isearch_backward_regexp = function(view, editor)
-    local query = editor.universal_args and editor.universal_args[2]
-    if editor.minibuffer and editor.minibuffer.active then
-        editor:isearch_prev()
-        return
-    end
-    editor:start_isearch(-1, query and tostring(query), { regex = true })
+	local query = editor.universal_args and editor.universal_args[2]
+	if editor.minibuffer and editor.minibuffer.active then
+		editor:isearch_prev()
+		return
+	end
+	editor:start_isearch(-1, query and tostring(query), { regex = true })
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -4223,88 +4214,88 @@ end
 --- replacement. Multi-cursor is NOT supported here (matches Emacs'
 --- single-point replace-string); the primary cursor is used.
 local function apply_replace(view, editor, query, replacement, regex, rsl, rsc, rel, rec)
-    local buf = view.buffer
-    local p = view:p()
-    -- Determine region end.
-    local end_line, end_col
-    if rel ~= nil then
-        end_line, end_col = rel, rec
-    else
-        end_line = view:line_count() - 1
-        end_col = view:content_len(end_line)
-    end
-    -- If a region: only replace within it. Move the cursor to the
-    -- region START (or current point) before searching.
-    local start_line, start_col
-    if rsl ~= nil then
-        start_line, start_col = rsl, rsc
-    else
-        start_line, start_col = p.line, p.col
-    end
-    buf:close_edit()
-    buf:begin_edit()
-    local search_start = { line = start_line, offset = start_col }
-    local iter, err
-    if regex then
-        iter, err = buf:search_regex(query, search_start, false)
-    else
-        iter = buf:search_forward(query, search_start, true)
-        err = nil
-    end
-    if not iter then
-        editor.status_message = "invalid regexp: " .. tostring(err)
-        buf:end_edit()
-        return
-    end
-    local count = 0
-    local last_line = start_line
-    local last_col = start_col
-    -- For non-regex searches the buffer mutates and stale iterators are
-    -- invalid, so re-create the iterator after each replacement.
-    while true do
-        local m = iter()
-        if not m then
-            break
-        end
-        -- Clamp to the region end if a region was given.
-        if rel ~= nil then
-            if m.line > end_line or (m.line == end_line and m.end_offset > end_col) then
-                break
-            end
-        end
-        -- Delete the match and insert the replacement at match start.
-        local mlen = view:chars_between(m.line, m.offset, m.end_line, m.end_offset)
-        local rl, rc
-        if mlen > 0 then
-            rl, rc = buf:delete_char(m.line, m.offset, mlen)
-        else
-            rl, rc = m.line, m.offset
-        end
-        if #replacement > 0 then
-            rl, rc = buf:insert_char(rl, rc, replacement)
-        end
-        last_line = rl
-        last_col = rc
-        count = count + 1
-        -- Advance the search iterator past the replacement.
-        search_start = { line = rl, offset = rc }
-        -- Rebuild the iterator from the new position: the buffer has
-        -- mutated, so stale iterators are invalid. Re-compile each step.
-        if regex then
-            iter, err = buf:search_regex(query, search_start, false)
-            if not iter then
-                break
-            end
-        else
-            iter = buf:search_forward(query, search_start, true)
-        end
-    end
-    buf:end_edit()
-    p.line = last_line
-    p.col = last_col
-    view:_set_goal_col(last_col)
-    view:unset_mark()
-    editor.status_message = "replaced " .. count .. (count == 1 and " occurrence" or " occurrences")
+	local buf = view.buffer
+	local p = view:p()
+	-- Determine region end.
+	local end_line, end_col
+	if rel ~= nil then
+		end_line, end_col = rel, rec
+	else
+		end_line = view:line_count() - 1
+		end_col = view:content_len(end_line)
+	end
+	-- If a region: only replace within it. Move the cursor to the
+	-- region START (or current point) before searching.
+	local start_line, start_col
+	if rsl ~= nil then
+		start_line, start_col = rsl, rsc
+	else
+		start_line, start_col = p.line, p.col
+	end
+	buf:close_edit()
+	buf:begin_edit()
+	local search_start = { line = start_line, offset = start_col }
+	local iter, err
+	if regex then
+		iter, err = buf:search_regex(query, search_start, false)
+	else
+		iter = buf:search_forward(query, search_start, true)
+		err = nil
+	end
+	if not iter then
+		editor.status_message = "invalid regexp: " .. tostring(err)
+		buf:end_edit()
+		return
+	end
+	local count = 0
+	local last_line = start_line
+	local last_col = start_col
+	-- For non-regex searches the buffer mutates and stale iterators are
+	-- invalid, so re-create the iterator after each replacement.
+	while true do
+		local m = iter()
+		if not m then
+			break
+		end
+		-- Clamp to the region end if a region was given.
+		if rel ~= nil then
+			if m.line > end_line or (m.line == end_line and m.end_offset > end_col) then
+				break
+			end
+		end
+		-- Delete the match and insert the replacement at match start.
+		local mlen = view:chars_between(m.line, m.offset, m.end_line, m.end_offset)
+		local rl, rc
+		if mlen > 0 then
+			rl, rc = buf:delete_char(m.line, m.offset, mlen)
+		else
+			rl, rc = m.line, m.offset
+		end
+		if #replacement > 0 then
+			rl, rc = buf:insert_char(rl, rc, replacement)
+		end
+		last_line = rl
+		last_col = rc
+		count = count + 1
+		-- Advance the search iterator past the replacement.
+		search_start = { line = rl, offset = rc }
+		-- Rebuild the iterator from the new position: the buffer has
+		-- mutated, so stale iterators are invalid. Re-compile each step.
+		if regex then
+			iter, err = buf:search_regex(query, search_start, false)
+			if not iter then
+				break
+			end
+		else
+			iter = buf:search_forward(query, search_start, true)
+		end
+	end
+	buf:end_edit()
+	p.line = last_line
+	p.col = last_col
+	view:_set_goal_col(last_col)
+	view:unset_mark()
+	editor.status_message = "replaced " .. count .. (count == 1 and " occurrence" or " occurrences")
 end
 
 --- Non-interactive replace driver: reads a query then a replacement
@@ -4312,78 +4303,78 @@ end
 --- the active region) to end-of-region as a single undo group.
 --- `regex` selects literal vs POSIX-regex search.
 local function run_replace(view, editor, regex)
-    local main = editor:current_view()
-    if not main or not main.file_loaded then
-        return
-    end
-    -- Determine the operation region: if a selection is active, limit
-    -- replacements to [sel-start, sel-end); otherwise [point, end-of-doc).
-    local has_region = main:p().anchor_line ~= nil
-    local rsl, rsc, rel, rec
-    if has_region then
-        rsl, rsc, rel, rec = main:selection_range()
-        if rsl == nil then
-            has_region = false
-        end
-    end
-    local origin_line = main:p().line
-    local origin_col = main:p().col
-    local label = regex and "Replace regexp: " or "Replace: "
-    editor:read_from_minibuffer({
-        prompt = label,
-        on_cancel = function()
-            local mv = editor:current_view()
-            if mv then
-                mv:unset_mark()
-            end
-        end,
-        on_submit = function(query)
-            if #query == 0 then
-                return
-            end
-            editor:read_from_minibuffer({
-                prompt = label .. query .. " with: ",
-                on_submit = function(replacement)
-                    local mv = editor:current_view()
-                    if not mv then
-                        return
-                    end
-                    apply_replace(
-                        mv,
-                        editor,
-                        query,
-                        replacement,
-                        regex,
-                        has_region and rsl or nil,
-                        has_region and rsc or nil,
-                        has_region and rel or nil,
-                        has_region and rec or nil
-                    )
-                end,
-                on_cancel = function()
-                    local mv = editor:current_view()
-                    if mv and has_region then
-                        mv:p().line = origin_line
-                        mv:p().col = origin_col
-                        mv:_set_goal_col(origin_col)
-                        mv:unset_mark()
-                    end
-                end,
-            })
-        end,
-    })
+	local main = editor:current_view()
+	if not main or not main.file_loaded then
+		return
+	end
+	-- Determine the operation region: if a selection is active, limit
+	-- replacements to [sel-start, sel-end); otherwise [point, end-of-doc).
+	local has_region = main:p().anchor_line ~= nil
+	local rsl, rsc, rel, rec
+	if has_region then
+		rsl, rsc, rel, rec = main:selection_range()
+		if rsl == nil then
+			has_region = false
+		end
+	end
+	local origin_line = main:p().line
+	local origin_col = main:p().col
+	local label = regex and "Replace regexp: " or "Replace: "
+	editor:read_from_minibuffer({
+		prompt = label,
+		on_cancel = function()
+			local mv = editor:current_view()
+			if mv then
+				mv:unset_mark()
+			end
+		end,
+		on_submit = function(query)
+			if #query == 0 then
+				return
+			end
+			editor:read_from_minibuffer({
+				prompt = label .. query .. " with: ",
+				on_submit = function(replacement)
+					local mv = editor:current_view()
+					if not mv then
+						return
+					end
+					apply_replace(
+						mv,
+						editor,
+						query,
+						replacement,
+						regex,
+						has_region and rsl or nil,
+						has_region and rsc or nil,
+						has_region and rel or nil,
+						has_region and rec or nil
+					)
+				end,
+				on_cancel = function()
+					local mv = editor:current_view()
+					if mv and has_region then
+						mv:p().line = origin_line
+						mv:p().col = origin_col
+						mv:_set_goal_col(origin_col)
+						mv:unset_mark()
+					end
+				end,
+			})
+		end,
+	})
 end
 
 --- Non-interactive replace from point (or within region) to end.
 --- Emacs `replace-string` (M-x replace-string).
 commands.replace_string = function(view, editor)
-    run_replace(view, editor, false)
+	run_replace(view, editor, false)
 end
 
 --- Non-interactive regexp replace from point (or within region) to end.
 --- Emacs `replace-regexp` (M-x replace-regexp).
 commands.replace_regexp = function(view, editor)
-    run_replace(view, editor, true)
+	run_replace(view, editor, true)
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -4394,7 +4385,7 @@ end
 ---@param name string
 ---@return function|nil
 function commands.lookup(name)
-    return commands[name:gsub(" ", "_"):lower()]
+	return commands[name:gsub(" ", "_"):lower()]
 end
 
 ---@see get_cmd_info
@@ -4403,18 +4394,18 @@ commands.get_cmd_info = get_cmd_info
 --- Return an iterator over all command names (for completion).
 ---@return function
 function commands.names()
-    local sorted = {}
-    for name, fn in pairs(commands) do
-        if advice.callable(fn) and name ~= "lookup" and name ~= "names" then
-            sorted[#sorted + 1] = name
-        end
-    end
-    table.sort(sorted)
-    local i = 0
-    return function()
-        i = i + 1
-        return sorted[i]
-    end
+	local sorted = {}
+	for name, fn in pairs(commands) do
+		if advice.callable(fn) and name ~= "lookup" and name ~= "names" then
+			sorted[#sorted + 1] = name
+		end
+	end
+	table.sort(sorted)
+	local i = 0
+	return function()
+		i = i + 1
+		return sorted[i]
+	end
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -4426,12 +4417,12 @@ end
 -- squiggle the current word in diagnostic_error red).
 ----------------------------------------------------------------------------------------------------
 commands.toggle_squiggle_demo = function(_view, editor)
-    editor._squiggle_demo = not editor._squiggle_demo
-    if editor._squiggle_demo then
-        editor.status_message = "squiggle demo ON — move the cursor"
-    else
-        editor.status_message = "squiggle demo off"
-    end
+	editor._squiggle_demo = not editor._squiggle_demo
+	if editor._squiggle_demo then
+		editor.status_message = "squiggle demo ON — move the cursor"
+	else
+		editor.status_message = "squiggle demo off"
+	end
 end
 
 --- Re-enable the diagnostic hover popup for the current span after Esc/
@@ -4439,14 +4430,14 @@ end
 --- dismissed stays hidden; clearing the dismissed signature here lets
 --- it show again immediately if the cursor is still inside one.
 commands.show_diagnostic_hover = function(_view, editor)
-    if editor._diag_hover_dismissed_sig ~= nil then
-        editor._diag_hover_dismissed_sig = nil
-        editor.status_message = "diagnostic hover restored"
-    elseif editor._diag_hover_active_sig ~= nil then
-        editor.status_message = "diagnostic hover already showing"
-    else
-        editor.status_message = "no diagnostic under cursor"
-    end
+	if editor._diag_hover_dismissed_sig ~= nil then
+		editor._diag_hover_dismissed_sig = nil
+		editor.status_message = "diagnostic hover restored"
+	elseif editor._diag_hover_active_sig ~= nil then
+		editor.status_message = "diagnostic hover already showing"
+	else
+		editor.status_message = "no diagnostic under cursor"
+	end
 end
 
 --- Toggle the mdview demo popup: a centered, bordered window that
@@ -4455,7 +4446,7 @@ end
 --- syntax-highlighted via the major-mode tree-sitter grammars). Any
 --- keypress dismisses it. Invoke via `M-x mdview-demo`.
 commands.mdview_demo = function(_view, editor)
-    require("cursed.mdview").toggle_demo(editor)
+	require("cursed.mdview").toggle_demo(editor)
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -4486,227 +4477,226 @@ end
 -- forward / -1 backward). Returns true on success, false (with an
 -- optional status message) on failure.
 local function drag_step(view, editor, dir)
-    local c = view:p()
-    if not c.anchor_line then
-        editor.status_message = "no selection to drag"
-        return false
-    end
-    local sl, sc, el, ec = view:selection_range()
-    ---@cast sl integer
-    ---@cast sc integer
-    ---@cast el integer
-    ---@cast ec integer
-    local cur_text = view:text_between(sl, sc, el, ec)
-    if #cur_text == 0 then
-        editor.status_message = "empty selection"
-        return false
-    end
+	local c = view:p()
+	if not c.anchor_line then
+		editor.status_message = "no selection to drag"
+		return false
+	end
+	local sl, sc, el, ec = view:selection_range()
+	---@cast sl integer
+	---@cast sc integer
+	---@cast el integer
+	---@cast ec integer
+	local cur_text = view:text_between(sl, sc, el, ec)
+	if #cur_text == 0 then
+		editor.status_message = "empty selection"
+		return false
+	end
 
-    local name = c._last_textobject
-    local fn = name and view:_textobject_fn(name) or nil
+	local name = c._last_textobject
+	local fn = name and view:_textobject_fn(name) or nil
 
-    -- Destination span [dsl, dsc, del, dec) for the OTHER unit to swap
-    -- with. When set, the inter-unit gap is the text between the two
-    -- spans (preserved verbatim); the swap replaces the union with
-    -- other + gap + cur (forward) or other + gap + cur (backward —
-    -- gap is still between them, only their order changes).
-    local dsl, dsc, del, dec
+	-- Destination span [dsl, dsc, del, dec) for the OTHER unit to swap
+	-- with. When set, the inter-unit gap is the text between the two
+	-- spans (preserved verbatim); the swap replaces the union with
+	-- other + gap + cur (forward) or other + gap + cur (backward —
+	-- gap is still between them, only their order changes).
+	local dsl, dsc, del, dec
 
-    if fn then
-        -- Resolve the adjacent unit of the SAME textobject. Forward:
-        -- query one char past the selection's end and ask for the
-        -- forward-adjacent unit (dir=+1). Backward: query one char
-        -- before the selection's start with dir=-1. This mirrors how
-        -- the old transpose_sentences / transpose_sexp located the
-        -- neighbor (step off the current range's edge, then resolve).
-        local ql, qc
-        if dir > 0 then
-            ql, qc = el, ec
-            if ql == view:line_count() - 1 and qc >= view:content_len(ql) then
-                editor.status_message = "nowhere to drag forward"
-                return false
-            end
-        else
-            ql, qc = sl, sc
-            if ql == 0 and qc == 0 then
-                editor.status_message = "nowhere to drag backward"
-                return false
-            end
-        end
-        -- Step one char off the edge so we sit in the inter-unit gap,
-        -- then ask for the adjacent unit in `dir`.
-        local step_l, step_c = ql, qc
-        if dir > 0 then
-            step_c = step_c + 1
-            local clen = view:content_len(step_l)
-            if step_c > clen then
-                if step_l >= view:line_count() - 1 then
-                    editor.status_message = "end of document"
-                    return false
-                end
-                step_l = step_l + 1
-                step_c = 0
-            end
-        else
-            step_c = step_c - 1
-            if step_c < 0 then
-                if step_l == 0 then
-                    editor.status_message = "start of document"
-                    return false
-                end
-                step_l = step_l - 1
-                step_c = view:content_len(step_l)
-            end
-        end
-        dsl, dsc, del, dec = fn(view, step_l, step_c, dir)
-        if not dsl then
-            editor.status_message = dir > 0 and "no next unit to drag onto"
-                or "no previous unit to drag onto"
-            return false
-        end
-        ---@cast dsl integer
-        ---@cast dsc integer
-        ---@cast del integer
-        ---@cast dec integer
-        -- Overlap guard: when the resolved destination overlaps the
-        -- current selection (e.g. a prior drag merged the dragged word
-        -- into its neighbor, so the resolver returns a unit that
-        -- CONTAINS the selection), the swap would duplicate or garble
-        -- text. Bail instead of corrupting. Compare as document byte
-        -- offsets so multi-line spans work.
-        local sb_sel = view:line_col_byte_offset(sl, sc)
-        local eb_sel = view:line_col_byte_offset(el, ec)
-        local sb_dst = view:line_col_byte_offset(dsl, dsc)
-        local eb_dst = view:line_col_byte_offset(del, dec)
-        if eb_sel > sb_dst and eb_dst > sb_sel then
-            editor.status_message = "no adjacent unit to drag onto"
-            return false
-        end
-    else
-        -- No textobject known: nudge one character. Forward swap is
-        -- [cur][c]  ->  [c][cur]; backward swap is [c][cur] -> [cur][c].
-        -- Model the destination as a 1-char span at the proper edge so
-        -- the unified swap path (delete union, insert other+gap+cur)
-        -- handles this too. The "other" text is that single char.
-        local buf = view.buffer
-        if dir > 0 then
-            -- Take the char right after ec (possibly the first char of
-            -- the next line if ec is at end-of-line).
-            local elen = view:content_len(el)
-            if ec < elen then
-                dsl, dsc, del, dec = el, ec, el, ec + 1
-            elseif el < buf:line_count() - 1 then
-                dsl, dsc, del, dec = el + 1, 0, el + 1, 1
-            else
-                editor.status_message = "end of document"
-                return false
-            end
-        else
-            if sc > 0 then
-                dsl, dsc, del, dec = sl, sc - 1, sl, sc
-            elseif sl > 0 then
-                local prev_len = view:content_len(sl - 1)
-                dsl, dsc, del, dec = sl - 1, prev_len, sl - 1, prev_len + 1
-            else
-                editor.status_message = "start of document"
-                return false
-            end
-        end
-    end
+	if fn then
+		-- Resolve the adjacent unit of the SAME textobject. Forward:
+		-- query one char past the selection's end and ask for the
+		-- forward-adjacent unit (dir=+1). Backward: query one char
+		-- before the selection's start with dir=-1. This mirrors how
+		-- the old transpose_sentences / transpose_sexp located the
+		-- neighbor (step off the current range's edge, then resolve).
+		local ql, qc
+		if dir > 0 then
+			ql, qc = el, ec
+			if ql == view:line_count() - 1 and qc >= view:content_len(ql) then
+				editor.status_message = "nowhere to drag forward"
+				return false
+			end
+		else
+			ql, qc = sl, sc
+			if ql == 0 and qc == 0 then
+				editor.status_message = "nowhere to drag backward"
+				return false
+			end
+		end
+		-- Step one char off the edge so we sit in the inter-unit gap,
+		-- then ask for the adjacent unit in `dir`.
+		local step_l, step_c = ql, qc
+		if dir > 0 then
+			step_c = step_c + 1
+			local clen = view:content_len(step_l)
+			if step_c > clen then
+				if step_l >= view:line_count() - 1 then
+					editor.status_message = "end of document"
+					return false
+				end
+				step_l = step_l + 1
+				step_c = 0
+			end
+		else
+			step_c = step_c - 1
+			if step_c < 0 then
+				if step_l == 0 then
+					editor.status_message = "start of document"
+					return false
+				end
+				step_l = step_l - 1
+				step_c = view:content_len(step_l)
+			end
+		end
+		dsl, dsc, del, dec = fn(view, step_l, step_c, dir)
+		if not dsl then
+			editor.status_message = dir > 0 and "no next unit to drag onto" or "no previous unit to drag onto"
+			return false
+		end
+		---@cast dsl integer
+		---@cast dsc integer
+		---@cast del integer
+		---@cast dec integer
+		-- Overlap guard: when the resolved destination overlaps the
+		-- current selection (e.g. a prior drag merged the dragged word
+		-- into its neighbor, so the resolver returns a unit that
+		-- CONTAINS the selection), the swap would duplicate or garble
+		-- text. Bail instead of corrupting. Compare as document byte
+		-- offsets so multi-line spans work.
+		local sb_sel = view:line_col_byte_offset(sl, sc)
+		local eb_sel = view:line_col_byte_offset(el, ec)
+		local sb_dst = view:line_col_byte_offset(dsl, dsc)
+		local eb_dst = view:line_col_byte_offset(del, dec)
+		if eb_sel > sb_dst and eb_dst > sb_sel then
+			editor.status_message = "no adjacent unit to drag onto"
+			return false
+		end
+	else
+		-- No textobject known: nudge one character. Forward swap is
+		-- [cur][c]  ->  [c][cur]; backward swap is [c][cur] -> [cur][c].
+		-- Model the destination as a 1-char span at the proper edge so
+		-- the unified swap path (delete union, insert other+gap+cur)
+		-- handles this too. The "other" text is that single char.
+		local buf = view.buffer
+		if dir > 0 then
+			-- Take the char right after ec (possibly the first char of
+			-- the next line if ec is at end-of-line).
+			local elen = view:content_len(el)
+			if ec < elen then
+				dsl, dsc, del, dec = el, ec, el, ec + 1
+			elseif el < buf:line_count() - 1 then
+				dsl, dsc, del, dec = el + 1, 0, el + 1, 1
+			else
+				editor.status_message = "end of document"
+				return false
+			end
+		else
+			if sc > 0 then
+				dsl, dsc, del, dec = sl, sc - 1, sl, sc
+			elseif sl > 0 then
+				local prev_len = view:content_len(sl - 1)
+				dsl, dsc, del, dec = sl - 1, prev_len, sl - 1, prev_len + 1
+			else
+				editor.status_message = "start of document"
+				return false
+			end
+		end
+	end
 
-    -- Normalize so [usl,usc, uel,uec) is the SPAN-UNION of cur and the
-    -- destination (the whole region we'll replace), and `other` is the
-    -- destination's text. The gap between the two spans is preserved.
-    local usl, usc, uel, uec
-    local first_text, second_text, gap_text
-    if dir > 0 then
-        -- cur is first, then the gap [ec, dsl/dsc), then the destination.
-        usl, usc = sl, sc
-        uel, uec = del, dec
-        gap_text = view:text_between(el, ec, dsl, dsc)
-        local other_text = view:text_between(dsl, dsc, del, dec)
-        -- After swap: destination text, then gap, then cur text.
-        first_text = other_text
-        second_text = gap_text .. cur_text
-    else
-        -- destination is first, then the gap [dec, sl/sc), then cur.
-        usl, usc = dsl, dsc
-        uel, uec = el, ec
-        gap_text = view:text_between(del, dec, sl, sc)
-        local other_text = view:text_between(dsl, dsc, del, dec)
-        -- After swap: cur text, then gap, then destination text.
-        first_text = cur_text .. gap_text
-        second_text = other_text
-    end
+	-- Normalize so [usl,usc, uel,uec) is the SPAN-UNION of cur and the
+	-- destination (the whole region we'll replace), and `other` is the
+	-- destination's text. The gap between the two spans is preserved.
+	local usl, usc, uel, uec
+	local first_text, second_text, gap_text
+	if dir > 0 then
+		-- cur is first, then the gap [ec, dsl/dsc), then the destination.
+		usl, usc = sl, sc
+		uel, uec = del, dec
+		gap_text = view:text_between(el, ec, dsl, dsc)
+		local other_text = view:text_between(dsl, dsc, del, dec)
+		-- After swap: destination text, then gap, then cur text.
+		first_text = other_text
+		second_text = gap_text .. cur_text
+	else
+		-- destination is first, then the gap [dec, sl/sc), then cur.
+		usl, usc = dsl, dsc
+		uel, uec = el, ec
+		gap_text = view:text_between(del, dec, sl, sc)
+		local other_text = view:text_between(dsl, dsc, del, dec)
+		-- After swap: cur text, then gap, then destination text.
+		first_text = cur_text .. gap_text
+		second_text = other_text
+	end
 
-    local del_n = view:chars_between(usl, usc, uel, uec)
-    local ins = first_text .. second_text
-    -- Byte offset of cur_text within `ins`: forward drag places it
-    -- after (other + gap); backward drag places it at the front.
-    local cur_off = dir > 0 and (#first_text + #gap_text) or 0
-    local buf = view.buffer
-    buf:close_edit()
-    buf:begin_edit()
-    local rl, rc = usl, usc
-    if del_n > 0 then
-        rl, rc = buf:delete_char(usl, usc, del_n)
-    end
-    -- (rl, rc) is where `ins` begins; insert_char returns the END,
-    -- which we don't need — the new selection is computed from the
-    -- START + byte offsets via the buffer's byte<->linecol mappers
-    -- (handles newlines in multi-line inserted text correctly).
-    local ins_start_l, ins_start_c = rl, rc
-    if #ins > 0 then
-        buf:insert_char(rl, rc, ins)
-    end
-    buf:end_edit()
+	local del_n = view:chars_between(usl, usc, uel, uec)
+	local ins = first_text .. second_text
+	-- Byte offset of cur_text within `ins`: forward drag places it
+	-- after (other + gap); backward drag places it at the front.
+	local cur_off = dir > 0 and (#first_text + #gap_text) or 0
+	local buf = view.buffer
+	buf:close_edit()
+	buf:begin_edit()
+	local rl, rc = usl, usc
+	if del_n > 0 then
+		rl, rc = buf:delete_char(usl, usc, del_n)
+	end
+	-- (rl, rc) is where `ins` begins; insert_char returns the END,
+	-- which we don't need — the new selection is computed from the
+	-- START + byte offsets via the buffer's byte<->linecol mappers
+	-- (handles newlines in multi-line inserted text correctly).
+	local ins_start_l, ins_start_c = rl, rc
+	if #ins > 0 then
+		buf:insert_char(rl, rc, ins)
+	end
+	buf:end_edit()
 
-    -- Locate the dragged cur_text at its new position: start byte =
-    -- ins_start's document byte + cur_off; end byte = start + #cur_text.
-    local ins_start_byte = view:line_col_byte_offset(ins_start_l, ins_start_c)
-    local nsl, nsc = view:byte_to_line_col(ins_start_byte + cur_off)
-    local nel, nec = view:byte_to_line_col(ins_start_byte + cur_off + #cur_text)
+	-- Locate the dragged cur_text at its new position: start byte =
+	-- ins_start's document byte + cur_off; end byte = start + #cur_text.
+	local ins_start_byte = view:line_col_byte_offset(ins_start_l, ins_start_c)
+	local nsl, nsc = view:byte_to_line_col(ins_start_byte + cur_off)
+	local nel, nec = view:byte_to_line_col(ins_start_byte + cur_off + #cur_text)
 
-    -- Re-establish the selection at the new span WITHOUT clearing
-    -- _last_textobject (set_mark would clear it). Anchor at the start,
-    -- point at the end; keep the attribution so a successive drag
-    -- keeps stepping over the same textobject.
-    c.anchor_line = nsl
-    c.anchor_col = nsc
-    c.anchor_transient = nil
-    c.shadow_undo = nil
-    c.shadow_redo = nil
-    c.line = nel
-    c.col = nec
-    c.goal_col = nec
-    c.visual_col = nil
-    c.yank_line = nil
-    c.yank_col = nil
-    return true
+	-- Re-establish the selection at the new span WITHOUT clearing
+	-- _last_textobject (set_mark would clear it). Anchor at the start,
+	-- point at the end; keep the attribution so a successive drag
+	-- keeps stepping over the same textobject.
+	c.anchor_line = nsl
+	c.anchor_col = nsc
+	c.anchor_transient = nil
+	c.shadow_undo = nil
+	c.shadow_redo = nil
+	c.line = nel
+	c.col = nec
+	c.goal_col = nec
+	c.visual_col = nil
+	c.yank_line = nil
+	c.yank_col = nil
+	return true
 end
 
 --- Drag the active selection one unit to the left (backward).
 --- Bound to alt-left. Repeats with a universal arg.
 commands.drag_left = function(view, editor, ...)
-    local n = repeat_count(...)
-    local loop = math.max(1, math.abs(n))
-    for _ = 1, loop do
-        if not drag_step(view, editor, -1) then
-            return
-        end
-    end
+	local n = repeat_count(...)
+	local loop = math.max(1, math.abs(n))
+	for _ = 1, loop do
+		if not drag_step(view, editor, -1) then
+			return
+		end
+	end
 end
 
 --- Drag the active selection one unit to the right (forward).
 --- Bound to alt-right. Repeats with a universal arg.
 commands.drag_right = function(view, editor, ...)
-    local n = repeat_count(...)
-    local loop = math.max(1, math.abs(n))
-    for _ = 1, loop do
-        if not drag_step(view, editor, 1) then
-            return
-        end
-    end
+	local n = repeat_count(...)
+	local loop = math.max(1, math.abs(n))
+	for _ = 1, loop do
+		if not drag_step(view, editor, 1) then
+			return
+		end
+	end
 end
 
 --   backward_<name>_select  — backward, extending the selection
@@ -4729,41 +4719,41 @@ end
 --- textobject NAME (resolved lazily at call time so the closure survives
 --- a mode's textobjects being re-merged on the next transition).
 local function make_textobject_cmd(kind, name)
-    if kind == "mark" then
-        return function(view, _editor)
-            local p = view:p()
-            view:select_range(name, p.line, p.col)
-        end
-    elseif kind == "forward" then
-        return function(view, _editor, ...)
-            return view:move_word(repeat_count(...), name)
-        end
-    elseif kind == "backward" then
-        return function(view, _editor, ...)
-            return view:move_word(-repeat_count(...), name)
-        end
-    elseif kind == "forward_select" then
-        return function(view, editor, ...)
-            editor._extend = true
-            view:_begin_shift_select()
-            local ok = view:move_word(math.abs(repeat_count(...)), name)
-            -- A textobject just defined the selection, so record its
-            -- name for the drag commands. _begin_shift_select may have
-            -- re-anchored, which clears the prior textobject; set it
-            -- AFTER the motion so the active selection is attributed to
-            -- this textobject.
-            view:p()._last_textobject = name
-            return ok
-        end
-    elseif kind == "backward_select" then
-        return function(view, editor, ...)
-            editor._extend = true
-            view:_begin_shift_select()
-            local ok = view:move_word(-math.abs(repeat_count(...)), name)
-            view:p()._last_textobject = name
-            return ok
-        end
-    end
+	if kind == "mark" then
+		return function(view, _editor)
+			local p = view:p()
+			view:select_range(name, p.line, p.col)
+		end
+	elseif kind == "forward" then
+		return function(view, _editor, ...)
+			return view:move_word(repeat_count(...), name)
+		end
+	elseif kind == "backward" then
+		return function(view, _editor, ...)
+			return view:move_word(-repeat_count(...), name)
+		end
+	elseif kind == "forward_select" then
+		return function(view, editor, ...)
+			editor._extend = true
+			view:_begin_shift_select()
+			local ok = view:move_word(math.abs(repeat_count(...)), name)
+			-- A textobject just defined the selection, so record its
+			-- name for the drag commands. _begin_shift_select may have
+			-- re-anchored, which clears the prior textobject; set it
+			-- AFTER the motion so the active selection is attributed to
+			-- this textobject.
+			view:p()._last_textobject = name
+			return ok
+		end
+	elseif kind == "backward_select" then
+		return function(view, editor, ...)
+			editor._extend = true
+			view:_begin_shift_select()
+			local ok = view:move_word(-math.abs(repeat_count(...)), name)
+			view:p()._last_textobject = name
+			return ok
+		end
+	end
 end
 
 local TO_KINDS = { "mark", "forward", "backward", "forward_select", "backward_select" }
@@ -4773,13 +4763,13 @@ local TO_KINDS = { "mark", "forward", "backward", "forward_select", "backward_se
 --- backward_<name>, forward_<name>_select, backward_<name>_select
 --- (e.g. forward_word_select — the _select is a trailing suffix).
 local function cmd_name_for(kind, name)
-    if kind == "mark" then
-        return "mark_" .. name
-    elseif kind:sub(-7) == "_select" then
-        return kind:sub(1, -8) .. "_" .. name .. "_select"
-    else
-        return kind .. "_" .. name
-    end
+	if kind == "mark" then
+		return "mark_" .. name
+	elseif kind:sub(-7) == "_select" then
+		return kind:sub(1, -8) .. "_" .. name .. "_select"
+	else
+		return kind .. "_" .. name
+	end
 end
 
 --- Register `mark_<name>` / `forward_<name>` / `backward_<name>` /
@@ -4800,23 +4790,23 @@ end
 ---@param extra_textobjects table? optional name→definition overrides
 ---@return string[]
 function commands.register_textobject_commands(view, extra_textobjects)
-    local tos = view:_get_textobjects()
-    if extra_textobjects then
-        for k, v in pairs(extra_textobjects) do
-            tos[k] = v
-        end
-    end
-    local added = {}
-    for name in pairs(tos) do
-        for _, kind in ipairs(TO_KINDS) do
-            local cmd_name = cmd_name_for(kind, name)
-            if commands[cmd_name] == nil then
-                commands[cmd_name] = make_textobject_cmd(kind, name)
-                added[#added + 1] = cmd_name
-            end
-        end
-    end
-    return added
+	local tos = view:_get_textobjects()
+	if extra_textobjects then
+		for k, v in pairs(extra_textobjects) do
+			tos[k] = v
+		end
+	end
+	local added = {}
+	for name in pairs(tos) do
+		for _, kind in ipairs(TO_KINDS) do
+			local cmd_name = cmd_name_for(kind, name)
+			if commands[cmd_name] == nil then
+				commands[cmd_name] = make_textobject_cmd(kind, name)
+				added[#added + 1] = cmd_name
+			end
+		end
+	end
+	return added
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -4829,12 +4819,12 @@ end
 -- never blocks commands.lua load.
 ----------------------------------------------------------------------------------------------------
 do
-    local spell_cmds = require("cursed.spell.commands")
-    commands.flyspell_correct = spell_cmds.flyspell_correct
-    commands.autocorrect_word = spell_cmds.autocorrect_word
-    commands.flyspell_buffer = spell_cmds.flyspell_buffer
-    commands.flyspell_add_to_dict = spell_cmds.flyspell_add_to_dict
-    commands.flyspell_ignore_word = spell_cmds.flyspell_ignore_word
+	local spell_cmds = require("cursed.spell.commands")
+	commands.flyspell_correct = spell_cmds.flyspell_correct
+	commands.autocorrect_word = spell_cmds.autocorrect_word
+	commands.flyspell_buffer = spell_cmds.flyspell_buffer
+	commands.flyspell_add_to_dict = spell_cmds.flyspell_add_to_dict
+	commands.flyspell_ignore_word = spell_cmds.flyspell_ignore_word
 end
 
 return commands
