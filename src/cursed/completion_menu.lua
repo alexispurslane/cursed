@@ -214,7 +214,7 @@ function CompletionMenu:close()
 	self._scroll = 0
 	self._loading = false
 	self._accepted = false
-	self._force_keep_open = false
+	self._force_keep_open = 0
 	-- Fire the on_close hook so iterate-pick loops (flyspell_correct,
 	-- query-replace chaining) can chain accept→advance or stop on cancel.
 	if was_active and self.on_close ~= nil then
@@ -413,13 +413,13 @@ end
 --- a loading placeholder while the request is in flight.
 function CompletionMenu:force_open()
 	log.info("completion_menu", "force_open")
-	-- One-shot: the next _on_post_command (fired for whatever key/event
-	-- forced us open — e.g. `enter_key` when M-x palette dispatches
-	-- flyspell_correct) must NOT close us, even though it's neither
-	-- __printable nor a keep-alive command. Without this, the post-
-	-- command hook dismisses the menu we just popped before the user
-	-- can accept a suggestion.
-	self._force_keep_open = true
+	-- Counter: suppress the NEXT N _on_post_command closes.
+	-- Defaults to 1 (direct keybinding dispatch — one post_command
+	-- from _dispatch_trie). Callers dispatched through M-x may need
+	-- a higher count and can bump it after force_open returns (M-x's
+	-- on_submit emits its own post_command_hook AND the wrapping
+	-- _dispatch_trie emits another for the keybinding).
+	self._force_keep_open = 1
 	self:_tick(true)
 end
 
@@ -664,13 +664,14 @@ end
 ---@param cmd_name string? command name (nil when dispatched to a fn)
 ---@param view View the active view at dispatch
 function CompletionMenu:_on_post_command(editor, cmd_name, view)
-	-- force_open callers (flyspell_correct) set _force_keep_open to
-	-- suppress exactly ONE post_command close: the one that opened
-	-- the menu (the post_command for the menu-opening key, not for
-	-- the flyspell_correct command itself — the palette dispatches
-	-- it under whatever key the user pressed to submit M-x).
-	if self._force_keep_open then
-		self._force_keep_open = false
+	-- force_open callers (flyspell_correct) set _force_keep_open to a
+	-- counter (2) to suppress the first N post_command closes after
+	-- forcing the menu open. M-x's on_submit emits post_command_hook
+	-- for the dispatched command (flyspell_correct) AND the wrapping
+	-- _dispatch_trie emits post_command_hook for the keybinding
+	-- (enter_key) — we need to survive both before settling.
+	if self._force_keep_open and self._force_keep_open > 0 then
+		self._force_keep_open = self._force_keep_open - 1
 		return
 	end
 	-- Fast no-op: menu already dismissed and this command cannot reopen
