@@ -1096,7 +1096,7 @@ commands.execute_command = function(view, editor)
 			-- is rebuilt, so major-mode overrides are reflected).
 			local map = editor._chord_for_command
 			return map and map[name] or nil
-		end),
+		end, editor._command_frecency),
 		on_submit = function(input)
 			if #input == 0 then
 				return
@@ -1152,6 +1152,24 @@ commands.execute_command = function(view, editor)
 			else
 				ok, result = pcall(cmd, view, editor)
 			end
+			-- Record frecency: only commands launched from M-x count.
+			local freq = editor._command_frecency
+			local entry = freq[name]
+			if not entry then
+				entry = { uses = {} }
+				freq[name] = entry
+			end
+			local uses = entry.uses
+			uses[#uses + 1] = os.time()
+			if #uses > 50 then
+				table.remove(uses, 1)
+			end
+
+			-- Emit post_command_hook so listeners (doc sync, completion
+			-- menu dismiss, last-command history, etc.) fire, matching
+			-- what _dispatch_trie does in main.lua for keybindings.
+			editor.event_system:emit("post_command_hook", name, view)
+
 			editor.universal_args = nil
 			if not ok then
 				editor.status_message = ("command error: %s"):format(tostring(result))

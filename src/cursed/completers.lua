@@ -9,6 +9,7 @@ local find_file = require("cursed.find_file")
 local utf8 = require("cursed.utf8")
 local log = require("cursed.log")
 local fzy = require("cursed.fzy")
+local frecency_score = fzy.frecency_score
 
 local completers = {}
 
@@ -52,12 +53,27 @@ local function fzy_filter(items, text_fn, query, cap)
 
 	local lneedle = fzy.lower_needle(query)
 	local scored = {}
+	local unscored = {}
 
 	for _, item in ipairs(items) do
 		local text = text_fn(item)
 		local s = fzy.score(query, text, nil, lneedle)
 		if s ~= nil then
 			scored[#scored + 1] = { item = item, score = s }
+		else
+			-- Save for word-order-independent fallback pass
+			unscored[#unscored + 1] = { item = item, text = text }
+		end
+	end
+
+	-- Second pass: try word-level matching for items that didn't match
+	-- in order (e.g. query "paragraph forward" → "forward paragraph").
+	if #unscored > 0 then
+		for _, entry in ipairs(unscored) do
+			local s = fzy.score_words(query, entry.text)
+			if s ~= nil then
+				scored[#scored + 1] = { item = entry.item, score = s }
+			end
 		end
 	end
 
@@ -112,12 +128,16 @@ end
 
 --- Create a completer for command names.
 --- Takes a `names_fn` iterator (from Commands.names) to avoid circular deps,
---- and an optional `chord_fn(name) -> string?` that resolves a command name
---- to a human-readable chord for display as completion metadata.
+--- an optional `chord_fn(name) -> string?` that resolves a command name
+--- to a human-readable chord for display as completion metadata,
+--- and an optional `frecency` table mapping command_name -> { uses = integer[] }
+--- for sorting recently/frequently used commands to the top when the query
+--- is empty.
 ---@param names_fn fun(): function iterator over command name strings
 ---@param chord_fn fun(name: string): string?|nil
+---@param frecency table|nil
 ---@return fun(text: string): table
-function completers.commands(names_fn, chord_fn)
+function completers.commands(names_fn, chord_fn, frecency)
 	return function(text)
 		-- Split on first ":" for inline argument syntax; only match
 		-- command names against the part before the colon.
@@ -140,6 +160,25 @@ function completers.commands(names_fn, chord_fn)
 				display = name:gsub("_", " "),
 				chord = (chord_fn and chord_fn(name)) or nil,
 			}
+		end
+
+		-- When no query text, sort by frecency so recently/frequently used
+		-- commands appear first (and the top one is default-selected).
+		-- Fuzzy search via fzy_filter takes over once the user types.
+		if #cmd_text == 0 and frecency then
+			local freq_cache = {}
+			for _, it in ipairs(items) do
+				local entry = frecency[it.name]
+				freq_cache[it] = entry and frecency_score(entry.uses) or 0
+			end
+			table.sort(items, function(a, b)
+				local sa = freq_cache[a]
+				local sb = freq_cache[b]
+				if sa ~= sb then
+					return sa > sb
+				end
+				return a.name < b.name
+			end)
 		end
 
 		local matched = fzy_filter(items, function(it)

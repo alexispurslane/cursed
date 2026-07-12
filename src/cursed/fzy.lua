@@ -33,11 +33,11 @@ local SCORE_MAX = math.huge
 -- To-lower lookup table: map uppercase ASCII to lowercase, identity otherwise.
 local LOWER = {}
 for i = 0, 255 do
-    if i >= 65 and i <= 90 then -- A-Z -> a-z
-        LOWER[i] = i + 32
-    else
-        LOWER[i] = i
-    end
+	if i >= 65 and i <= 90 then -- A-Z -> a-z
+		LOWER[i] = i + 32
+	else
+		LOWER[i] = i
+	end
 end
 
 --- Compute the fzy match bonus for a position in the candidate string.
@@ -48,21 +48,21 @@ end
 ---@param ch integer
 ---@return number
 local function compute_bonus(last_ch, ch)
-    -- Check special separators in last_ch
-    if last_ch == 0x2F then -- /
-        return SCORE_MATCH_SLASH
-    elseif last_ch == 0x2D or last_ch == 0x5F or last_ch == 0x20 then -- - _ space
-        return SCORE_MATCH_WORD
-    elseif last_ch == 0x2E then -- .
-        return SCORE_MATCH_DOT
-    end
+	-- Check special separators in last_ch
+	if last_ch == 0x2F then -- /
+		return SCORE_MATCH_SLASH
+	elseif last_ch == 0x2D or last_ch == 0x5F or last_ch == 0x20 then -- - _ space
+		return SCORE_MATCH_WORD
+	elseif last_ch == 0x2E then -- .
+		return SCORE_MATCH_DOT
+	end
 
-    -- camelCase: uppercase after lowercase
-    if ch >= 65 and ch <= 90 and last_ch >= 97 and last_ch <= 122 then
-        return SCORE_MATCH_CAPITAL
-    end
+	-- camelCase: uppercase after lowercase
+	if ch >= 65 and ch <= 90 and last_ch >= 97 and last_ch <= 122 then
+		return SCORE_MATCH_CAPITAL
+	end
 
-    return SCORE_MATCH_CONSECUTIVE
+	return SCORE_MATCH_CONSECUTIVE
 end
 
 --- Precompute the match bonus for every position in the candidate.
@@ -70,17 +70,17 @@ end
 ---@param haystack string
 ---@return number[]
 local function precompute_bonus(haystack)
-    local n = #haystack
-    local bonus = {}
-    local last_ch = 0x2F -- fzy convention: first char bonus is relative to '/'
+	local n = #haystack
+	local bonus = {}
+	local last_ch = 0x2F -- fzy convention: first char bonus is relative to '/'
 
-    for i = 1, n do
-        local ch = haystack:byte(i)
-        bonus[i] = compute_bonus(last_ch, ch)
-        last_ch = ch
-    end
+	for i = 1, n do
+		local ch = haystack:byte(i)
+		bonus[i] = compute_bonus(last_ch, ch)
+		last_ch = ch
+	end
 
-    return bonus
+	return bonus
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -93,33 +93,33 @@ end
 ---@param haystack string
 ---@return boolean
 local function has_match(needle, haystack)
-    local ni = #needle
-    local hi = #haystack
+	local ni = #needle
+	local hi = #haystack
 
-    if ni == 0 then
-        return true
-    end
-    if ni > hi then
-        return false
-    end
+	if ni == 0 then
+		return true
+	end
+	if ni > hi then
+		return false
+	end
 
-    local h = 1
-    for n = 1, ni do
-        local nc = LOWER[needle:byte(n)]
-        local found = false
-        while h <= hi do
-            if LOWER[haystack:byte(h)] == nc then
-                h = h + 1
-                found = true
-                break
-            end
-            h = h + 1
-        end
-        if not found then
-            return false
-        end
-    end
-    return true
+	local h = 1
+	for n = 1, ni do
+		local nc = LOWER[needle:byte(n)]
+		local found = false
+		while h <= hi do
+			if LOWER[haystack:byte(h)] == nc then
+				h = h + 1
+				found = true
+				break
+			end
+			h = h + 1
+		end
+		if not found then
+			return false
+		end
+	end
+	return true
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -138,111 +138,111 @@ local MATCH_MAX_LEN = 1024
 ---@param lneedle? integer[] precomputed lowercase needle bytes (optional; computed if absent). Precompute once via fzy.lower_needle(needle) when scoring many candidates against the same query.
 ---@return number? score or nil
 local function score(needle, haystack, bonuses, lneedle)
-    local ni = #needle
-    local hi = #haystack
+	local ni = #needle
+	local hi = #haystack
 
-    if ni == 0 then
-        return SCORE_MIN
-    end
-    if hi > MATCH_MAX_LEN or ni > hi then
-        return nil
-    end
+	if ni == 0 then
+		return SCORE_MIN
+	end
+	if hi > MATCH_MAX_LEN or ni > hi then
+		return nil
+	end
 
-    -- Exact-length shortcut: must be case-insensitive exact match.
-    if ni == hi then
-        for i = 1, ni do
-            if LOWER[needle:byte(i)] ~= LOWER[haystack:byte(i)] then
-                return nil
-            end
-        end
-        return SCORE_MAX
-    end
+	-- Exact-length shortcut: must be case-insensitive exact match.
+	if ni == hi then
+		for i = 1, ni do
+			if LOWER[needle:byte(i)] ~= LOWER[haystack:byte(i)] then
+				return nil
+			end
+		end
+		return SCORE_MAX
+	end
 
-    -- Fast pre-check: ordered substring match.
-    if not has_match(needle, haystack) then
-        return nil
-    end
+	-- Fast pre-check: ordered substring match.
+	if not has_match(needle, haystack) then
+		return nil
+	end
 
-    -- Precompute bonuses (or reuse from caller).
-    bonuses = bonuses or precompute_bonus(haystack)
+	-- Precompute bonuses (or reuse from caller).
+	bonuses = bonuses or precompute_bonus(haystack)
 
-    -- Build lowercase needle byte array (or reuse from caller).
-    if lneedle == nil then
-        lneedle = {}
-        for i = 1, ni do
-            lneedle[i] = LOWER[needle:byte(i)]
-        end
-    end
+	-- Build lowercase needle byte array (or reuse from caller).
+	if lneedle == nil then
+		lneedle = {}
+		for i = 1, ni do
+			lneedle[i] = LOWER[needle:byte(i)]
+		end
+	end
 
-    -- Build lowercase haystack byte array for fast comparison in the hot loop.
-    local lhaystack = {}
-    for i = 1, hi do
-        lhaystack[i] = LOWER[haystack:byte(i)]
-    end
+	-- Build lowercase haystack byte array for fast comparison in the hot loop.
+	local lhaystack = {}
+	for i = 1, hi do
+		lhaystack[i] = LOWER[haystack:byte(i)]
+	end
 
-    -- DP arrays: D and M, indexed 1..hi (Lua 1-indexed = C's position 0..hi-1).
-    -- We maintain prev_D/prev_M for the previous row, curr_D/curr_M for current.
-    local prev_D = {}
-    local prev_M = {}
-    local curr_D = {}
-    local curr_M = {}
+	-- DP arrays: D and M, indexed 1..hi (Lua 1-indexed = C's position 0..hi-1).
+	-- We maintain prev_D/prev_M for the previous row, curr_D/curr_M for current.
+	local prev_D = {}
+	local prev_M = {}
+	local curr_D = {}
+	local curr_M = {}
 
-    -- Row 1: first query character (i=0 in fzy's 0-indexed C code).
-    local gap_score = ni == 1 and SCORE_GAP_TRAILING or SCORE_GAP_INNER
-    local running_score = SCORE_MIN
-    local nc1 = lneedle[1]
+	-- Row 1: first query character (i=0 in fzy's 0-indexed C code).
+	local gap_score = ni == 1 and SCORE_GAP_TRAILING or SCORE_GAP_INNER
+	local running_score = SCORE_MIN
+	local nc1 = lneedle[1]
 
-    for j = 1, hi do
-        if lhaystack[j] == nc1 then
-            local s = ((j - 1) * SCORE_GAP_LEADING) + bonuses[j]
-            prev_D[j] = s
-            running_score = math.max(s, running_score + gap_score)
-            prev_M[j] = running_score
-        else
-            prev_D[j] = SCORE_MIN
-            running_score = running_score + gap_score
-            prev_M[j] = running_score
-        end
-    end
+	for j = 1, hi do
+		if lhaystack[j] == nc1 then
+			local s = ((j - 1) * SCORE_GAP_LEADING) + bonuses[j]
+			prev_D[j] = s
+			running_score = math.max(s, running_score + gap_score)
+			prev_M[j] = running_score
+		else
+			prev_D[j] = SCORE_MIN
+			running_score = running_score + gap_score
+			prev_M[j] = running_score
+		end
+	end
 
-    -- Rows 2..ni: remaining query characters.
-    for i = 2, ni do
-        gap_score = i == ni and SCORE_GAP_TRAILING or SCORE_GAP_INNER
-        local run_prev_D = SCORE_MIN
-        local run_prev_M = SCORE_MIN
-        running_score = SCORE_MIN
-        local nc = lneedle[i]
+	-- Rows 2..ni: remaining query characters.
+	for i = 2, ni do
+		gap_score = i == ni and SCORE_GAP_TRAILING or SCORE_GAP_INNER
+		local run_prev_D = SCORE_MIN
+		local run_prev_M = SCORE_MIN
+		running_score = SCORE_MIN
+		local nc = lneedle[i]
 
-        for j = 1, hi do
-            if lhaystack[j] == nc then
-                local s = SCORE_MIN
-                if j > 1 then
-                    -- Two ways to extend the match:
-                    -- 1. prev query char matched at j-1, now matching at j (with bonus)
-                    -- 2. prev query char matched anywhere before j, and this is consecutive
-                    s = math.max(run_prev_M + bonuses[j], run_prev_D + SCORE_MATCH_CONSECUTIVE)
-                end
-                -- Save previous row's values at j for the next iteration (as j-1).
-                run_prev_D = prev_D[j]
-                run_prev_M = prev_M[j]
-                curr_D[j] = s
-                running_score = math.max(s, running_score + gap_score)
-                curr_M[j] = running_score
-            else
-                run_prev_D = prev_D[j]
-                run_prev_M = prev_M[j]
-                curr_D[j] = SCORE_MIN
-                running_score = running_score + gap_score
-                curr_M[j] = running_score
-            end
-        end
+		for j = 1, hi do
+			if lhaystack[j] == nc then
+				local s = SCORE_MIN
+				if j > 1 then
+					-- Two ways to extend the match:
+					-- 1. prev query char matched at j-1, now matching at j (with bonus)
+					-- 2. prev query char matched anywhere before j, and this is consecutive
+					s = math.max(run_prev_M + bonuses[j], run_prev_D + SCORE_MATCH_CONSECUTIVE)
+				end
+				-- Save previous row's values at j for the next iteration (as j-1).
+				run_prev_D = prev_D[j]
+				run_prev_M = prev_M[j]
+				curr_D[j] = s
+				running_score = math.max(s, running_score + gap_score)
+				curr_M[j] = running_score
+			else
+				run_prev_D = prev_D[j]
+				run_prev_M = prev_M[j]
+				curr_D[j] = SCORE_MIN
+				running_score = running_score + gap_score
+				curr_M[j] = running_score
+			end
+		end
 
-        -- Swap: current becomes previous for the next row.
-        prev_D, curr_D = curr_D, prev_D
-        prev_M, curr_M = curr_M, prev_M
-    end
+		-- Swap: current becomes previous for the next row.
+		prev_D, curr_D = curr_D, prev_D
+		prev_M, curr_M = curr_M, prev_M
+	end
 
-    return prev_M[hi]
+	return prev_M[hi]
 end
 
 --- Precompute the lowercase needle byte array for reuse across many
@@ -250,11 +250,66 @@ end
 ---@param needle string
 ---@return integer[]
 local function lower_needle(needle)
-    local t = {}
-    for i = 1, #needle do
-        t[i] = LOWER[needle:byte(i)]
-    end
-    return t
+	local t = {}
+	for i = 1, #needle do
+		t[i] = LOWER[needle:byte(i)]
+	end
+	return t
+end
+
+----------------------------------------------------------------------------------------------------
+-- Word-order-independent matching
+----------------------------------------------------------------------------------------------------
+
+--- Score a candidate by requiring each whitespace-separated word of the
+--- query to match independently (word-order independent). Returns the
+--- sum of individual word scores, or nil if any word fails to match.
+--- For single-word queries, returns nil (the normal path handles it).
+---@param query string
+---@param haystack string
+---@return number|nil
+local function score_words(query, haystack)
+	local words = {}
+	for word in query:gmatch("%S+") do
+		words[#words + 1] = word
+	end
+	if #words <= 1 then
+		return nil
+	end
+
+	local total = 0
+	local bonuses = precompute_bonus(haystack)
+	for _, word in ipairs(words) do
+		local lword = lower_needle(word)
+		local s = score(word, haystack, bonuses, lword)
+		if s == nil then
+			return nil
+		end
+		total = total + s
+	end
+	return total
+end
+
+----------------------------------------------------------------------------------------------------
+-- Frecency scoring (Firefox-style)
+----------------------------------------------------------------------------------------------------
+
+--- Compute a frecency score from an ordered list of use timestamps.
+--- Uses Firefox-style frecency: each use within the last 100 days
+--- contributes (100 - days_since) points; uses older than 100 days
+--- contribute nothing. Higher score = more frequently and recently used.
+---@param uses integer[] timestamps (os.time) in chronological order
+---@return number
+local function frecency_score(uses)
+	local now = os.time()
+	local total = 0
+	for _, t in ipairs(uses) do
+		local days = (now - t) / 86400
+		if days < 100 then
+			total = total + (100 - days)
+		end
+	end
+	return total
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -262,9 +317,11 @@ end
 ----------------------------------------------------------------------------------------------------
 
 return {
-    score = score,
-    has_match = has_match,
-    lower_needle = lower_needle,
-    SCORE_MIN = SCORE_MIN,
-    SCORE_MAX = SCORE_MAX,
+	score = score,
+	score_words = score_words,
+	has_match = has_match,
+	lower_needle = lower_needle,
+	frecency_score = frecency_score,
+	SCORE_MIN = SCORE_MIN,
+	SCORE_MAX = SCORE_MAX,
 }

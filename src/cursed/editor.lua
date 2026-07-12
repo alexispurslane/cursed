@@ -417,6 +417,7 @@ end
 ---@field _extend boolean true while a `*_select` command is running its motion, so the motion's transient-anchor drop (close_edit_for_motion) is suppressed and the shift-selection extends instead of being cleared
 ---@field _command_before_this string|nil the command before the most recent one (Emacs `command-before-this`)
 ---@field _last_complex_command { name: string, universal_args: table }|nil most recent command invoked with universal args (for repeat-complex-command)
+---@field _command_frecency table per-command frecency data { uses = integer[] } for frecency-sorted M-x
 ---@field _exit_code integer exit code surfaced by async tasks
 ---@field _whichkey_node keybind.Trie|nil current trie node while a chord prefix is active (drives the which-key hint)
 ---@field _whichkey_prefix string|nil formatted chord-so-far (e.g. "C-x") while a chord prefix is active
@@ -493,6 +494,7 @@ function Editor.new(term)
 		_whichkey_node = nil,
 		_whichkey_prefix = nil,
 		_whichkey_page = 0,
+		_command_frecency = {}, -- { [cmd_name] = { uses = {timestamp, ...} } }
 		gutter_sign_fns = {}, -- overrideable per-line gutter-sign callbacks (see Editor.gutter_sign_fns)
 		_code_action_lines_by_uri = {}, -- per-URI set of line numbers with available code actions
 	}, Editor)
