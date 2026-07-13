@@ -32,10 +32,11 @@ return {
 		view:_run_input_hooks("printable")
 	end,
 
-	-- Line navigation (visual line aware)
-	["ctrl-a"] = "move_beginning_of_visual_line",
+	-- Line navigation (logical lines by default; visual-movement mode
+	-- overrides ctrl-n/p/a/e to visual-line variants)
+	["ctrl-a"] = "move_line_start",
 	["home"] = "move_line_start",
-	["ctrl-e"] = "move_end_of_visual_line",
+	["ctrl-e"] = "move_line_end",
 	["end"] = "move_line_end",
 
 	-- Character navigation
@@ -44,10 +45,10 @@ return {
 	["ctrl-f"] = "forward_char",
 	["right"] = "forward_char",
 
-	-- Visual line navigation
-	["ctrl-p"] = "backward_visual_line",
+	-- Line navigation (logical lines by default)
+	["ctrl-p"] = "backward_line",
 	["up"] = "arrow_up",
-	["ctrl-n"] = "forward_visual_line",
+	["ctrl-n"] = "forward_line",
 	["down"] = "arrow_down",
 
 	-- Shift-select (move-and-select): arrow / home / end keys are the

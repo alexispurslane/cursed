@@ -2,7 +2,7 @@
 ---
 --- When the user opens a directory (CLI arg `cursed .` or `open-file` on
 --- a directory), this mode launches instead of showing an error. It's a
---- non-file-backed MajorMode whose buffer text IS the directory listing,
+--- non-file-backed Mode whose buffer text IS the directory listing,
 --- whose cursor line IS the selected row.
 ---
 --- Design: the header shows `_fm_dir .. _fm_query` — the resolved base
@@ -20,7 +20,7 @@
 --- activates the mode. Called from Editor:open_file / open_file_background
 --- and main.lua CLI arg handling when a directory is detected.
 
-local MajorMode = require("cursed.major_mode")
+local Mode = require("cursed.major_mode")
 local View = require("cursed.view").View
 local Buffer = require("cursed.buffer").Buffer
 local find_file = require("cursed.find_file")
@@ -472,10 +472,10 @@ local function handle_up(view)
 end
 
 ----------------------------------------------------------------------------------------------------
--- File Manager MajorMode
+-- File Manager Mode
 ----------------------------------------------------------------------------------------------------
 
-local FileManager = MajorMode.new({
+local FileManager = Mode.new({
 	name = "file-manager",
 	no_gutter = true,
 	wrap = false,

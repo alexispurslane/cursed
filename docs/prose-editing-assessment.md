@@ -150,93 +150,92 @@ multiple-cursor aware. Cursors can be added via:
 
 #### 1. Auto-Fill / Fill-Paragraph
 
-**Problem:** There is no way to reflow a paragraph to a target width, and no automatic
-line breaking as you type.
+**Status: ✅ DONE** — Implemented in `src/cursed/commands.lua` (fill_paragraph,
+fill_region, unfill_paragraph, toggle_auto_fill) and `src/cursed/modes/auto_fill.lua`
+(auto-fill major mode).
 
-**This is the single biggest gap.** Without it, every line break must be managed
-manually. Editing an earlier word in a paragraph leaves ragged right edges that
-must be fixed by hand.
+**Implemented features:**
 
-**Missing features:**
+| Feature | Status | Binding | Notes |
+| --- | --- | --- | --- |
+| **`fill-paragraph`** (M-q) | ✅ | `alt-q` | Selects paragraph via textobject, joins lines, collapses whitespace, re-wraps at `view.margin` or 72 |
+| **`fill-region`** | ✅ | M-x `fill_region` | Same logic as fill-paragraph but operates on active selection |
+| **`auto-fill-mode`** | ✅ | M-x `toggle_auto_fill` | Major mode; listens on `post_command_hook` after `__printable`, breaks at last space before fill width |
+| **`fill-column`** | ✅ | `view.margin` / `view._auto_fill_margin` | Dedicated `_auto_fill_margin` field survives mode-setup overwrites |
+| **`set-fill-column`** | ✅ | `ctrl-x f` (`set_margin`) | Accepts universal arg or prompts interactively |
+| **`set-fill-prefix`** | ❌ Not implemented | — | — |
+| **`unfill-paragraph`** | ✅ | M-x `unfill_paragraph` | Joins paragraph into single line, collapses whitespace |
 
-- **`fill-paragraph`** (M-q in Emacs) — reformat the current paragraph to `fill-column`.
-  Handles bullet lists, numbered lists, blockquotes, hanging indents, and
-  paragraph-separating blank lines.
-- **`fill-region`** — apply fill to a marked region.
-- **`auto-fill-mode`** — while enabled, pressing space when the cursor is past
-  `fill-column` automatically inserts a line break at a word boundary. This is
-  what makes prose typing feel natural.
-- **`fill-column`** — an editable variable (typically 72 for prose, 80 for code).
-- **`set-fill-column` / `set-fill-prefix`** — interactive setting.
-- **`unfill-paragraph`** — join a paragraph back into one long line (useful before
-  pasting into web forms or reflowing at a different width).
+**Implementation notes:**
 
-**Implementation sketch for `fill-paragraph`:**
-
-```
-1. Detect paragraph boundaries (blank-line-delimited, like the existing
-   `paragraph` textobject).
-2. Collect all non-blank lines in the paragraph.
-3. Join them into a single string (splitting at the old line breaks).
-4. Re-wrap at `fill-column` using word-boundary-aware splitting
-   (the existing `_wrap_graph` logic can be reused here, just applied
-   to text formatting rather than display).
-5. Replace the paragraph region in the buffer.
-6. Single undo group.
-```
-
-**Implementation sketch for `auto-fill-mode`:**
-
-```
-1. After every printable char insertion, check if cursor column > fill-column.
-2. If so, run a mini fill-backward: find the last space before fill-column
-   on the current line, replace it with a newline.
-3. Best-effort: don't reflow the whole paragraph, just break the current line.
-```
+- `fill-paragraph` and `fill-region` reuse the paragraph textobject and `utf8.wrap_string`
+  for word-boundary-aware reflow.
+- `auto-fill` mode deactivates visual wrap (sets `wrap = false`) since auto-fill
+  handles line breaking by inserting actual newlines — visual wrap would fight it.
+- On entering auto-fill mode, if no margin is configured anywhere, the user is
+  prompted via minibuffer for a fill margin value.
+- The `post_command_hook` listener is registered once globally and filters by
+  `__printable` command and focused view, so only the active auto-fill buffer
+  gets auto-filled.
 
 ---
 
 #### 2. Visual-Line-Aware Home / End
 
-**Problem:** `ctrl-a` / `ctrl-e` (`move-line-start` / `move-line-end`) operate on
-**logical** lines, not **visual** sub-rows. When soft wrap is active, pressing
-home jumps to column 0 of the logical line (often far off-screen left of the
-current visual row), not the start of the current visual row.
+**Status: ✅ DONE** — `ctrl-a` and `ctrl-e` are bound to
+`move_beginning_of_visual_line` and `move_end_of_visual_line` in default
+keybindings (soft wrap always-active semantics, not a mode toggle).
+`move_beginning_of_visual_line` jumps to column 0 of the current visual sub-row;
+`move_end_of_visual_line` jumps to the last grapheme of the current visual
+sub-row. Both fall back to logical line start/end when wrap is inactive.
 
-**Missing features:**
+**Implemented:**
 
-- **`move-beginning-of-visual-line`** — jump to column 0 of the current visual
-  sub-row. If already at the start of a wrapped sub-row, jump to the start of
-  the logical line (Emacs does this double-tap behavior).
-- **`move-end-of-visual-line`** — jump to the last column of the current visual
-  sub-row. If already there, jump to end of logical line.
-- **`kill-visual-line`** — kill from point to end of the current visual sub-row,
-  not the logical line.
-
-**Likely home for these:** map `ctrl-a` / `ctrl-e` to visual-line-aware variants
-when `visual-line-mode` is active (see next gap), or always. Emacs uses
-`C-a` / `C-e` for logical lines by default and `C-a` / `C-e` for visual lines
-when `visual-line-mode` is on.
+| Feature | Status | Binding | Notes |
+| --- | --- | --- | --- |
+| **`move-beginning-of-visual-line`** | ✅ | `ctrl-a` | Falls back to logical line start when wrap is off |
+| **`move-end-of-visual-line`** | ✅ | `ctrl-e` | Falls back to logical line end when wrap is off |
+| **`kill-visual-line`** | ✅ | `ctrl-k` (when `visual-movement` mode active) | Kills from point to end of current visual sub-row |
 
 ---
 
 #### 3. Visual Line Mode Toggle
 
-**Problem:** There is no mode that makes all movement and editing commands operate
-on display lines (visual sub-rows) rather than logical lines. This means many
-commands misbehave at wrap boundaries.
+**Status: ✅ DONE** — Implemented as a per-buffer major mode
+`visual-movement` (toggle via `M-x toggle_visual_movement`).
 
-**Features Emacs's `visual-line-mode` provides:**
+**Architecture:**
 
-- `C-a` / `C-e` → visual line start/end (rather than logical)
-- `C-k` (kill-line) → kill to end of visual line
-- `C-n` / `C-p` → visual line navigation (already done in cursed)
-- Truncation toggle to switch between wrap and truncate display
-- The cursor wraps at visual line boundaries when moving between lines
+- Default keybindings for `ctrl-n`/`ctrl-p`/`ctrl-a`/`ctrl-e` now use
+  **logical** line commands (`forward_line`, `backward_line`, `move_line_start`,
+  `move_line_end`).
+- When `visual-movement` mode is activated, the mode overrides these bindings
+  to their visual-line counterparts:
+  `forward_visual_line` / `backward_visual_line` / `move_beginning_of_visual_line`
+  / `move_end_of_visual_line`.
+- `ctrl-k` is also overridden to `kill_visual_line` when the mode is active.
+- Arrow keys (`up`/`down`/`home`/`end`) remain on their own bindings and are
+  unaffected by the toggle.
 
-**Cursed already has** `forward_visual_line` / `backward_visual_line` and the
-wrap infrastructure (`wrap_width`, `_wrap_graph`, `sub_row_runs`). What's missing
-is the unified toggle + remapping of home/end/kill-line when visual mode is active.
+**Implemented:**
+
+| Feature | Status | Notes |
+| --- | --- | --- |
+| `ctrl-n` → visual line down | ✅ | Mode overrides to `forward_visual_line` |
+| `ctrl-p` → visual line up | ✅ | Mode overrides to `backward_visual_line` |
+| `ctrl-a` → visual line start | ✅ | Mode overrides to `move_beginning_of_visual_line` |
+| `ctrl-e` → visual line end | ✅ | Mode overrides to `move_end_of_visual_line` |
+| `ctrl-k` → kill to visual line end | ✅ | Mode overrides to `kill_visual_line` |
+| Toggle command | ✅ | `M-x toggle_visual_movement` |
+| Truncation toggle | ❌ Not implemented | Wrap state is independent |
+
+**Source files:**
+
+- `src/cursed/modes/visual_movement.lua` — mode definition and keybinding overrides
+- `src/cursed/commands.lua` — `kill_visual_line`, `forward_line`/`backward_line`,
+  `toggle_visual_movement`
+- `src/cursed/view.lua` — `View:forward_line()` / `View:backward_line()`
+- `src/cursed/default_keybindings.lua` — default logical-line bindings
 
 ---
 
@@ -372,21 +371,21 @@ a noticeable difference for prose entry speed.
 
 ## Ranking Summary
 
-| # | Feature | Priority | Effort | Notes |
-| --- | --- | --- | --- | --- |
-| 1 | Fill-paragraph (M-q) | **Critical** | Medium | Reuse textobject + wrap infra |
-| 2 | Auto-fill-mode | **Critical** | Medium | Post-insertion hook |
-| 3 | Visual-line home/end | **Critical** | Small | Command definition + rebind |
-| 4 | Visual-line-mode toggle | **Important** | Small | Binds + truncation toggle |
-| 5 | Word count | **Important** | Trivial | ~30 lines of Lua |
-| 6 | Spell-check-on-save | **Important** | Small | Before-save hook |
-| 7 | Transpose-chars | **Important** | Trivial | ~10 lines |
-| 8 | Abbrev expansion | Nice-to-have | Medium | Table + post-self-insert hook |
-| 9 | Thesaurus | Nice-to-have | Medium | Pipe to `dict`/WordNet |
-| 10 | Hyphenation | Nice-to-have | Large | Dictionary + wrap-graph hook |
-| 11 | Markdown preview | Nice-to-have | Large | Uses existing mdview |
-| 12 | Sentence-end config | Nice-to-have | Small | Config var + textobject param |
-| 13 | Auto-capitalization | Nice-to-have | Small | Post-self-insert hook |
+| # | Feature | Priority | Effort | Status | Notes |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Fill-paragraph (M-q) | **Critical** | Medium | ✅ **Done** | `commands.fill_paragraph`, bound to `alt-q` |
+| 2 | Auto-fill-mode | **Critical** | Medium | ✅ **Done** | `modes/auto_fill.lua`, toggle via `toggle_auto_fill` |
+| 3 | Visual-line home/end | **Critical** | Small | ✅ **Done** | `ctrl-a`/`ctrl-e` bound to visual-line variants when `visual-movement` mode is active; logical by default |
+| 4 | Visual-line-mode toggle | **Important** | Small | ✅ **Done** | `modes/visual_movement.lua`, `toggle_visual_movement` command |
+| 5 | Word count | **Important** | Trivial | ❌ | ~30 lines of Lua |
+| 6 | Spell-check-on-save | **Important** | Small | ❌ | Before-save hook |
+| 7 | Transpose-chars | **Important** | Trivial | ❌ | ~10 lines |
+| 8 | Abbrev expansion | Nice-to-have | Medium | ❌ | Table + post-self-insert hook |
+| 9 | Thesaurus | Nice-to-have | Medium | ❌ | Pipe to `dict`/WordNet |
+| 10 | Hyphenation | Nice-to-have | Large | ❌ | Dictionary + wrap-graph hook |
+| 11 | Markdown preview | Nice-to-have | Large | ❌ | Uses existing mdview |
+| 12 | Sentence-end config | Nice-to-have | Small | ❌ | Config var + textobject param |
+| 13 | Auto-capitalization | Nice-to-have | Small | ❌ | Post-self-insert hook |
 
 ## What Makes This Editor Uniquely Suited for Prose
 

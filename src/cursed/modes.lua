@@ -26,7 +26,7 @@
 --- Modes with no `language` (or a `language` whose grammar has no
 --- bundled query) simply don't highlight.
 
-local MajorMode = require("cursed.major_mode")
+local Mode = require("cursed.major_mode")
 
 local SPECS = {
 	"cursed.modes.base",
@@ -46,13 +46,14 @@ local SPECS = {
 	"cursed.modes.markdown",
 	"cursed.modes.zig",
 	"cursed.modes.auto_fill",
+	"cursed.modes.visual_movement",
 }
 
 local modes = {}
 local order = {}
 for _, spec_path in ipairs(SPECS) do
 	local spec = require(spec_path)
-	local mode = MajorMode.new(spec)
+	local mode = Mode.new(spec)
 	modes[mode.name] = mode
 	order[#order + 1] = mode.name
 end

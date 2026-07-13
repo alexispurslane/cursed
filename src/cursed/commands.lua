@@ -178,6 +178,31 @@ commands.move_end_of_visual_line_select = function(view, editor)
 	view:move_end_of_visual_line()
 end
 
+--- Move the cursor one logical line forward (next actual buffer line,
+--- ignoring soft wrap sub-rows).
+commands.forward_line = function(view, _editor)
+	view:forward_line()
+end
+
+--- Move the cursor one logical line backward.
+commands.backward_line = function(view, _editor)
+	view:backward_line()
+end
+
+--- Extending variant of forward_line.
+commands.forward_line_select = function(view, editor)
+	editor._extend = true
+	view:_begin_shift_select()
+	view:forward_line()
+end
+
+--- Extending variant of backward_line.
+commands.backward_line_select = function(view, editor)
+	editor._extend = true
+	view:_begin_shift_select()
+	view:backward_line()
+end
+
 commands.beginning_of_buffer_select = function(view, editor, ...)
 	local flag = ...
 	editor._extend = true
@@ -312,6 +337,62 @@ commands.kill_line = function(view, editor, flag, ...)
 			editor:push_kill(killed)
 		end
 	end
+end
+
+--- Kill from point to end of the current visual sub-row.
+--- When soft wrap is inactive, delegates to kill_line.
+commands.kill_visual_line = function(view, editor)
+	local c = view:p()
+	if not c then
+		return
+	end
+
+	-- No wrap active: fall back to normal kill-line behavior.
+	if not view.wrap_width or view.wrap_width <= 0 then
+		commands.kill_line(view, editor)
+		return
+	end
+
+	local li = c.line
+	local content_len = view:content_len(li)
+
+	-- Already at end of line: join with next line.
+	if c.col >= content_len then
+		if li < view:line_count() - 1 then
+			editor:push_kill("\n")
+			view:delete_char(1)
+		end
+		return
+	end
+
+	-- Find the current visual sub-row and compute its end byte.
+	local sub_row = view:wrap_sub_position(li, c.col)
+	local bs, _, _, ll = view:_graph(li)
+	local _, _, _, _, sub_last = view:_wrap_graph(li)
+	local last_gi = sub_last and sub_last[sub_row]
+
+	local end_byte
+	if last_gi then
+		if last_gi < #bs then
+			-- Last byte of the last grapheme in this sub-row.
+			-- bs[last_gi+1] is the 1-based start of the next grapheme;
+			-- subtract 2 to get the 0-based last byte of the previous.
+			end_byte = bs[last_gi + 1] - 2
+		else
+			end_byte = ll -- past the last visible byte (= newline)
+		end
+	else
+		end_byte = content_len
+	end
+
+	-- Clamp: don't kill backward.
+	if end_byte <= c.col then
+		return
+	end
+
+	local killed = view:text_between(li, c.col, li, end_byte)
+	view:delete_char(end_byte - c.col)
+	editor:push_kill(killed)
 end
 
 commands.open_line = function(view, editor, ...)
@@ -1803,7 +1884,7 @@ end
 --- Walks `view._major_modes` high→low precedence, mirroring the
 --- modeline's status lookup.
 --- @param view View?
---- @return MajorModeInstance|nil
+--- @return ModeInstance|nil
 local function lsp_mode_for_view(view)
 	if view == nil or view._major_modes == nil then
 		return nil
@@ -4934,6 +5015,29 @@ commands.toggle_auto_fill = function(_view, editor)
 	else
 		view:activate_major_mode(template)
 		editor.status_message = "auto-fill enabled"
+	end
+end
+
+--- Toggle visual-movement mode on the current view.
+--- When active, ctrl-n/p/a/e operate on visual lines (sub-rows)
+--- and ctrl-k kills to end of the current visual sub-row.
+commands.toggle_visual_movement = function(_view, editor)
+	local view = editor:current_view()
+	if not view then
+		return
+	end
+	local modes_mod = require("cursed.modes")
+	local template = modes_mod.modes["visual-movement"]
+	if not template then
+		editor.status_message = "visual-movement mode not found"
+		return
+	end
+	if view:has_major_mode(template) then
+		view:deactivate_major_mode(template)
+		editor.status_message = "visual-movement disabled"
+	else
+		view:activate_major_mode(template)
+		editor.status_message = "visual-movement enabled"
 	end
 end
 

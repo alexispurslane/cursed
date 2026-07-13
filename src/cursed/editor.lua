@@ -234,8 +234,14 @@ local DEFAULT_MODELINE_SEGMENTS = {
 		fill = false,
 		format = function(editor, view)
 			local mode_name = "fundamental"
-			if #view._major_modes > 0 then
-				mode_name = view._major_modes[#view._major_modes].name or mode_name
+			-- Pick the last non-minor mode (skip minor modes like
+			-- auto-fill, visual-movement for the modeline name).
+			for i = #view._major_modes, 1, -1 do
+				local m = view._major_modes[i]
+				if not m.is_minor and m.name then
+					mode_name = m.name
+					break
+				end
 			end
 			return " ◆ " .. mode_name .. " "
 		end,
@@ -744,7 +750,7 @@ end
 --- it up), invalidates the mode's cached trie, and rebuilds the active
 --- trie. No-op effect on views whose active mode stack doesn't include
 --- `mode` until the mode is next activated.
----@param mode MajorMode|string the mode whose keymap to extend
+---@param mode Mode|string the mode whose keymap to extend
 ---@param chord string chord specifier
 ---@param action string|function command name or function
 function Editor:define_key(mode, chord, action)

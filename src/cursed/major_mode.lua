@@ -66,8 +66,9 @@
 
 local keybind = require("cursed.keybind")
 
----@class MajorMode
+---@class Mode
 ---@field name string human-readable name (e.g. "lua", "python")
+---@field is_minor boolean when true, this mode is a minor mode (skipped for modeline naming, display-only flags, etc.)
 ---@field keybindings table<string, string|function> chord → command name or function
 ---@field textobjects table<string, string> object name → boundary pattern
 ---@field tab_width integer visual width of a tab stop (default 8)
@@ -77,7 +78,7 @@ local keybind = require("cursed.keybind")
 ---@field language string|nil bundled tree-sitter grammar name (enables highlighting)
 ---@field highlight_query string|nil override query source for the grammar
 ---@field injection_query string|nil injections query (walks the block tree for content regions to inject another grammar into — markdown: inline nodes, fenced code blocks, metadata blocks)
----@field extra_injected_grammars table<string,string>|nil grammar name → query source, for grammars the injection_query references that have no MajorMode of their own (e.g. markdown_inline, referenced by markdown's injection query)
+---@field extra_injected_grammars table<string,string>|nil grammar name → query source, for grammars the injection_query references that have no Mode of their own (e.g. markdown_inline, referenced by markdown's injection query)
 ---@field indent_queries string|nil predicate-free tree-sitter query source; `@indent`-captured nodes add one indent level on Return when the cursor is inside them
 ---@field symbol_queries string|nil predicate-free tree-sitter query source; `@symbol`-captured nodes feed the tree-sitter document outline (the goto_symbol fallback when no LSP is bound to the buffer)
 ---@field input_hooks table|nil flat list of input-hook specs (build with cursed.input_hook); matched as a suffix of left-of-cursor text and dispatched by View:_run_input_hooks
@@ -94,11 +95,12 @@ local keybind = require("cursed.keybind")
 ---@field whole_line_cursor boolean|nil the cursor paints the entire sub-row width in `cursor_bg` instead of a single cell — the "selected row" highlight for list apps. Display toggle only.
 ---@field _trie table? lazily-built keybind trie for this mode's keybindings
 ---@field _listener_editors table|nil set of editors this template has already registered on_enter/on_exit listeners against (idempotent per-editor auto-wiring)
-local MajorMode = {}
-MajorMode.__index = MajorMode
+local Mode = {}
+Mode.__index = Mode
 
----@class MajorModeSpec
+---@class ModeSpec
 ---@field name string
+---@field is_minor? boolean true → minor mode (skipped for modeline naming, display flags, etc.)
 ---@field keybindings? table<string, string|function>
 ---@field textobjects? table<string, string>
 ---@field tab_width? integer
@@ -124,17 +126,18 @@ MajorMode.__index = MajorMode
 ---@field wrap? boolean default true; false → skip margin narrowing (wrap at window width only)
 ---@field whole_line_cursor? boolean cursor paints the whole row in cursor_bg
 
---- Create a major mode template from a config spec table.
+--- Create a mode template from a config spec table.
 --- Use :instantiate() to create per-view instances.
----@param spec MajorModeSpec
----@return MajorMode
-function MajorMode.new(spec)
+---@param spec ModeSpec
+---@return Mode
+function Mode.new(spec)
 	local tw = spec.tab_width or 8
 	return setmetatable({
 		name = spec.name,
 		keybindings = spec.keybindings or {},
 		textobjects = spec.textobjects or {},
 		tab_width = tw,
+		is_minor = spec.is_minor == true,
 		expand_tab = spec.expand_tab ~= false, -- true by default
 		indent_width = spec.indent_width or tw,
 		margin = spec.margin,
@@ -158,16 +161,44 @@ function MajorMode.new(spec)
 		whole_line_cursor = spec.whole_line_cursor,
 		_trie = nil,
 		_listener_editors = nil,
-	}, MajorMode)
+	}, Mode)
 end
 
+--- Per-view instance of a mode (prototype delegation).
+--- Created via Mode:instantiate(). Delegates reads to the template
+--- via __index; writes go on the instance.
+---@class ModeInstance
+---@field _base Mode reference to the template mode
+---@field name string (inherited)
+---@field is_minor boolean (inherited)
+---@field keybindings table<string, string|function> (inherited)
+---@field textobjects table<string, string> (inherited)
+---@field tab_width integer (inherited)
+---@field expand_tab boolean (inherited)
+---@field indent_width integer (inherited)
+---@field margin integer|nil (inherited)
+---@field language string|nil (inherited)
+---@field highlight_query string|nil (inherited)
+---@field injection_query string|nil (inherited)
+---@field extra_injected_grammars table<string,string>|nil (inherited)
+---@field indent_queries string|nil (inherited)
+---@field symbol_queries string|nil (inherited)
+---@field input_hooks table|nil (inherited)
+---@field lsp_servers (string|table)[]|nil (inherited from template)
+---@field completer function|nil (inherited from template)
+---@field printable fun(view, editor, ch): boolean?|nil (inherited)
+---@field multi_currency boolean|nil (inherited)
+---@field on_enter fun(view, editor, instance)|nil (inherited)
+---@field on_exit fun(view, editor, instance)|nil (inherited)
+---@field no_gutter boolean|nil (inherited)
+---@field no_line_numbers boolean|nil (inherited)
+---@field wrap boolean|nil (inherited)
+---@field whole_line_cursor boolean|nil (inherited)
+
 --- Create a per-view instance of this mode (prototype delegation).
---- The instance delegates reads to the template; writes (e.g. setting
---- per-instance state from a `mode_enter` listener) go on the instance
---- itself.
----@return MajorModeInstance
-function MajorMode:instantiate()
-	---@type MajorModeInstance
+---@return ModeInstance
+function Mode:instantiate()
+	---@type ModeInstance
 	return setmetatable({ _base = self }, { __index = self })
 end
 
@@ -177,7 +208,7 @@ end
 --- is in place to catch the very first activation. No-op when the
 --- template declares neither hook.
 ---@param editor Editor owning editor (must have an event_system)
-function MajorMode:_ensure_listeners(editor)
+function Mode:_ensure_listeners(editor)
 	if self.on_enter == nil and self.on_exit == nil then
 		return
 	end
@@ -208,41 +239,30 @@ end
 --- Get (or lazily build) the keybind trie for this mode's keybindings.
 --- Only includes the mode-specific bindings (no defaults merged).
 ---@return table
-function MajorMode:trie()
+function Mode:trie()
 	if self._trie == nil then
 		self._trie = keybind.Trie.build(self.keybindings)
 	end
 	return self._trie
 end
 
---- An instance of a MajorMode bound to a specific view.
---- Created via MajorMode:instantiate(). Delegates reads to the
---- template mode via __index; writes go on the instance.
----@class MajorModeInstance
----@field _base MajorMode reference to the template mode
----@field name string (inherited)
----@field keybindings table<string, string|function> (inherited)
----@field textobjects table<string, string> (inherited)
----@field tab_width integer (inherited)
----@field expand_tab boolean (inherited)
----@field indent_width integer (inherited)
----@field margin integer|nil (inherited)
----@field language string|nil (inherited)
----@field highlight_query string|nil (inherited)
----@field injection_query string|nil (inherited)
----@field extra_injected_grammars table<string,string>|nil (inherited)
----@field indent_queries string|nil (inherited)
----@field symbol_queries string|nil (inherited)
----@field input_hooks table|nil (inherited)
----@field lsp_servers (string|table)[]|nil (inherited from template)
----@field completer function|nil (inherited from template)
----@field printable fun(view, editor, ch): boolean?|nil (inherited)
----@field multi_currency boolean|nil (inherited)
----@field on_enter fun(view, editor, instance)|nil (inherited)
----@field on_exit fun(view, editor, instance)|nil (inherited)
----@field no_gutter boolean|nil (inherited)
----@field no_line_numbers boolean|nil (inherited)
----@field wrap boolean|nil (inherited)
----@field whole_line_cursor boolean|nil (inherited)
+--- MajorMode alias: same as Mode.new.
+Mode.MajorMode = {
+	new = function(spec)
+		return Mode.new(spec)
+	end,
+}
 
-return MajorMode
+--- MinorMode factory: wraps Mode.new with is_minor = true.
+Mode.MinorMode = {
+	new = function(spec)
+		local s = {}
+		for k, v in pairs(spec or {}) do
+			s[k] = v
+		end
+		s.is_minor = true
+		return Mode.new(s)
+	end,
+}
+
+return Mode

@@ -70,7 +70,7 @@ local IH = require("cursed.input_hook")
 ---@field _pending_apply_edits table[]|nil parked LSP TextEdit[] (Editor:apply_workspace_edit) applied on file_loaded for a background-opened target
 ---@field _pending_apply_uri string|nil the uri whose edits are parked in _pending_apply_edits (for the done continuation)
 ---@field _pending_apply_done fun(ok:boolean)|nil continuation run by _drain_pending_apply_edits to record touched/skipped + fire apply_workspace_edit's on_complete
----@field _major_modes MajorModeInstance[] active major mode instances (ordered, later overrides earlier)
+---@field _major_modes ModeInstance[] active mode instances (ordered; minor modes appended, later overrides earlier)
 ---@field tab_width integer visual width of a tab stop
 ---@field expand_tab boolean if true, Tab inserts spaces instead of \t
 ---@field indent_width integer number of columns for auto-indent
@@ -929,7 +929,7 @@ end
 ---                       boot, per-instance state) register for these
 ---                       directly.
 ---@param name string event name ("mode_enter" or "mode_exit")
----@param instance MajorModeInstance the mode instance being entered/exited
+---@param instance ModeInstance the mode instance being entered/exited
 function View:_emit_mode_event(name, instance)
 	if self.editor and self.editor.event_system then
 		local es = self.editor.event_system
@@ -946,27 +946,49 @@ end
 --- Later modes override earlier ones. Pass an empty table to clear.
 --- Does NOT emit mode_enter/mode_exit (use activate_major_mode /
 --- deactivate_major_mode for that).
----@param modes MajorModeInstance[]
+---@param modes ModeInstance[]
 function View:set_major_modes(modes)
 	self._major_modes = modes
-	-- Last mode wins for indent settings
+	-- Find the last non-minor mode for display/indent settings.
+	-- Minor modes (auto-fill, visual-movement) should never override
+	-- margin, wrap, or other display properties set by the major mode.
+	local last_major = nil
 	if #modes > 0 then
-		local last = modes[#modes]
-		self.tab_width = last.tab_width
-		self.expand_tab = last.expand_tab
-		self.indent_width = last.indent_width
+		for i = #modes, 1, -1 do
+			if not modes[i].is_minor then
+				last_major = modes[i]
+				break
+			end
+		end
+	end
+	if last_major then
+		self.tab_width = last_major.tab_width
+		self.expand_tab = last_major.expand_tab
+		self.indent_width = last_major.indent_width
 		-- margin is an OPTIONAL override of the global config margin:
 		-- a mode that sets it wins; a mode that omits it falls back to
 		-- editor.margin (the global baseline), NOT a hardcoded constant
 		-- (unlike tab_width/indent_width, which have no global source).
-		self.margin = last.margin ~= nil and last.margin or (self.editor and self.editor.margin)
+		self.margin = last_major.margin ~= nil and last_major.margin or (self.editor and self.editor.margin)
 		-- Display toggles for non-file-backed "app" buffers (picker,
-		-- dashboard, …). Same last-mode-wins resolution as indent settings;
+		-- dashboard, …). Same last-major-mode-wins resolution;
 		-- nil on the mode → sensible default. All flags default OFF so
 		-- ordinary file-buffer rendering is unchanged.
+		self.no_gutter = last_major.no_gutter == true
+		self.no_line_numbers = last_major.no_line_numbers == true or self.no_gutter
+		self.wrap = last_major.wrap ~= false -- default true
+		self.whole_line_cursor = last_major.whole_line_cursor == true
+	elseif #modes > 0 then
+		-- Only minor modes active: use the last minor mode's settings
+		-- (fringe case — app buffers with only minor modes).
+		local last = modes[#modes]
+		self.tab_width = last.tab_width
+		self.expand_tab = last.expand_tab
+		self.indent_width = last.indent_width
+		self.margin = last.margin ~= nil and last.margin or (self.editor and self.editor.margin)
 		self.no_gutter = last.no_gutter == true
 		self.no_line_numbers = last.no_line_numbers == true or self.no_gutter
-		self.wrap = last.wrap ~= false -- default true
+		self.wrap = last.wrap ~= false
 		self.whole_line_cursor = last.whole_line_cursor == true
 	else
 		self.tab_width = 8
@@ -1026,7 +1048,7 @@ end
 
 --- Activate a major mode in this view: create an instance, emit
 --- mode_enter, and add it to the mode list.
----@param template MajorMode the mode template (from config.modes)
+---@param template Mode the mode template (from config.modes)
 function View:activate_major_mode(template)
 	-- Check if already active (avoid duplicates)
 	for _, m in ipairs(self._major_modes) do
@@ -1046,7 +1068,7 @@ end
 
 --- Deactivate a major mode in this view: emit mode_exit, remove it,
 --- and rebuild.
----@param template MajorMode the mode template to remove
+---@param template Mode the mode template to remove
 function View:deactivate_major_mode(template)
 	local idx = nil
 	local instance = nil
@@ -1060,7 +1082,7 @@ function View:deactivate_major_mode(template)
 	if idx == nil then
 		return
 	end
-	---@cast instance MajorModeInstance
+	---@cast instance ModeInstance
 	self:_emit_mode_event("mode_exit", instance)
 	local modes = {}
 	for i, m in ipairs(self._major_modes) do
@@ -1072,7 +1094,7 @@ function View:deactivate_major_mode(template)
 end
 
 --- Check if a major mode template is active in this view.
----@param template MajorMode
+---@param template Mode
 ---@return boolean
 function View:has_major_mode(template)
 	for _, m in ipairs(self._major_modes) do
@@ -4711,6 +4733,65 @@ function View:move_line_end()
 		local content_len = self.buffer:line_len(c.line) - 1
 		c.col = content_len
 		c.goal_col = self:byte_to_col(c.line, content_len)
+		c.visual_col = nil
+		c.yank_line = nil
+		c.yank_col = nil
+		return true
+	end)
+end
+
+--- Move the primary cursor one logical line forward (next actual line in the
+--- buffer, ignoring soft wrap sub-rows). Preserves goal_col and snaps to
+--- grapheme boundaries. Falls back to move_line_start for the no-wrap case.
+function View:forward_line()
+	return self:each_cursor(function(c)
+		local buf = self.buffer
+		local line_count = buf:line_count()
+		local target = c.line + 1
+		if target >= line_count then
+			c.line = line_count - 1
+			local end_byte = buf:line_len(line_count - 1) - 1
+			c.col = end_byte
+			c.goal_col = self:byte_to_col(line_count - 1, end_byte)
+			c.visual_col = nil
+			c.yank_line = nil
+			c.yank_col = nil
+			return nil, "end of document"
+		end
+		c.line = target
+		local line_len = buf:line_len(target) - 1
+		local max_col = self:byte_to_col(target, line_len)
+		c.goal_col = c.goal_col or max_col
+		c.col = self:col_to_byte(target, math.min(c.goal_col, max_col))
+		c.visual_col = nil
+		c.yank_line = nil
+		c.yank_col = nil
+		return true
+	end)
+end
+
+--- Move the primary cursor one logical line backward (previous actual line in
+--- the buffer, ignoring soft wrap sub-rows). Preserves goal_col and snaps to
+--- grapheme boundaries. Falls back to move_line_start for the no-wrap case.
+function View:backward_line()
+	return self:each_cursor(function(c)
+		local buf = self.buffer
+		local line_count = buf:line_count()
+		local target = c.line - 1
+		if target < 0 then
+			c.line = 0
+			c.col = 0
+			c.goal_col = 0
+			c.visual_col = nil
+			c.yank_line = nil
+			c.yank_col = nil
+			return nil, "start of document"
+		end
+		c.line = target
+		local line_len = buf:line_len(target) - 1
+		local max_col = self:byte_to_col(target, line_len)
+		c.goal_col = c.goal_col or max_col
+		c.col = self:col_to_byte(target, math.min(c.goal_col, max_col))
 		c.visual_col = nil
 		c.yank_line = nil
 		c.yank_col = nil

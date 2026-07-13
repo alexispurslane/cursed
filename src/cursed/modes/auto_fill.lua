@@ -86,9 +86,10 @@ end
 --- Store the template reference so the handler can check has_major_mode.
 local template
 
----@return MajorModeSpec
+---@return ModeSpec
 template = {
 	name = "auto-fill",
+	is_minor = true,
 	-- Disable visual wrap: auto-fill handles line breaking by inserting
 	-- actual newlines. Visual wrap would fight against that.
 	wrap = false,
@@ -104,7 +105,7 @@ template = {
 	--- prompt. The on_submit callback runs asynchronously AFTER
 	--- set_major_modes, so setting view.margin from the prompt sticks.
 	on_enter = function(view, editor, instance)
-		local mode_obj = instance._base ---@type MajorMode
+		local mode_obj = instance._base ---@type Mode
 
 		-- Capture the effective fill margin BEFORE set_major_modes
 		-- runs and overwrites view.margin to nil. We use a dedicated
@@ -192,7 +193,7 @@ template = {
 
 	--- Remove the handler when the last view exits auto-fill mode.
 	on_exit = function(_view, editor, instance)
-		local mode_obj = instance._base ---@type MajorMode
+		local mode_obj = instance._base ---@type Mode
 		local still_active = false
 		if editor._views then
 			for _, v in ipairs(editor._views) do
