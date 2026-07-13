@@ -5,307 +5,307 @@
 --- The special `__printable` key handles unmodified printable characters.
 
 return {
-    --- Handler for unmodified printable characters.
-    ["__printable"] = function(view, editor, ch)
-        view:delete_selection()
-        local n = 1
-        if editor.universal_args then
-            for i = 2, #editor.universal_args do
-                local arg = editor.universal_args[i]
-                local ty = type(arg)
-                if ty == "number" then
-                    n = n * arg
-                elseif ty == "string" then
-                    n = n * #arg
-                end
-            end
-        end
-        n = math.abs(n)
-        for _ = 1, n do
-            view:insert_char(ch)
-        end
-        -- Electric pairs (auto-insert closer when the text left of the
-        -- cursor matches an active mode's `input_hooks`). Run once
-        -- after the typed characters land; the suffix check sees the
-        -- final left-of-cursor text. Not multiplied by universal_args:
-        -- a `then` is `then` regardless of repeat count.
-        view:_run_input_hooks("printable")
-    end,
+	--- Handler for unmodified printable characters.
+	["__printable"] = function(view, editor, ch)
+		view:delete_selection()
+		local n = 1
+		if editor.universal_args then
+			for i = 2, #editor.universal_args do
+				local arg = editor.universal_args[i]
+				local ty = type(arg)
+				if ty == "number" then
+					n = n * arg
+				elseif ty == "string" then
+					n = n * #arg
+				end
+			end
+		end
+		n = math.abs(n)
+		for _ = 1, n do
+			view:insert_char(ch)
+		end
+		-- Electric pairs (auto-insert closer when the text left of the
+		-- cursor matches an active mode's `input_hooks`). Run once
+		-- after the typed characters land; the suffix check sees the
+		-- final left-of-cursor text. Not multiplied by universal_args:
+		-- a `then` is `then` regardless of repeat count.
+		view:_run_input_hooks("printable")
+	end,
 
-    -- Line navigation
-    ["ctrl-a"] = "move_line_start",
-    ["home"] = "move_line_start",
-    ["ctrl-e"] = "move_line_end",
-    ["end"] = "move_line_end",
+	-- Line navigation (visual line aware)
+	["ctrl-a"] = "move_beginning_of_visual_line",
+	["home"] = "move_line_start",
+	["ctrl-e"] = "move_end_of_visual_line",
+	["end"] = "move_line_end",
 
-    -- Character navigation
-    ["ctrl-b"] = "backward_char",
-    ["left"] = "backward_char",
-    ["ctrl-f"] = "forward_char",
-    ["right"] = "forward_char",
+	-- Character navigation
+	["ctrl-b"] = "backward_char",
+	["left"] = "backward_char",
+	["ctrl-f"] = "forward_char",
+	["right"] = "forward_char",
 
-    -- Line navigation
-    ["ctrl-p"] = "backward_visual_line",
-    ["up"] = "arrow_up",
-    ["ctrl-n"] = "forward_visual_line",
-    ["down"] = "arrow_down",
+	-- Visual line navigation
+	["ctrl-p"] = "backward_visual_line",
+	["up"] = "arrow_up",
+	["ctrl-n"] = "forward_visual_line",
+	["down"] = "arrow_down",
 
-    -- Shift-select (move-and-select): arrow / home / end keys are the
-    -- only motions terminals carry a distinct Shift modifier for reliably
-    -- (named keys arrive as full CSI sequences with modifier params).
-    -- ctrl-b/f/p/n shift folds into the control byte, so their select
-    -- variants are defined (commands.forward_char_select, …) but not
-    -- bound — bind them in init.lua on a CSI-u / kitty-keyboard terminal.
-    ["shift-left"] = "backward_char_select",
-    ["shift-right"] = "forward_char_select",
-    ["shift-up"] = "arrow_up_select",
-    ["shift-down"] = "arrow_down_select",
-    ["shift-home"] = "move_line_start_select",
-    ["shift-end"] = "move_line_end_select",
+	-- Shift-select (move-and-select): arrow / home / end keys are the
+	-- only motions terminals carry a distinct Shift modifier for reliably
+	-- (named keys arrive as full CSI sequences with modifier params).
+	-- ctrl-b/f/p/n shift folds into the control byte, so their select
+	-- variants are defined (commands.forward_char_select, ...) but not
+	-- bound — bind them in init.lua on a CSI-u / kitty-keyboard terminal.
+	["shift-left"] = "backward_char_select",
+	["shift-right"] = "forward_char_select",
+	["shift-up"] = "arrow_up_select",
+	["shift-down"] = "arrow_down_select",
+	["shift-home"] = "move_line_start_select",
+	["shift-end"] = "move_line_end_select",
 
-    -- Page navigation
-    ["alt-v"] = "scroll_down",
-    ["pageup"] = "scroll_down",
-    ["ctrl-v"] = "scroll_up",
-    ["pagedown"] = "scroll_up",
+	-- Page navigation
+	["alt-v"] = "scroll_down",
+	["pageup"] = "scroll_down",
+	["ctrl-v"] = "scroll_up",
+	["pagedown"] = "scroll_up",
 
-    -- Deletion
-    ["ctrl-d"] = "delete_char",
-    ["delete"] = "delete_char",
-    ["backspace"] = "backward_delete_char",
+	-- Deletion
+	["ctrl-d"] = "delete_char",
+	["delete"] = "delete_char",
+	["backspace"] = "backward_delete_char",
 
-    -- Newline / submit
-    ["ctrl-j"] = "newline",
-    ["enter"] = "enter_key",
-    -- Shift+Enter inserts a newline. On modern terminals (Ghostty/xterm
-    -- with formatOtherKeys, kitty CSI-u) this arrives as ESC[27;2;13~ /
-    -- ESC[13;2u, now decoded to the "shift-enter" token by keybind.
-    ["shift-enter"] = "newline",
+	-- Newline / submit
+	["ctrl-j"] = "newline",
+	["enter"] = "enter_key",
+	-- Shift+Enter inserts a newline. On modern terminals (Ghostty/xterm
+	-- with formatOtherKeys, kitty CSI-u) this arrives as ESC[27;2;13~ /
+	-- ESC[13;2u, now decoded to the "shift-enter" token by keybind.
+	["shift-enter"] = "newline",
 
-    -- Tab: expand completion
-    ["tab"] = "tab_key",
+	-- Tab: expand completion
+	["tab"] = "tab_key",
 
-    -- Universal argument
-    ["ctrl-u"] = "universal_argument",
+	-- Universal argument
+	["ctrl-u"] = "universal_argument",
 
-    -- Eval
-    ["alt-:"] = "eval_expression",
+	-- Eval
+	["alt-:"] = "eval_expression",
 
-    -- LSP formatting (textDocument/formatting). "i" for indent.
-    ["alt-i"] = "format",
+	-- LSP formatting (textDocument/formatting). "i" for indent.
+	["alt-i"] = "format",
 
-    -- LSP go-to-definition (textDocument/definition) at the cursor.
-    ["alt-."] = "goto_definition",
+	-- LSP go-to-definition (textDocument/definition) at the cursor.
+	["alt-."] = "goto_definition",
 
-    -- LSP code actions (textDocument/codeAction) at the cursor / over the
-    -- active selection. Pops the returned actions in the minibuffer;
-    -- applying a chosen action runs its embedded WorkspaceEdit locally
-    -- or issues workspace/executeCommand for server-side commands.
-    -- `ctrl-c` is the LSP prefix (Emacs convention: C-c reserved for
-    -- user/major-mode chords); the bare `ctrl-c` leaf is intentionally
-    -- unbound so the prefix can extend:
-    --   ctrl-c a       → code actions
-    --   ctrl-c r       → rename symbol at cursor (textDocument/rename)
-    --   ctrl-c s       → start the language server for this buffer's mode
-    --   ctrl-c k       → kill the language server serving this buffer
-    --   ctrl-c ctrl-r  → restart (kill + re-spawn) the language server
-    ["ctrl-c a"] = "code_actions",
-    ["ctrl-c r"] = "lsp_rename",
-    ["ctrl-c s"] = "lsp_start",
-    ["ctrl-c k"] = "lsp_kill",
-    ["ctrl-c ctrl-r"] = "lsp_restart",
+	-- LSP code actions (textDocument/codeAction) at the cursor / over the
+	-- active selection. Pops the returned actions in the minibuffer;
+	-- applying a chosen action runs its embedded WorkspaceEdit locally
+	-- or issues workspace/executeCommand for server-side commands.
+	-- `ctrl-c` is the LSP prefix (Emacs convention: C-c reserved for
+	-- user/major-mode chords); the bare `ctrl-c` leaf is intentionally
+	-- unbound so the prefix can extend:
+	--   ctrl-c a       → code actions
+	--   ctrl-c r       → rename symbol at cursor (textDocument/rename)
+	--   ctrl-c s       → start the language server for this buffer's mode
+	--   ctrl-c k       → kill the language server serving this buffer
+	--   ctrl-c ctrl-r  → restart (kill + re-spawn) the language server
+	["ctrl-c a"] = "code_actions",
+	["ctrl-c r"] = "lsp_rename",
+	["ctrl-c s"] = "lsp_start",
+	["ctrl-c k"] = "lsp_kill",
+	["ctrl-c ctrl-r"] = "lsp_restart",
 
-    -- Manual completion at point (forces the in-buffer popup now).
-    ["alt-/"] = "complete",
+	-- Manual completion at point (forces the in-buffer popup now).
+	["alt-/"] = "complete",
 
-    -- Execute command
-    ["alt-x"] = "execute_command",
+	-- Execute command
+	["alt-x"] = "execute_command",
 
-    -- Word/sentence navigation
-    ["alt-f"] = "forward_word",
-    ["alt-b"] = "backward_word",
-    ["alt-e"] = "forward_sentence",
-    ["alt-a"] = "backward_sentence",
-    ["alt-s"] = "forward_subsentence",
-    ["alt-S"] = "backward_subsentence",
-    -- Drag the active selection one step (neovim-style). Alt-left /
-    -- alt-right move an existing selection over one textobject unit
-    -- (or one character when the selection has no textobject),
-    -- deleting it from the old position and inserting at the new.
-    ["alt-left"] = "drag_left",
-    ["alt-right"] = "drag_right",
+	-- Word/sentence navigation
+	["alt-f"] = "forward_word",
+	["alt-b"] = "backward_word",
+	["alt-e"] = "forward_sentence",
+	["alt-a"] = "backward_sentence",
+	["alt-s"] = "forward_subsentence",
+	["alt-S"] = "backward_subsentence",
+	-- Drag the active selection one step (neovim-style). Alt-left /
+	-- alt-right move an existing selection over one textobject unit
+	-- (or one character when the selection has no textobject),
+	-- deleting it from the old position and inserting at the new.
+	["alt-left"] = "drag_left",
+	["alt-right"] = "drag_right",
 
-    -- Bigword (whitespace-delimited words). Formerly on alt-F/alt-B,
-    -- but those capital chords are now word-select (shift+alt+f/b):
-    -- for a letter key shift IS capitalization, so alt-F can't mean
-    -- both. Bigword moves under the ctrl-x M-f / ctrl-x M-b prefix to
-    -- keep the M-f word-family mnemonic while freeing the capitals.
-    ["ctrl-x alt-f"] = "forward_bigword",
-    ["ctrl-x alt-b"] = "backward_bigword",
+	-- Bigword (whitespace-delimited words). Formerly on alt-F/alt-B,
+	-- but those capital chords are now word-select (shift+alt+f/b):
+	-- for a letter key shift IS capitalization, so alt-F can't mean
+	-- both. Bigword moves under the ctrl-x M-f / ctrl-x M-b prefix to
+	-- keep the M-f word-family mnemonic while freeing the capitals.
+	["ctrl-x alt-f"] = "forward_bigword",
+	["ctrl-x alt-b"] = "backward_bigword",
 
-    -- Shift-select for alt-letter motions. For a letter key shift IS
-    -- the capitalization, so `shift+alt+e` arrives as `alt-E` — bindable
-    -- only to capital chords that are otherwise free. M-E / M-A were
-    -- unused (sentence select); M-F / M-B were bigword, now freed above
-    -- and bound to word select. (Subsentence alt-S stays backward_
-    -- subsentence — no free capital chord for it.)
-    ["alt-E"] = "forward_sentence_select",
-    ["alt-A"] = "backward_sentence_select",
-    ["alt-F"] = "forward_word_select",
-    ["alt-B"] = "backward_word_select",
+	-- Shift-select for alt-letter motions. For a letter key shift IS
+	-- the capitalization, so `shift+alt+e` arrives as `alt-E` — bindable
+	-- only to capital chords that are otherwise free. M-E / M-A were
+	-- unused (sentence select); M-F / M-B were bigword, now freed above
+	-- and bound to word select. (Subsentence alt-S stays backward_
+	-- subsentence — no free capital chord for it.)
+	["alt-E"] = "forward_sentence_select",
+	["alt-A"] = "backward_sentence_select",
+	["alt-F"] = "forward_word_select",
+	["alt-B"] = "backward_word_select",
 
-    -- Paragraphs (Emacs: M-{ forward, M-} backward; note swapped here
-    -- because M-{ and M-} require shift which lands on {[} on most layouts)
-    ["alt-{"] = "forward_paragraph",
-    ["alt-}"] = "backward_paragraph",
+	-- Paragraphs (Emacs: M-{ forward, M-} backward; note swapped here
+	-- because M-{ and M-} require shift which lands on {[} on most layouts)
+	["alt-{"] = "forward_paragraph",
+	["alt-}"] = "backward_paragraph",
 
-    -- Minibuffer history
-    ["alt-p"] = "history_up",
-    ["alt-n"] = "history_down",
+	-- Minibuffer history
+	["alt-p"] = "history_up",
+	["alt-n"] = "history_down",
 
-    -- Recenter
-    ["ctrl-l"] = "recenter",
+	-- Recenter
+	["ctrl-l"] = "recenter",
 
-    -- Search (C-s/C-r isearch unchanged; alt-% query-replace; regex
-    -- isearch available via M-x isearch-forward-regexp / backward).
-    -- query-replace-regexp is reachable via M-x (the C-M-% chord is not
-    -- encodable on most terminals).
-    ["ctrl-s"] = "isearch_forward",
-    ["ctrl-r"] = "isearch_backward",
-    ["alt-%"] = "query_replace",
+	-- Search (C-s/C-r isearch unchanged; alt-% query-replace; regex
+	-- isearch available via M-x isearch-forward-regexp / backward).
+	-- query-replace-regexp is reachable via M-x (the C-M-% chord is not
+	-- encodable on most terminals).
+	["ctrl-s"] = "isearch_forward",
+	["ctrl-r"] = "isearch_backward",
+	["alt-%"] = "query_replace",
 
-    -- Kill / Open
-    -- NOTE: C-w is remapped from backward-kill-word to kill-region
-    -- (Emacs-faithful). backward-kill-word moves to M-<backspace>.
-    ["ctrl-k"] = "kill_line",
-    ["ctrl-o"] = "open_line",
-    ["ctrl-w"] = "kill_region",
-    ["alt-backspace"] = "kill_word",
-    ["alt-d"] = "kill_word_forward",
-    ["alt-k"] = "kill_sentence",
-    ["ctrl-x delete"] = "backward_kill_sentence",
-    ["ctrl-x ctrl-k"] = "kill_whole_line",
-    ["ctrl-x alt-p"] = "kill_paragraph",
+	-- Kill / Open
+	-- NOTE: C-w is remapped from backward-kill-word to kill-region
+	-- (Emacs-faithful). backward-kill-word moves to M-<backspace>.
+	["ctrl-k"] = "kill_line",
+	["ctrl-o"] = "open_line",
+	["ctrl-w"] = "kill_region",
+	["alt-backspace"] = "kill_word",
+	["alt-d"] = "kill_word_forward",
+	["alt-k"] = "kill_sentence",
+	["ctrl-x delete"] = "backward_kill_sentence",
+	["ctrl-x ctrl-k"] = "kill_whole_line",
+	["ctrl-x alt-p"] = "kill_paragraph",
 
-    -- Buffer navigation
-    ["alt-<"] = "beginning_of_buffer",
-    ["alt->"] = "end_of_buffer",
+	-- Buffer navigation
+	["alt-<"] = "beginning_of_buffer",
+	["alt->"] = "end_of_buffer",
 
-    -- (No transpose bindings — transpose commands were removed in
-    -- favor of the neovim-style drag on alt-left / alt-right.)
+	-- (No transpose bindings — transpose commands were removed in
+	-- favor of the neovim-style drag on alt-left / alt-right.)
 
-    -- Cancel. `ctrl-g` is keyboard-quit; `ctrl-x ctrl-c` quits the
-    -- editor. The bare `ctrl-c` leaf was removed so `ctrl-c` is a pure
-    -- prefix (Emacs convention: C-c is reserved for user/major-mode
-    -- chords), freeing `ctrl-c a` (code actions) and future ctrl-c
-    -- sub-bindings.
-    ["ctrl-g"] = "keyboard_quit",
+	-- Cancel. `ctrl-g` is keyboard-quit; `ctrl-x ctrl-c` quits the
+	-- editor. The bare `ctrl-c` leaf was removed so `ctrl-c` is a pure
+	-- prefix (Emacs convention: C-c is reserved for user/major-mode
+	-- chords), freeing `ctrl-c a` (code actions) and future ctrl-c
+	-- sub-bindings.
+	["ctrl-g"] = "keyboard_quit",
 
-    -- Mark / Selection
-    ["ctrl-space"] = "set_mark",
-    ["ctrl-x ctrl-x"] = "swap_mark_and_cursor",
-    ["alt-@"] = "mark_word",
-    ["alt-h"] = "mark_paragraph",
-    ["ctrl-x h"] = "mark_whole_buffer",
+	-- Mark / Selection
+	["ctrl-space"] = "set_mark",
+	["ctrl-x ctrl-x"] = "swap_mark_and_cursor",
+	["alt-@"] = "mark_word",
+	["alt-h"] = "mark_paragraph",
+	["ctrl-x h"] = "mark_whole_buffer",
 
-    -- Multi-cursor
-    ["ctrl-x ctrl-n"] = "select_next_match",
-    ["ctrl-x ctrl-p"] = "select_prev_match",
-    ["ctrl-x a"] = "select_all_matches",
-    ["ctrl-x S"] = "split_selection_into_lines",
-    ["alt-;"] = "add_cursor_here",
-    ["alt-,"] = "add_cursor_at_candidate",
-    ["alt-m"] = "commit_pending_cursors",
-    ["alt-up"] = "add_cursor_up",
-    ["alt-down"] = "add_cursor_down",
+	-- Multi-cursor
+	["ctrl-x ctrl-n"] = "select_next_match",
+	["ctrl-x ctrl-p"] = "select_prev_match",
+	["ctrl-x a"] = "select_all_matches",
+	["ctrl-x S"] = "split_selection_into_lines",
+	["alt-;"] = "add_cursor_here",
+	["alt-,"] = "add_cursor_at_candidate",
+	["alt-m"] = "commit_pending_cursors",
+	["alt-up"] = "add_cursor_up",
+	["alt-down"] = "add_cursor_down",
 
-    -- Kill ring
-    ["ctrl-y"] = "yank",
-    ["alt-y"] = "yank_pop",
-    -- ctrl-shift-y: termbox delivers ctrl+y (0x19) with TB_MOD_SHIFT set,
-    -- producing token "shift-ctrl-y" which parse_chord cannot handle
-    -- (shift-prefixed components must be named keys, not ctrl-letter combos).
-    -- Not bound by default; set in init.lua if desired.
-    ["alt-w"] = "copy_region",
-    ["ctrl-x alt-w"] = "copy_sentence",
+	-- Kill ring
+	["ctrl-y"] = "yank",
+	["alt-y"] = "yank_pop",
+	-- ctrl-shift-y: termbox delivers ctrl+y (0x19) with TB_MOD_SHIFT set,
+	-- producing token "shift-ctrl-y" which parse_chord cannot handle
+	-- (shift-prefixed components must be named keys, not ctrl-letter combos).
+	-- Not bound by default; set in init.lua if desired.
+	["alt-w"] = "copy_region",
+	["ctrl-x alt-w"] = "copy_sentence",
 
-    -- Undo / Redo
-    ["ctrl-_"] = "undo",
-    ["ctrl-x u"] = "undo",
-    ["ctrl-x r"] = "redo",
-    ["ctrl-x alt-u"] = "undo_in_selection",
-    ["ctrl-x alt-r"] = "redo_in_selection",
+	-- Undo / Redo
+	["ctrl-_"] = "undo",
+	["ctrl-x u"] = "undo",
+	["ctrl-x r"] = "redo",
+	["ctrl-x alt-u"] = "undo_in_selection",
+	["ctrl-x alt-r"] = "redo_in_selection",
 
-    -- Case changes
-    ["alt-u"] = "upcase_word",
-    ["alt-l"] = "downcase_word",
-    ["alt-c"] = "capitalize_word",
-    ["ctrl-x ctrl-u"] = "upcase_region",
-    ["ctrl-x ctrl-l"] = "downcase_region",
-    ["ctrl-x _"] = "snake_case_region",
-    ["ctrl-x -"] = "kebab_case_region",
-    ["ctrl-x c"] = "camelcase_region",
-    ["ctrl-x t"] = "title_case_region",
-    ["ctrl-x space"] = "remove_spaces_region",
+	-- Case changes
+	["alt-u"] = "upcase_word",
+	["alt-l"] = "downcase_word",
+	["alt-c"] = "capitalize_word",
+	["ctrl-x ctrl-u"] = "upcase_region",
+	["ctrl-x ctrl-l"] = "downcase_region",
+	["ctrl-x _"] = "snake_case_region",
+	["ctrl-x -"] = "kebab_case_region",
+	["ctrl-x c"] = "camelcase_region",
+	["ctrl-x t"] = "title_case_region",
+	["ctrl-x space"] = "remove_spaces_region",
 
-    -- Whitespace / line joining
-    ["alt-\\"] = "delete_horizontal_space",
-    ["alt-space"] = "just_one_space",
-    ["ctrl-x ctrl-o"] = "delete_blank_lines",
-    ["alt-^"] = "delete_indentation",
+	-- Whitespace / line joining
+	["alt-\\"] = "delete_horizontal_space",
+	["alt-space"] = "just_one_space",
+	["ctrl-x ctrl-o"] = "delete_blank_lines",
+	["alt-^"] = "delete_indentation",
 
-    -- Quoted insert + zap-to-char
-    ["ctrl-q"] = "quoted_insert",
-    ["alt-z"] = "zap_to_char",
-    ["alt-Z"] = "zap_up_to_char",
+	-- Quoted insert + zap-to-char
+	["ctrl-q"] = "quoted_insert",
+	["alt-z"] = "zap_to_char",
+	["alt-Z"] = "zap_up_to_char",
 
-    -- Balanced-expression (sexp) commands. Emacs binds these to C-M-*,
-    -- which terminals can't deliver reliably, so they live under the
-    -- C-x s prefix. (split_selection_into_lines was moved to C-x S so
-    -- it no longer shadows the C-x s <x> sexp chords — the trie
-    -- dispatches immediately on a complete node match, so a binding on
-    -- C-x s alone would swallow every longer C-x s * chord.)
-    ["ctrl-x s m"] = "mark_sexp",
-    ["ctrl-x s k"] = "kill_sexp",
-    ["ctrl-x s w"] = "copy_sexp",
-    -- (transpose_sexp removed; use drag_left / drag_right on a sexp
-    -- selection instead.)
-    ["ctrl-x s f"] = "forward_sexp",
-    ["ctrl-x s b"] = "backward_sexp",
-    ["ctrl-x s d"] = "down_list",
-    ["ctrl-x s u"] = "up_list",
-    ["ctrl-x s alt-u"] = "backward_up_list",
+	-- Balanced-expression (sexp) commands. Emacs binds these to C-M-*,
+	-- which terminals can't deliver reliably, so they live under the
+	-- C-x s prefix. (split_selection_into_lines was moved to C-x S so
+	-- it no longer shadows the C-x s <x> sexp chords — the trie
+	-- dispatches immediately on a complete node match, so a binding on
+	-- C-x s alone would swallow every longer C-x s * chord.)
+	["ctrl-x s m"] = "mark_sexp",
+	["ctrl-x s k"] = "kill_sexp",
+	["ctrl-x s w"] = "copy_sexp",
+	-- (transpose_sexp removed; use drag_left / drag_right on a sexp
+	-- selection instead.)
+	["ctrl-x s f"] = "forward_sexp",
+	["ctrl-x s b"] = "backward_sexp",
+	["ctrl-x s d"] = "down_list",
+	["ctrl-x s u"] = "up_list",
+	["ctrl-x s alt-u"] = "backward_up_list",
 
-    -- File / Buffer
-    ["ctrl-x ctrl-f"] = "find_file",
-    ["ctrl-x i"] = "insert_file",
-    ["ctrl-x ctrl-w"] = "save_as",
-    ["ctrl-x b"] = "ibuffer",
-    ["ctrl-x k"] = "kill_buffer",
-    ["ctrl-x ctrl-s"] = "save",
-    ["ctrl-x ctrl-c"] = "quit",
+	-- File / Buffer
+	["ctrl-x ctrl-f"] = "find_file",
+	["ctrl-x i"] = "insert_file",
+	["ctrl-x ctrl-w"] = "save_as",
+	["ctrl-x b"] = "ibuffer",
+	["ctrl-x k"] = "kill_buffer",
+	["ctrl-x ctrl-s"] = "save",
+	["ctrl-x ctrl-c"] = "quit",
 
-    -- Keyboard macros
-    ["ctrl-x ("] = "start_kmacro",
-    ["ctrl-x )"] = "end_kmacro",
-    ["ctrl-x e"] = "run_kmacro",
+	-- Keyboard macros
+	["ctrl-x ("] = "start_kmacro",
+	["ctrl-x )"] = "end_kmacro",
+	["ctrl-x e"] = "run_kmacro",
 
-    -- Repeat: rerun the last command (C-x z, then `z` to keep repeating)
-    ["ctrl-x z"] = "repeat",
+	-- Repeat: rerun the last command (C-x z, then `z` to keep repeating)
+	["ctrl-x z"] = "repeat",
 
-    -- Goto family (Emacs M-g prefix). `alt-g` alone is NOT a leaf so it
-    -- can host the multi-chord goto commands; `alt-g g` / `alt-g alt-g`
-    -- jump to a line (the bare `alt-g` = goto_line of old), `alt-g i`
-    -- is the intra-document (imenu-style) symbol picker, and `alt-g w`
-    -- searches symbols across the whole workspace via `workspace/symbol`.
-    ["alt-g g"] = "goto_line",
-    ["alt-g alt-g"] = "goto_line",
-    ["alt-g i"] = "goto_symbol",
-    ["alt-g w"] = "workspace_symbol",
+	-- Goto family (Emacs M-g prefix). `alt-g` alone is NOT a leaf so it
+	-- can host the multi-chord goto commands; `alt-g g` / `alt-g alt-g`
+	-- jump to a line (the bare `alt-g` = goto_line of old), `alt-g i`
+	-- is the intra-document (imenu-style) symbol picker, and `alt-g w`
+	-- searches symbols across the whole workspace via `workspace/symbol`.
+	["alt-g g"] = "goto_line",
+	["alt-g alt-g"] = "goto_line",
+	["alt-g i"] = "goto_symbol",
+	["alt-g w"] = "workspace_symbol",
 
-    ["alt-'"] = "expand_region",
-    ['alt-"'] = "shrink_region",
+	["alt-'"] = "expand_region",
+	['alt-"'] = "shrink_region",
 
-    -- Escape
-    ["escape"] = "escape_key",
+	-- Escape
+	["escape"] = "escape_key",
 }
