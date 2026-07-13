@@ -2980,80 +2980,13 @@ function View:_wrap_graph(li)
 		cache[li + 1] = entry
 		return entry.sub_rows, entry.sub_cols, entry.total_rows, nil, nil
 	end
-	-- Cache the line text for space/tab detection.
+	-- Delegate word-wrap computation to the extracted pure function.
 	local text = self:_line_text_stripped(li)
-	-- Pre-compute sub-row index spans so sub_row_runs can iterate only
-	-- the graphemes in a given sub-row without scanning the whole line.
-	local sub_first = { [0] = 1 }
-	local sub_last = {}
-	local row, col = 0, 0
-	local row_start = 1
-	local last_space = nil
-	for i = 1, ng do
-		local gw = widths[i]
-		local over_wide = gw > ww
-		if col + gw > ww and col > 0 then
-			if not over_wide and last_space and last_space > row_start then
-				-- Word-wrap: rewind to break after the last space on this row.
-				-- Graphemes after the space move to the next row; the space
-				-- stays on the current row as its trailing character.
-				local prev_last_space = last_space
-				local old_row = row
-				local new_row = row + 1
-				local new_col = 0
-				for j = prev_last_space + 1, i - 1 do
-					sub_rows[j] = new_row
-					sub_cols[j] = new_col
-					new_col = new_col + widths[j]
-				end
-				-- Fix the old row's last grapheme: the space stays on the
-				-- old row as its trailing character.
-				sub_last[old_row] = prev_last_space
-				row = new_row
-				col = new_col
-				last_space = nil
-				row_start = prev_last_space + 1
-				sub_first[row] = row_start
-			else
-				-- Normal (grapheme-level) wrap: advance the row before
-				-- the current grapheme. Also applies to over-wide graphemes
-				-- (they still split mid-word when no space exists).
-				row = row + 1
-				col = 0
-				last_space = nil
-				row_start = i
-				sub_first[row] = i
-			end
-		end
-		sub_rows[i] = row
-		sub_cols[i] = col
-		sub_last[row] = i
-		if over_wide then
-			-- Over-wide grapheme occupies its own row; the NEXT grapheme
-			-- starts a fresh row.
-			row = row + 1
-			col = 0
-			last_space = nil
-			row_start = i + 1
-			sub_first[row] = i + 1
-		else
-			col = col + gw
-			-- Record word boundaries (space or tab) for word-wrap.
-			if text and bs then
-				local b = text:byte(bs[i])
-				if b == 0x20 or b == 0x09 then
-					last_space = i
-				end
-			end
-		end
-	end
-	-- `row` always ends at sub_rows[ng] + 1 (the row just past the last
-	-- grapheme), so total = sub_rows[ng] + 1.
-	local total = sub_rows[ng] + 1
+	local sub_rows, sub_cols, total_rows, sub_first, sub_last = utf8.compute_wrap(bs, widths, text, ww)
 	entry = {
 		sub_rows = sub_rows,
 		sub_cols = sub_cols,
-		total_rows = total,
+		total_rows = total_rows,
 		sub_first = sub_first,
 		sub_last = sub_last,
 	}

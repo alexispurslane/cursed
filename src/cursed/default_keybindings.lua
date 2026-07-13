@@ -159,6 +159,9 @@ return {
 	["alt-{"] = "forward_paragraph",
 	["alt-}"] = "backward_paragraph",
 
+	-- Fill / reflow paragraph (Emacs M-q)
+	["alt-q"] = "fill_paragraph",
+
 	-- Minibuffer history
 	["alt-p"] = "history_up",
 	["alt-n"] = "history_down",
@@ -284,6 +287,9 @@ return {
 	["ctrl-x k"] = "kill_buffer",
 	["ctrl-x ctrl-s"] = "save",
 	["ctrl-x ctrl-c"] = "quit",
+
+	-- Set margin / fill column (Emacs C-x f)
+	["ctrl-x f"] = "set_margin",
 
 	-- Keyboard macros
 	["ctrl-x ("] = "start_kmacro",

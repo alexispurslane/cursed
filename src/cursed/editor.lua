@@ -4409,6 +4409,15 @@ function Editor:_render_content(view, term, mb, ov, focus_dim, geo, layout)
 					end
 				end
 
+				-- Margin / fill-column indicator (shown when wrap is off but margin is set)
+				-- Provides a visual reference for where lines will be broken by fill-paragraph.
+				if not view.wrap and view.margin and view.margin > 0 then
+					local indicator_x = geo.text_x + view.margin
+					if indicator_x < w then
+						ov:put_float(indicator_x, row, "│", ui("indent_guide"), row_bg)
+					end
+				end
+
 				-- Cursor overlay
 				if self._blink_on then
 					for _, c in ipairs(view.cursors) do

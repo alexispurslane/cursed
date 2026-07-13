@@ -29,34 +29,35 @@
 local MajorMode = require("cursed.major_mode")
 
 local SPECS = {
-    "cursed.modes.base",
-    "cursed.modes.lua",
-    "cursed.modes.c",
-    "cursed.modes.python",
-    "cursed.modes.rust",
-    "cursed.modes.typescript",
-    "cursed.modes.tsx",
-    "cursed.modes.go",
-    "cursed.modes.bash",
-    "cursed.modes.json",
-    "cursed.modes.toml",
-    "cursed.modes.yaml",
-    "cursed.modes.html",
-    "cursed.modes.makefile",
-    "cursed.modes.markdown",
-    "cursed.modes.zig",
+	"cursed.modes.base",
+	"cursed.modes.lua",
+	"cursed.modes.c",
+	"cursed.modes.python",
+	"cursed.modes.rust",
+	"cursed.modes.typescript",
+	"cursed.modes.tsx",
+	"cursed.modes.go",
+	"cursed.modes.bash",
+	"cursed.modes.json",
+	"cursed.modes.toml",
+	"cursed.modes.yaml",
+	"cursed.modes.html",
+	"cursed.modes.makefile",
+	"cursed.modes.markdown",
+	"cursed.modes.zig",
+	"cursed.modes.auto_fill",
 }
 
 local modes = {}
 local order = {}
 for _, spec_path in ipairs(SPECS) do
-    local spec = require(spec_path)
-    local mode = MajorMode.new(spec)
-    modes[mode.name] = mode
-    order[#order + 1] = mode.name
+	local spec = require(spec_path)
+	local mode = MajorMode.new(spec)
+	modes[mode.name] = mode
+	order[#order + 1] = mode.name
 end
 
 return {
-    modes = modes,
-    order = order,
+	modes = modes,
+	order = order,
 }

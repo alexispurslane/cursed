@@ -4464,8 +4464,6 @@ commands.toggle_wrap = function(_view, editor)
 	view.wrap = not view.wrap
 	view:invalidate_wrap_cache()
 	editor.status_message = view.wrap and "Wrap on (margin active)" or "Wrap off (window width only)"
-	-- Force a re-render so the new wrap width takes effect immediately
-	editor:mark_for_rerender()
 end
 
 commands.toggle_squiggle_demo = function(_view, editor)
@@ -4859,6 +4857,127 @@ function commands.register_textobject_commands(view, extra_textobjects)
 		end
 	end
 	return added
+end
+
+----------------------------------------------------------------------------------------------------
+-- Fill / unfill commands
+----------------------------------------------------------------------------------------------------
+
+--- Reflow the current paragraph to the fill width (`view.margin` or 72).
+--- Selects the paragraph, joins all lines into a single string,
+--- collapses whitespace, and re-wraps at word boundaries.
+--- Emacs `fill-paragraph` (M-q).
+commands.fill_paragraph = function(view, _editor)
+	if not view:select_range("paragraph", view:p().line, view:p().col) then
+		return
+	end
+	view:replace_selections(function(text)
+		local fill_width = view.margin or 72
+		-- Collapse all whitespace to single spaces, then trim.
+		local joined = text:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+		if #joined == 0 then
+			return ""
+		end
+		local lines = utf8.wrap_string(joined, fill_width)
+		return table.concat(lines, "\n")
+	end)
+end
+
+--- Reflow the active selection to the fill width.
+--- Joins the selected text, collapses whitespace, and re-wraps.
+--- Must have an active selection.
+commands.fill_region = function(view, _editor)
+	if not view:has_selection() then
+		return
+	end
+	view:replace_selections(function(text)
+		local fill_width = view.margin or 72
+		local joined = text:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+		if #joined == 0 then
+			return ""
+		end
+		local lines = utf8.wrap_string(joined, fill_width)
+		return table.concat(lines, "\n")
+	end)
+end
+
+--- Join the current paragraph into a single line (remove internal line breaks,
+--- collapsing whitespace). The inverse of fill-paragraph.
+commands.unfill_paragraph = function(view, _editor)
+	if not view:select_range("paragraph", view:p().line, view:p().col) then
+		return
+	end
+	view:replace_selections(function(text)
+		local joined = text:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+		return joined
+	end)
+end
+
+--- Toggle auto-fill mode on the current view.
+--- Activates or deactivates the built-in `auto-fill` major mode,
+--- which automatically breaks lines at word boundaries when the
+--- cursor passes the fill width.
+commands.toggle_auto_fill = function(_view, editor)
+	local view = editor:current_view()
+	if not view then
+		return
+	end
+	local modes_mod = require("cursed.modes")
+	local template = modes_mod.modes["auto-fill"]
+	if not template then
+		editor.status_message = "auto-fill mode not found"
+		return
+	end
+	if view:has_major_mode(template) then
+		view:deactivate_major_mode(template)
+		editor.status_message = "auto-fill disabled"
+	else
+		view:activate_major_mode(template)
+		editor.status_message = "auto-fill enabled"
+	end
+end
+
+--- Set the display margin / fill column for the current view.
+--- Accepts a universal argument (e.g. C-u 72 M-x set_margin, or
+--- M-x set margin:72) or prompts interactively with the current
+--- margin as the default. A margin of nil or 0 disables the margin
+--- (fill the full window width).
+commands.set_margin = function(view, editor)
+	local arg = editor.universal_args and editor.universal_args[2]
+	if arg then
+		local n = tonumber(arg)
+		if n and n > 0 then
+			view.margin = math.floor(n)
+			view:invalidate_wrap_cache()
+			editor.status_message = "margin set to " .. view.margin
+		else
+			view.margin = nil
+			view:invalidate_wrap_cache()
+			editor.status_message = "margin disabled (full width)"
+		end
+		return
+	end
+	editor:read_from_minibuffer({
+		prompt = "Margin: ",
+		initial = tostring(view.margin or ""),
+		on_submit = function(input)
+			local input_str = input:gsub("^%s+", ""):gsub("%s+$", "")
+			if input_str == "" or input_str == "0" or input_str == "nil" then
+				view.margin = nil
+				view:invalidate_wrap_cache()
+				editor.status_message = "margin disabled (full width)"
+				return
+			end
+			local n = tonumber(input_str)
+			if not n or n < 1 then
+				editor.status_message = "invalid margin: enter a positive number"
+				return
+			end
+			view.margin = math.floor(n)
+			view:invalidate_wrap_cache()
+			editor.status_message = "margin set to " .. view.margin
+		end,
+	})
 end
 
 ----------------------------------------------------------------------------------------------------
