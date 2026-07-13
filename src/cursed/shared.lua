@@ -113,6 +113,7 @@ function SharedState:stop()
     self:push(self._ptr.outbox_hl, { type = shared_ffi.MSG_SHUTDOWN })
     self:push(self._ptr.outbox_lsp, { type = shared_ffi.MSG_SHUTDOWN })
     self:push(self._ptr.outbox_proc, { type = shared_ffi.MSG_SHUTDOWN })
+    self:push(self._ptr.outbox_task, { type = shared_ffi.MSG_SHUTDOWN })
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -332,6 +333,8 @@ return {
     MSG_PROC_KILL = shared_ffi.MSG_PROC_KILL,
     MSG_PROC_OUTPUT = shared_ffi.MSG_PROC_OUTPUT,
     MSG_PROC_EXIT = shared_ffi.MSG_PROC_EXIT,
+    MSG_TASK_SUBMIT = shared_ffi.MSG_TASK_SUBMIT,
+    MSG_TASK_RESULT = shared_ffi.MSG_TASK_RESULT,
     MSG_FILE_DELETE = shared_ffi.MSG_FILE_DELETE,
     MSG_FILE_CREATE = shared_ffi.MSG_FILE_CREATE,
     MSG_FILE_MKDIR = shared_ffi.MSG_FILE_MKDIR,

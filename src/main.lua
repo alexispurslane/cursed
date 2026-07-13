@@ -341,6 +341,34 @@ local function drain_proc_inbox(editor, ss)
 end
 
 ----------------------------------------------------------------------------------------------------
+-- Task lane inbox drain (task lane → main)
+----------------------------------------------------------------------------------------------------
+
+local function drain_task_inbox(editor, ss)
+	local json = require("cursed.json_ffi")
+	drain_generic(ss, ss._ptr.inbox_task, editor, {
+		[shared.MSG_TASK_RESULT] = function(msg)
+			if msg.ptr ~= nil then
+				local r = ffi.cast("struct TaskResult *", msg.ptr)
+				local task_id = tonumber(r.task_id)
+				local task_result_len = tonumber(r.result_len)
+				local task_result_ptr = r.result
+				---@cast task_id integer
+				---@cast task_result_len integer
+				local result_json = ""
+				if task_result_ptr ~= nil and task_result_len > 0 then
+					result_json = ffi.string(task_result_ptr, task_result_len)
+				end
+				ffi.C.free(task_result_ptr)
+				ffi.C.free(msg.ptr)
+				local result = json.decode(result_json)
+				editor.event_system:emit("task_result:" .. tostring(task_id), result)
+			end
+		end,
+	})
+end
+
+----------------------------------------------------------------------------------------------------
 -- Key processing (ported from old main.lua, adapted for View/Editor)
 ----------------------------------------------------------------------------------------------------
 
@@ -1071,6 +1099,7 @@ local function main()
 	main_kq:add_wake(assert(tonumber(ss._ptr.inbox_hl.wake_ident)))
 	main_kq:add_wake(assert(tonumber(ss._ptr.inbox_lsp.wake_ident)))
 	main_kq:add_wake(assert(tonumber(ss._ptr.inbox_proc.wake_ident)))
+	main_kq:add_wake(assert(tonumber(ss._ptr.inbox_task.wake_ident)))
 
 	-- Wire the LSP module's SharedState handle so it can enqueue
 	-- SPAWN/SEND/KILL to the LSP lane (outbox_lsp). The lane owns all
@@ -1085,6 +1114,12 @@ local function main()
 	-- Expose on the editor so init.lua / user code can spawn processes
 	-- against the live image: `editor.proc.spawn({...}, {cwd=...})`.
 	editor.proc = proc_client
+
+	-- Wire the task lane's SharedState + editor handle so send_task
+	-- can push to outbox_task. drain_task_inbox (above) is the inverse.
+	local task_client = require("cursed.task_client")
+	task_client.setup(editor, ss)
+	editor.task = task_client
 
 	-- Expose the editor's main kqueue + workspace root to the
 	-- editor-level LSP manager (registered in cursed.editor_listeners):
@@ -1523,6 +1558,8 @@ local function main()
 						drain_lsp_inbox(editor, ss)
 					elseif tonumber(ev.ident) == tonumber(ss._ptr.inbox_proc.wake_ident) then
 						drain_proc_inbox(editor, ss)
+					elseif tonumber(ev.ident) == tonumber(ss._ptr.inbox_task.wake_ident) then
+						drain_task_inbox(editor, ss)
 					else
 						drain_inbox(editor, ss)
 					end

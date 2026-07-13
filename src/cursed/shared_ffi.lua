@@ -43,6 +43,9 @@ struct SharedState {
     struct RingBuf inbox_lsp;
     struct RingBuf outbox_proc;
     struct RingBuf inbox_proc;
+    struct RingBuf outbox_task; /* main → task */
+    struct RingBuf inbox_task;  /* task → main */
+    int            task_kq_fd;  /* kqueue for task lane */
     int            main_kq_fd;
     int            io_kq_fd;
     int            hl_kq_fd;
@@ -323,6 +326,23 @@ struct FileLoadReply {
     uint32_t file_size;
     void    *mmap_ptr;
 };
+
+/* MSG_TASK_SUBMIT (main → task): bytecode + JSON args. Lane frees struct. */
+struct TaskSubmit {
+    uint32_t task_id;
+    uint32_t bytecode_len;
+    uint32_t args_len;
+    /* followed by bytecode_len + args_len bytes */
+};
+
+/* MSG_TASK_RESULT (task → main): JSON result. Main frees struct + result ptr. */
+struct TaskResult {
+    uint32_t task_id;
+    uint8_t  is_error;
+    uint8_t  _pad[3];
+    uint32_t result_len;
+    uint8_t *result;
+};
 ]])
 
 ----------------------------------------------------------------------------------------------------
@@ -355,6 +375,9 @@ local MSG_PROC_KILL = 20 -- main → proc: ptr = struct ProcKillReq*
 local MSG_PROC_OUTPUT = 21 -- proc → main: ptr = struct ProcOutput*
 local MSG_PROC_EXIT = 22 -- proc → main: ptr = struct ProcExit*
 
+local MSG_TASK_SUBMIT = 33 -- main → task: ptr = struct TaskSubmit*
+local MSG_TASK_RESULT = 34 -- task → main: ptr = struct TaskResult*
+
 local MSG_FILE_DELETE = 24 -- main → IO: ptr = filepath; arg = req_id
 local MSG_FILE_CREATE = 25 -- main → IO: ptr = filepath; arg = req_id
 local MSG_FILE_MKDIR = 26 -- main → IO: ptr = filepath; arg = req_id
@@ -380,46 +403,48 @@ local LSP_DOC_CLOSE = 2
 ----------------------------------------------------------------------------------------------------
 
 return {
-    C = ffi.C,
-    MSG_FILE_LOAD = MSG_FILE_LOAD,
-    MSG_FILE_LOADED = MSG_FILE_LOADED,
-    MSG_FILE_ERROR = MSG_FILE_ERROR,
-    MSG_FILE_SAVE = MSG_FILE_SAVE,
-    MSG_FILE_SAVED = MSG_FILE_SAVED,
-    MSG_SHUTDOWN = MSG_SHUTDOWN,
-    MSG_INSERT_FILE = MSG_INSERT_FILE,
-    MSG_FILE_INSERTED = MSG_FILE_INSERTED,
-    MSG_HL_INITIALIZE_LANGUAGE = MSG_HL_INITIALIZE_LANGUAGE,
-    MSG_HL_QUERY = MSG_HL_QUERY,
-    MSG_HL_SPANS = MSG_HL_SPANS,
-    MSG_LSP_SPAWN = MSG_LSP_SPAWN,
-    MSG_LSP_SEND = MSG_LSP_SEND,
-    MSG_LSP_KILL = MSG_LSP_KILL,
-    MSG_LSP_HANDSHAKE = MSG_LSP_HANDSHAKE,
-    MSG_LSP_DOC_SYNC = MSG_LSP_DOC_SYNC,
-    MSG_LSP_RESPONSE = MSG_LSP_RESPONSE,
-    MSG_LSP_NOTIFICATION = MSG_LSP_NOTIFICATION,
-    MSG_LSP_SERVER_REQUEST = MSG_LSP_SERVER_REQUEST,
-    MSG_PROC_SPAWN = MSG_PROC_SPAWN,
-    MSG_PROC_STDIN = MSG_PROC_STDIN,
-    MSG_PROC_KILL = MSG_PROC_KILL,
-    MSG_PROC_OUTPUT = MSG_PROC_OUTPUT,
-    MSG_PROC_EXIT = MSG_PROC_EXIT,
-    MSG_FILE_DELETE = MSG_FILE_DELETE,
-    MSG_FILE_CREATE = MSG_FILE_CREATE,
-    MSG_FILE_MKDIR = MSG_FILE_MKDIR,
-    MSG_FILE_CHMOD = MSG_FILE_CHMOD,
-    MSG_FILE_RENAME = MSG_FILE_RENAME,
-    MSG_FILE_DIRLIST = MSG_FILE_DIRLIST,
-    MSG_FILE_DIRLIST_RESP = MSG_FILE_DIRLIST_RESP,
-    MSG_FILE_WRITE = MSG_FILE_WRITE,
-    MSG_FILE_LOADED_V2 = MSG_FILE_LOADED_V2,
-    LSP_STATUS_SPAWNING = LSP_STATUS_SPAWNING,
-    LSP_STATUS_READY = LSP_STATUS_READY,
-    LSP_STATUS_DEAD = LSP_STATUS_DEAD,
-    LSP_STATUS_KILLED = LSP_STATUS_KILLED,
-    LSP_STATUS_MISSING = LSP_STATUS_MISSING,
-    LSP_DOC_OPEN = LSP_DOC_OPEN,
-    LSP_DOC_CHANGE = LSP_DOC_CHANGE,
-    LSP_DOC_CLOSE = LSP_DOC_CLOSE,
+	C = ffi.C,
+	MSG_FILE_LOAD = MSG_FILE_LOAD,
+	MSG_FILE_LOADED = MSG_FILE_LOADED,
+	MSG_FILE_ERROR = MSG_FILE_ERROR,
+	MSG_FILE_SAVE = MSG_FILE_SAVE,
+	MSG_FILE_SAVED = MSG_FILE_SAVED,
+	MSG_SHUTDOWN = MSG_SHUTDOWN,
+	MSG_INSERT_FILE = MSG_INSERT_FILE,
+	MSG_FILE_INSERTED = MSG_FILE_INSERTED,
+	MSG_HL_INITIALIZE_LANGUAGE = MSG_HL_INITIALIZE_LANGUAGE,
+	MSG_HL_QUERY = MSG_HL_QUERY,
+	MSG_HL_SPANS = MSG_HL_SPANS,
+	MSG_LSP_SPAWN = MSG_LSP_SPAWN,
+	MSG_LSP_SEND = MSG_LSP_SEND,
+	MSG_LSP_KILL = MSG_LSP_KILL,
+	MSG_LSP_HANDSHAKE = MSG_LSP_HANDSHAKE,
+	MSG_LSP_DOC_SYNC = MSG_LSP_DOC_SYNC,
+	MSG_LSP_RESPONSE = MSG_LSP_RESPONSE,
+	MSG_LSP_NOTIFICATION = MSG_LSP_NOTIFICATION,
+	MSG_LSP_SERVER_REQUEST = MSG_LSP_SERVER_REQUEST,
+	MSG_PROC_SPAWN = MSG_PROC_SPAWN,
+	MSG_PROC_STDIN = MSG_PROC_STDIN,
+	MSG_PROC_KILL = MSG_PROC_KILL,
+	MSG_PROC_OUTPUT = MSG_PROC_OUTPUT,
+	MSG_PROC_EXIT = MSG_PROC_EXIT,
+	MSG_TASK_SUBMIT = MSG_TASK_SUBMIT,
+	MSG_TASK_RESULT = MSG_TASK_RESULT,
+	MSG_FILE_DELETE = MSG_FILE_DELETE,
+	MSG_FILE_CREATE = MSG_FILE_CREATE,
+	MSG_FILE_MKDIR = MSG_FILE_MKDIR,
+	MSG_FILE_CHMOD = MSG_FILE_CHMOD,
+	MSG_FILE_RENAME = MSG_FILE_RENAME,
+	MSG_FILE_DIRLIST = MSG_FILE_DIRLIST,
+	MSG_FILE_DIRLIST_RESP = MSG_FILE_DIRLIST_RESP,
+	MSG_FILE_WRITE = MSG_FILE_WRITE,
+	MSG_FILE_LOADED_V2 = MSG_FILE_LOADED_V2,
+	LSP_STATUS_SPAWNING = LSP_STATUS_SPAWNING,
+	LSP_STATUS_READY = LSP_STATUS_READY,
+	LSP_STATUS_DEAD = LSP_STATUS_DEAD,
+	LSP_STATUS_KILLED = LSP_STATUS_KILLED,
+	LSP_STATUS_MISSING = LSP_STATUS_MISSING,
+	LSP_DOC_OPEN = LSP_DOC_OPEN,
+	LSP_DOC_CHANGE = LSP_DOC_CHANGE,
+	LSP_DOC_CLOSE = LSP_DOC_CLOSE,
 }

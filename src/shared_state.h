@@ -116,6 +116,28 @@
 #define MSG_PROC_OUTPUT   21 /* proc → main: ptr = struct ProcOutput* */
 #define MSG_PROC_EXIT     22 /* proc → main: ptr = struct ProcExit*   */
 
+/* ── Task lane payloads ───────────────────────────────────────────── */
+
+/* MSG_TASK_SUBMIT (main → task): bytecode + JSON args. Lane frees struct. */
+#define MSG_TASK_SUBMIT 33
+/* MSG_TASK_RESULT (task → main): JSON result. Main frees struct + result ptr. */
+#define MSG_TASK_RESULT 34
+
+struct TaskSubmit {
+    uint32_t task_id;       /* main mints; echoed in result */
+    uint32_t bytecode_len;  /* bytes of string.dump(fn, true) */
+    uint32_t args_len;      /* bytes of JSON-encoded args table */
+    /* followed by bytecode_len + args_len bytes */
+};
+
+struct TaskResult {
+    uint32_t task_id;
+    uint8_t  is_error;      /* 1 = result is an error, 0 = normal */
+    uint8_t  _pad[3];
+    uint32_t result_len;    /* bytes of JSON-encoded result */
+    uint8_t *result;        /* malloc'd JSON, ownership → main */
+};
+
 /* ── LSP server status codes (carried in LspHandshake.status) ──────── */
 #define LSP_STATUS_SPAWNING 0   /* spawned, initialize response not yet received */
 #define LSP_STATUS_READY    1   /* initialize response received; server usable */
@@ -182,6 +204,9 @@ struct SharedState {
     struct RingBuf inbox_lsp;  /* LSP → main */
     struct RingBuf outbox_proc; /* main → proc */
     struct RingBuf inbox_proc;  /* proc → main */
+    struct RingBuf outbox_task; /* main → task */
+    struct RingBuf inbox_task;  /* task → main */
+    int            task_kq_fd;  /* kqueue for task lane */
     int            main_kq_fd;  /* central kqueue for main lane (tty, resize, inbox wakes) */
     int            io_kq_fd;    /* kqueue for IO lane (outbox wake) */
     int            hl_kq_fd;   /* kqueue for highlight lane (outbox_hl wake) */
@@ -220,6 +245,8 @@ static inline struct SharedState *shared_state_alloc(void)
     atomic_store_explicit(&ss->outbox_lsp.tail, 0, memory_order_relaxed);
     atomic_store_explicit(&ss->outbox_proc.head, 0, memory_order_relaxed);
     atomic_store_explicit(&ss->outbox_proc.tail, 0, memory_order_relaxed);
+    atomic_store_explicit(&ss->outbox_task.head, 0, memory_order_relaxed);
+    atomic_store_explicit(&ss->outbox_task.tail, 0, memory_order_relaxed);
     atomic_store_explicit(&ss->running, true, memory_order_relaxed);
 
     ss->main_kq_fd = kqueue();
@@ -227,6 +254,7 @@ static inline struct SharedState *shared_state_alloc(void)
     ss->hl_kq_fd = kqueue();
     ss->lsp_kq_fd = kqueue();
     ss->proc_kq_fd = kqueue();
+    ss->task_kq_fd = kqueue();
 
     /* Each ring wakes its consumer lane via a distinct EVFILT_USER ident.
      * Idents are lane-local: outbox_* wakes the consumer lane (io/hl/lsp),
@@ -249,7 +277,12 @@ static inline struct SharedState *shared_state_alloc(void)
     ss->inbox_proc.consumer_kq_fd = ss->main_kq_fd;
     ss->inbox_proc.wake_ident = 4;
 
-    if (ss->main_kq_fd < 0 || ss->io_kq_fd < 0 || ss->hl_kq_fd < 0 || ss->lsp_kq_fd < 0 || ss->proc_kq_fd < 0) {
+    ss->outbox_task.consumer_kq_fd = ss->task_kq_fd;
+    ss->outbox_task.wake_ident = 1;
+    ss->inbox_task.consumer_kq_fd = ss->main_kq_fd;
+    ss->inbox_task.wake_ident = 5;
+
+    if (ss->main_kq_fd < 0 || ss->io_kq_fd < 0 || ss->hl_kq_fd < 0 || ss->lsp_kq_fd < 0 || ss->proc_kq_fd < 0 || ss->task_kq_fd < 0) {
         shared_state_free(ss);
         return NULL;
     }
@@ -277,6 +310,7 @@ static inline void shared_state_free(struct SharedState *ss)
     if (ss->hl_kq_fd >= 0) close(ss->hl_kq_fd);
     if (ss->lsp_kq_fd >= 0) close(ss->lsp_kq_fd);
     if (ss->proc_kq_fd >= 0) close(ss->proc_kq_fd);
+    if (ss->task_kq_fd >= 0) close(ss->task_kq_fd);
     free(ss);
 }
 

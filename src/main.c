@@ -320,9 +320,10 @@ int main(int argc, char *argv[])
         return EXIT_FAILURE;
     }
 
-    /* Create main lane state */
-    lua_State *main_L = create_lane_state();
-    if (main_L == NULL) {
+    /* Create task lane state + thread (off-thread bytecode evaluation:
+     * runs string.dump'd functions with JSON args, returns JSON results). */
+    lua_State *task_L = create_lane_state();
+    if (task_L == NULL) {
         pthread_cancel(io_thread);
         pthread_join(io_thread, NULL);
         lua_close(io_L);
@@ -338,6 +339,54 @@ int main(int argc, char *argv[])
         shared_state_free(g_shared_state);
         return EXIT_FAILURE;
     }
+    setup_lane_globals(task_L, 0, NULL);
+
+    struct LaneThreadArgs *task_args = malloc(sizeof(*task_args));
+    task_args->L = task_L;
+    task_args->module = "cursed.task_lane";
+
+    pthread_t task_thread;
+    rc = pthread_create(&task_thread, NULL, lane_thread, task_args);
+    if (rc != 0) {
+        fprintf(stderr, "cursed: failed to create task lane thread\n");
+        lua_close(task_L);
+        pthread_cancel(io_thread);
+        pthread_join(io_thread, NULL);
+        lua_close(io_L);
+        pthread_cancel(hl_thread);
+        pthread_join(hl_thread, NULL);
+        lua_close(hl_L);
+        pthread_cancel(lsp_thread);
+        pthread_join(lsp_thread, NULL);
+        lua_close(lsp_L);
+        pthread_cancel(proc_thread);
+        pthread_join(proc_thread, NULL);
+        lua_close(proc_L);
+        shared_state_free(g_shared_state);
+        return EXIT_FAILURE;
+    }
+
+    /* Create main lane state */
+    lua_State *main_L = create_lane_state();
+    if (main_L == NULL) {
+        pthread_cancel(io_thread);
+        pthread_join(io_thread, NULL);
+        lua_close(io_L);
+        pthread_cancel(hl_thread);
+        pthread_join(hl_thread, NULL);
+        lua_close(hl_L);
+        pthread_cancel(lsp_thread);
+        pthread_join(lsp_thread, NULL);
+        lua_close(lsp_L);
+        pthread_cancel(task_thread);
+        pthread_join(task_thread, NULL);
+        lua_close(task_L);
+        pthread_cancel(proc_thread);
+        pthread_join(proc_thread, NULL);
+        lua_close(proc_L);
+        shared_state_free(g_shared_state);
+        return EXIT_FAILURE;
+    }
     setup_lane_globals(main_L, argc, argv);
 
     /* Run main lane (blocks until editor exits) */
@@ -345,7 +394,7 @@ int main(int argc, char *argv[])
 
     /* Cleanup.
      *
-     * The worker lanes (IO/highlight/LSP) block in kevent() waiting for
+     * The worker lanes (IO/highlight/LSP/proc/task) block in kevent() waiting for
      * work. In the normal TUI exit path, main has already set
      * running=false and poked the lane wake-idents so each lane spins
      * once, observes running=false, and returns — pthread_join then
@@ -378,6 +427,11 @@ int main(int argc, char *argv[])
     }
     pthread_join(proc_thread, NULL);
     lua_close(proc_L);
+    if (lanes_already_stopped) {
+        pthread_cancel(task_thread);
+    }
+    pthread_join(task_thread, NULL);
+    lua_close(task_L);
 
     /* Free shared state (orig.data munmap'd by main lane before exit) */
     shared_state_free(g_shared_state);

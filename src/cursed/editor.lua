@@ -898,16 +898,25 @@ function Editor:tick_background_tasks()
 				end
 			end
 			if entry.co then
-				local ok, result = coroutine.resume(entry.co)
-				local status = coroutine.status(entry.co)
-				if not ok then
-					log.error("editor", "background task error", { error = tostring(result) })
+				local co_status = coroutine.status(entry.co)
+				-- Coroutine may have already completed via an event handler
+				-- (e.g. async.await resumed it from drain_task_inbox).
+				if co_status == "dead" then
+					-- Already ran to completion via an external resume;
+					-- just remove from the queue.
 					done = true
-				elseif status == "dead" then
-					done = result ~= false
 				else
-					-- Suspended (yielded via async.await): re-queue.
-					done = false
+					local ok, result = coroutine.resume(entry.co)
+					local status = coroutine.status(entry.co)
+					if not ok then
+						log.error("editor", "background task error", { error = tostring(result) })
+						done = true
+					elseif status == "dead" then
+						done = result ~= false
+					else
+						-- Suspended (yielded via async.await): re-queue.
+						done = false
+					end
 				end
 			end
 		else
@@ -924,7 +933,9 @@ function Editor:tick_background_tasks()
 					done = result ~= false
 				else
 					-- Re-wrap as a table entry for future ticks.
-					entry = { co = co, deadline = entry.deadline }
+					-- deadline is only meaningful for schedule_at tasks;
+					-- plain functions have no deadline (indexed via nil).
+					entry = { co = co }
 					done = false
 				end
 			else

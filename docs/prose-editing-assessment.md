@@ -160,7 +160,7 @@ fill_region, unfill_paragraph, toggle_auto_fill) and `src/cursed/modes/auto_fill
 | --- | --- | --- | --- |
 | **`fill-paragraph`** (M-q) | ✅ | `alt-q` | Selects paragraph via textobject, joins lines, collapses whitespace, re-wraps at `view.margin` or 72 |
 | **`fill-region`** | ✅ | M-x `fill_region` | Same logic as fill-paragraph but operates on active selection |
-| **`auto-fill-mode`** | ✅ | M-x `toggle_auto_fill` | Major mode; listens on `post_command_hook` after `__printable`, breaks at last space before fill width |
+| **`auto-fill-mode`** | ✅ | M-x `toggle_auto_fill` | Minor mode (`is_minor = true`); not shown in modeline, doesn't clobber margin; listens on `post_command_hook` after `__printable`, breaks at last space before fill width |
 | **`fill-column`** | ✅ | `view.margin` / `view._auto_fill_margin` | Dedicated `_auto_fill_margin` field survives mode-setup overwrites |
 | **`set-fill-column`** | ✅ | `ctrl-x f` (`set_margin`) | Accepts universal arg or prompts interactively |
 | **`set-fill-prefix`** | ❌ Not implemented | — | — |
@@ -177,6 +177,9 @@ fill_region, unfill_paragraph, toggle_auto_fill) and `src/cursed/modes/auto_fill
 - The `post_command_hook` listener is registered once globally and filters by
   `__printable` command and focused view, so only the active auto-fill buffer
   gets auto-filled.
+- Now uses `is_minor = true` in the mode spec — auto-fill is a **minor mode**,
+  skipped for modeline naming and doesn't override margin/display settings from
+  the underlying major mode (e.g. markdown).
 
 ---
 
@@ -241,19 +244,35 @@ sub-row. Both fall back to logical line start/end when wrap is inactive.
 
 #### 4. Word Count
 
-**Problem:** No command to count words, characters, lines, or sentences.
+**Status: ✅ DONE** — Implemented as `cursed.word_count` utility module + `word-count`
+commands + `word-count-mode` minor mode.
 
-A world-class prose editor provides a `word-count` command (or `wc`-like
-functionality) accessible from M-x or a keybinding. Emacs has `M-x word-count`
-and `M-x count-words` (C-x = shows point stats; M-x count-words-region).
+**Features:**
 
-**Implementation would be trivial:**
+| Feature | Status | Binding | Notes |
+| --- | --- | --- | --- |
+| **`word-count`** | ✅ | M-x `word_count` | One-shot count in modeline: "245w 12s 3¶ 1§ ~1pg ~1m" |
+| **`word-count-mode`** | ✅ | M-x `toggle_word_count_mode` | Minor mode; live updates after every edit via `post_command_hook` |
+| **`set-word-goal`** | ✅ | M-x `set_word_goal` | Set total word target (C-u N or minibuffer prompt) |
+| **`set-word-goal-increment`** | ✅ | M-x `set_word_goal_increment` | Set "write N more" target from current count |
+| Goal progress display | ✅ | Shown in modeline segment | "245→1000 (24%)" or "+45→+200 (22%)" |
+| Modeline segment | ✅ | Appended when mode active | Shows stats + goals, removed on deactivation |
+| Selection-aware | ✅ | Counts region when selection is active | Whole buffer when no selection |
 
-```lua
--- Parse the buffer (or region) into word/sentence/char counts.
--- For prose, words are whitespace-delimited tokens.
--- For markdown, optionally skip front-matter/headings/formatting syntax.
-```
+**Statistics tracked:**
+
+- **Words** — whitespace-delimited tokens
+- **Sentences** — `[.!?][ \n]` convention (same as sentence textobject)
+- **Paragraphs** — blank-line-delimited runs
+- **Sections** — markdown `#` heading detection
+- **Estimated pages** — words ÷ 250, rounded up
+- **Reading time** — words ÷ 200 wpm, rounded up
+
+**Source files:**
+
+- `src/cursed/word_count.lua` — counting and formatting logic
+- `src/cursed/commands.lua` — `word_count`, `set_word_goal`, `set_word_goal_increment`, `toggle_word_count_mode`
+- `src/cursed/modes/word_count.lua` — minor mode with modeline segment + `post_command_hook` listener
 
 ---
 
@@ -377,7 +396,7 @@ a noticeable difference for prose entry speed.
 | 2 | Auto-fill-mode | **Critical** | Medium | ✅ **Done** | `modes/auto_fill.lua`, toggle via `toggle_auto_fill` |
 | 3 | Visual-line home/end | **Critical** | Small | ✅ **Done** | `ctrl-a`/`ctrl-e` bound to visual-line variants when `visual-movement` mode is active; logical by default |
 | 4 | Visual-line-mode toggle | **Important** | Small | ✅ **Done** | `modes/visual_movement.lua`, `toggle_visual_movement` command |
-| 5 | Word count | **Important** | Trivial | ❌ | ~30 lines of Lua |
+| 5 | Word count | **Important** | Trivial | ✅ **Done** | `cursed/word_count.lua` + `word-count` minor mode with goal tracking |
 | 6 | Spell-check-on-save | **Important** | Small | ❌ | Before-save hook |
 | 7 | Transpose-chars | **Important** | Trivial | ❌ | ~10 lines |
 | 8 | Abbrev expansion | Nice-to-have | Medium | ❌ | Table + post-self-insert hook |

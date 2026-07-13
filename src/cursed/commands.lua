@@ -5084,6 +5084,121 @@ commands.set_margin = function(view, editor)
 	})
 end
 
+--- Show word/sentence/paragraph/section count for the buffer or selection.
+--- Displays in the modeline as "Xw Ys Z¶ W§ ~Vpg ~Tm".
+commands.word_count = function(view, editor)
+	local wc = require("cursed.word_count")
+	local stats = wc.compute(view)
+	local text = wc.format(stats)
+	editor.status_message = text
+end
+
+--- Set a total word goal for the current buffer.
+--- With a universal argument, uses that as the goal (C-u 1000 M-x set_word_goal).
+--- Without, prompts via minibuffer.
+commands.set_word_goal = function(view, editor)
+	local arg = editor.universal_args and editor.universal_args[2]
+	local wc = require("cursed.word_count")
+	if arg then
+		local n = tonumber(arg)
+		if n and n > 0 then
+			view._wc_goal_total = math.floor(n)
+			editor.status_message = "word goal set to " .. view._wc_goal_total
+		else
+			view._wc_goal_total = nil
+			editor.status_message = "word goal cleared"
+		end
+		return
+	end
+	editor:read_from_minibuffer({
+		prompt = "Word goal (0 to clear): ",
+		initial = tostring(view._wc_goal_total or ""),
+		on_submit = function(input)
+			local s = input:gsub("^%s+", ""):gsub("%s+$", "")
+			if s == "" or s == "0" then
+				view._wc_goal_total = nil
+				editor.status_message = "word goal cleared"
+				return
+			end
+			local n = tonumber(s)
+			if not n or n < 1 then
+				editor.status_message = "invalid goal"
+				return
+			end
+			view._wc_goal_total = math.floor(n)
+			editor.status_message = "word goal set to " .. view._wc_goal_total
+		end,
+	})
+end
+
+--- Set an incremental word goal: write N more words than the current count.
+--- With a universal argument, uses that as the increment.
+--- Without, prompts via minibuffer.
+commands.set_word_goal_increment = function(view, editor)
+	local arg = editor.universal_args and editor.universal_args[2]
+	local wc = require("cursed.word_count")
+	if arg then
+		local n = tonumber(arg)
+		if n and n > 0 then
+			local stats = wc.compute(view)
+			view._wc_goal_inc = math.floor(n)
+			view._wc_start_words = stats.words
+			editor.status_message = "incremental goal: +" .. view._wc_goal_inc .. " words"
+		else
+			view._wc_goal_inc = nil
+			view._wc_start_words = nil
+			editor.status_message = "incremental goal cleared"
+		end
+		return
+	end
+	editor:read_from_minibuffer({
+		prompt = "Incremental word goal (0 to clear): ",
+		initial = tostring(view._wc_goal_inc or ""),
+		on_submit = function(input)
+			local s = input:gsub("^%s+", ""):gsub("%s+$", "")
+			if s == "" or s == "0" then
+				view._wc_goal_inc = nil
+				view._wc_start_words = nil
+				editor.status_message = "incremental goal cleared"
+				return
+			end
+			local n = tonumber(s)
+			if not n or n < 1 then
+				editor.status_message = "invalid goal"
+				return
+			end
+			local wc = require("cursed.word_count")
+			local stats = wc.compute(view)
+			view._wc_goal_inc = math.floor(n)
+			view._wc_start_words = stats.words
+			editor.status_message = "incremental goal: +" .. view._wc_goal_inc .. " words"
+		end,
+	})
+end
+
+--- Toggle word-count mode on the current view.
+--- When active, shows live word/sentence/paragraph/section/page/reading-time
+--- stats in the modeline, updated after every edit. Also tracks progress
+--- toward word goals set via set_word_goal or set_word_goal_increment.
+commands.toggle_word_count_mode = function(view, editor)
+	if not view then
+		return
+	end
+	local modes_mod = require("cursed.modes")
+	local template = modes_mod.modes["word-count"]
+	if not template then
+		editor.status_message = "word-count mode not found"
+		return
+	end
+	if view:has_major_mode(template) then
+		view:deactivate_major_mode(template)
+		editor.status_message = "word-count disabled"
+	else
+		view:activate_major_mode(template)
+		editor.status_message = "word-count enabled"
+	end
+end
+
 ----------------------------------------------------------------------------------------------------
 -- Spell (flyspell) commands
 --

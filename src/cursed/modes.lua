@@ -47,6 +47,7 @@ local SPECS = {
 	"cursed.modes.zig",
 	"cursed.modes.auto_fill",
 	"cursed.modes.visual_movement",
+	"cursed.modes.word_count",
 }
 
 local modes = {}
