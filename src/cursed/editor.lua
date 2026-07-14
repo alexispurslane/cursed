@@ -1862,6 +1862,7 @@ function Editor:save()
 		self.status_message = "no file"
 		return
 	end
+	self.event_system:emit("before_save", view, buf)
 	self:_async_save(buf)
 end
 

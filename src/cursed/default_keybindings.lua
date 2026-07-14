@@ -195,8 +195,8 @@ return {
 	["alt-<"] = "beginning_of_buffer",
 	["alt->"] = "end_of_buffer",
 
-	-- (No transpose bindings — transpose commands were removed in
-	-- favor of the neovim-style drag on alt-left / alt-right.)
+	-- Transpose
+	["ctrl-t"] = "transpose_chars",
 
 	-- Cancel. `ctrl-g` is keyboard-quit; `ctrl-x ctrl-c` quits the
 	-- editor. The bare `ctrl-c` leaf was removed so `ctrl-c` is a pure

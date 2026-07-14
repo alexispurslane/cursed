@@ -55,6 +55,23 @@ function M.setup(editor)
             d._pending[k] = nil
         end
     end)
+    -- Before-save hook: warn when misspellings remain.
+    es:on("before_save", function(_ed, view, buf)
+        ---@diagnostic disable-next-line: unused-local
+        view = view
+        local store = d:store()
+        if store == nil then
+            return
+        end
+        local items = store:items(buf)
+        if items and #items > 0 then
+            _ed.status_message = "spell: "
+                .. #items
+                .. " misspelling"
+                .. (#items == 1 and "" or "s")
+                .. " remaining"
+        end
+    end)
     return d
 end
 

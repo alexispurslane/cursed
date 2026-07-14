@@ -280,29 +280,49 @@ commands + `word-count-mode` minor mode.
 
 #### 5. Transpose Operations
 
-**Note:** The drag commands (`alt-left` / `alt-right`, which move the active
-selection) are **already implemented** and partially fill this role. Drag is
-arguably more discoverable and visual.
+**Status: ✅ DONE** — `transpose-chars` (ctrl-t) implemented in
+`src/cursed/commands.lua` and bound in `src/cursed/default_keybindings.lua`.
+Multi-cursor aware, UTF-8 safe.
 
-**However,** single-character transpose (`ctrl-t`) is a reflex for typo fixes:
+**Implemented features:**
 
-- `transpose-chars` (ctrl-t) — swap the two characters on either side of point
-- `transpose-words` — swap the word before point with the word after point
-- `transpose-sentences` — swap sentences
+| Feature | Status | Binding | Notes |
+| --- | --- | --- | --- |
+| **`transpose-chars`** | ✅ | `ctrl-t` | Swaps two chars on either side of point; at EOL swaps two chars before point; multi-cursor aware; UTF-8 safe via `prev_char_start` |
+| **`transpose-words`** | ❌ Not implemented | — | Covered by drag (select + alt-left/alt-right) |
+| **`transpose-sentences`** | ❌ Not implemented | — | Covered by drag (select + alt-left/alt-right) |
 
-Cursed's drag commands cover the word and sentence cases (select + drag), but
-the single-keystroke char transpose is a different muscle-memory use case.
+Cursed's drag commands (`alt-left` / `alt-right`) already cover the word and
+sentence transpose cases with a more discoverable and visual approach (select +
+drag), but the single-keystroke char transpose addresses the different
+muscle-memory reflex for quick typo fixes.
+
+**Source files:**
+
+- `src/cursed/commands.lua` — `transpose_chars` command implementation
+- `src/cursed/default_keybindings.lua` — `ctrl-t` keyboard binding
 
 ---
 
 #### 6. Spell-Check-on-Save
 
-**Problem:** No automatic verification on save. A user can save a file with
-misspellings and never know.
+**Status: ✅ DONE** — Implemented via `before_save` event emitted from
+`editor:save()`, with a handler registered in `src/cursed/spell.lua` that
+queries the spell store and shows a `status_message` warning when misspellings
+remain.
 
-**Feature:** A `before-save-hook` equivalent or a `flyspell-check-on-save`
-flag that re-checks the buffer and surfaces a warning (or a count) when
-misspellings remain.
+**Implemented features:**
+
+| Feature | Status | Notes |
+| --- | --- | --- |
+| `before_save` event | ✅ | Emitted from `Editor:save()` before the async write |
+| `spell-check-on-save` warning | ✅ | Surfaces "spell: N misspelling[s] remaining" in status bar on save; no config flag needed — always active when spell backend is initialized |
+
+**Source files:**
+
+- `src/cursed/editor.lua` — emits `before_save` event in `Editor:save()`
+- `src/cursed/spell.lua` — registers handler that warns about remaining misspellings
+- `src/cursed/spell/commands.lua` — `flyspell_correct`, `autocorrect_word`, etc.
 
 ---
 
@@ -397,8 +417,8 @@ a noticeable difference for prose entry speed.
 | 3 | Visual-line home/end | **Critical** | Small | ✅ **Done** | `ctrl-a`/`ctrl-e` bound to visual-line variants when `visual-movement` mode is active; logical by default |
 | 4 | Visual-line-mode toggle | **Important** | Small | ✅ **Done** | `modes/visual_movement.lua`, `toggle_visual_movement` command |
 | 5 | Word count | **Important** | Trivial | ✅ **Done** | `cursed/word_count.lua` + `word-count` minor mode with goal tracking |
-| 6 | Spell-check-on-save | **Important** | Small | ❌ | Before-save hook |
-| 7 | Transpose-chars | **Important** | Trivial | ❌ | ~10 lines |
+| 6 | Spell-check-on-save | **Important** | Small | ✅ **Done** | `before_save` event + handler in spell.lua |
+| 7 | Transpose-chars | **Important** | Trivial | ✅ **Done** | `transpose_chars` command + ctrl-t binding |
 | 8 | Abbrev expansion | Nice-to-have | Medium | ❌ | Table + post-self-insert hook |
 | 9 | Thesaurus | Nice-to-have | Medium | ❌ | Pipe to `dict`/WordNet |
 | 10 | Hyphenation | Nice-to-have | Large | ❌ | Dictionary + wrap-graph hook |

@@ -4830,6 +4830,110 @@ commands.drag_right = function(view, editor, ...)
 	end
 end
 
+----------------------------------------------------------------------------------------------------
+-- Transpose (C-t)
+----------------------------------------------------------------------------------------------------
+
+--- Find the 0-based byte offset of the start of the UTF-8 character
+--- that ends at (or contains) byte position `byte_pos` in `text`.
+--- Uses UTF-8 self-synchronization: continuation bytes are 0x80-0xBF,
+--- lead bytes and ASCII are outside that range.
+---@param text string
+---@param byte_pos integer 0-based byte offset into text
+---@return integer 0-based byte offset of the character's start
+local function prev_char_start(text, byte_pos)
+	if byte_pos <= 0 then
+		return 0
+	end
+	local i = byte_pos + 1 -- 1-based Lua index
+	while i > 1 do
+		i = i - 1
+		local b = text:byte(i)
+		if b ~= nil and (b < 128 or b >= 192) then
+			return i - 1 -- 0-based offset of lead byte
+		end
+	end
+	return 0
+end
+
+--- Swap the two characters on either side of point.
+--- At end of line, swaps the two characters before point instead.
+--- Point advances by one character after transposition.
+--- Emacs `transpose-chars` (C-t). Multi-cursor aware.
+commands.transpose_chars = function(view, _editor)
+	local buf = view.buffer
+
+	-- Pre-compute swap info for each cursor from PRE-edit state.
+	-- Each info describes a replacement of [sl, sc, total_len) with
+	-- first_text..second_text. Cursor lands at sc + #first_text.
+	local infos = {}
+	for _, c in ipairs(view.cursors) do
+		local text = buf:line_text(c.line)
+		local clen = view:content_len(c.line)
+		local col = c.col
+
+		-- Need at least 2 chars on the line, cursor not at position 0.
+		if clen < 2 or col <= 0 or col > clen then
+			infos[c] = nil
+		elseif col < clen then
+			-- Mid-line: swap char before point with char at point.
+			local before_start = prev_char_start(text, col)
+			local before_text = text:sub(before_start + 1, col)
+
+			local after_len = utf8.char_length(text:byte(col + 1))
+			local after_text = text:sub(col + 1, col + after_len)
+
+			infos[c] = {
+				sl = c.line,
+				sc = before_start,
+				total_len = #before_text + after_len,
+				first_text = after_text,
+				second_text = before_text,
+				cursor_advance = after_len,
+			}
+		else
+			-- At end of line: swap the two chars before point.
+			-- Char immediately before point ends at col.
+			local right_start = prev_char_start(text, col)
+			if right_start <= 0 then
+				-- Only one char before point; can't transpose.
+				infos[c] = nil
+			else
+				local right_text = text:sub(right_start + 1, col)
+
+				-- Char before that ends at right_start.
+				local left_start = prev_char_start(text, right_start)
+				local left_text = text:sub(left_start + 1, right_start)
+
+				infos[c] = {
+					sl = c.line,
+					sc = left_start,
+					total_len = #left_text + #right_text,
+					first_text = right_text,
+					second_text = left_text,
+					cursor_advance = #left_text + #right_text,
+				}
+			end
+		end
+	end
+
+	view:batch_edit(false, function(c)
+		local info = infos[c]
+		if info == nil then
+			return c.line, c.col, c.line, c.col, { c.line, c.col }
+		end
+
+		local sl, sc = info.sl, info.sc
+		buf:delete_char(sl, sc, info.total_len)
+		buf:insert_char(sl, sc, info.first_text .. info.second_text)
+
+		local rc = sc + info.cursor_advance
+		return sl, sc, sl, rc, { sl, sc + info.total_len }
+	end)
+
+	view:_set_goal_col(view:p().col)
+end
+
 --   backward_<name>_select  — backward, extending the selection
 --
 -- Mode-specific textobjects (e.g. lua's `statement`) get commands too;
