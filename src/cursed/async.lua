@@ -35,6 +35,18 @@ local async = {}
 -- Counter for unique timer event names.
 local _timer_id = 0
 
+-- Weak-keyed table tracking coroutines currently awaiting an event.
+-- The background task scheduler uses this to avoid resuming them.
+local _awaiting = setmetatable({}, { __mode = "k" })
+
+--- Check whether a coroutine is currently waiting for an async event.
+--- The scheduler uses this to avoid spuriously resuming awaiters.
+---@param co thread
+---@return boolean
+function async.is_awaiting(co)
+	return _awaiting[co] == true
+end
+
 --- Suspend the current coroutine for `us` microseconds.
 --- Uses Editor:schedule_after to create a deadline task that emits
 --- a one-shot event, then async.awaits that event.
@@ -81,6 +93,9 @@ function async.await(token)
     local handler
     handler = es:on(ev, function(_, ...)
         es:off(ev, handler)
+        -- Clear the awaiting flag before resuming, so the coroutine's
+        -- next suspension is fresh (manual yield or another await).
+        _awaiting[co] = nil
         -- Fire the on_complete hook (e.g. decrement _pending_ops_count)
         -- BEFORE resuming the coroutine, so the editor state is correct
         -- when the caller's code runs.
@@ -90,6 +105,10 @@ function async.await(token)
         coroutine.resume(co, ...)
     end)
 
+    -- Mark this coroutine as awaiting an async event so the background
+    -- task scheduler knows not to resume it via tick — the event handler
+    -- alone is responsible for waking it.
+    _awaiting[co] = true
     return coroutine.yield()
 end
 

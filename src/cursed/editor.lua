@@ -981,107 +981,122 @@ function Editor:next_task_deadline()
 	return deadline
 end
 
---- Execute one step of a single background task per call (round-robin).
---- Deadline tasks run only when their deadline has been reached; plain
---- tasks run every call. Re-queues unfinished tasks. Returns the
---- earliest remaining deadline so the caller can update its sleep time.
+--- Run (or resume) a background task coroutine. The entry must be a table.
+--- Returns true if done (remove from queue), false if suspended (re-queue).
+---@param entry table
+---@return boolean done
+local function _tick_run_entry(entry)
+	if not entry.co then
+		local fn = entry.fn or entry[1]
+		if type(fn) ~= "function" then
+			return true
+		end
+		entry.co = coroutine.create(fn)
+	end
+	if not entry.co then
+		return true
+	end
+
+	local co_status = coroutine.status(entry.co)
+	-- May have already completed via an event handler resume.
+	if co_status == "dead" then
+		return true
+	elseif async.is_awaiting(entry.co) then
+		-- Waiting for an async event; event handler resumes it.
+		return false
+	end
+
+	local ok, result = coroutine.resume(entry.co)
+	local status = coroutine.status(entry.co)
+	if not ok then
+		log.error("editor", "background task error", { error = tostring(result) })
+		return true
+	elseif status == "dead" then
+		-- If the function returned false (wanting re-queue),
+		-- clear the dead coroutine so a fresh one is created next tick.
+		local rerun = result ~= false
+		if not rerun then
+			entry.co = nil
+		end
+		return rerun
+	else
+		-- Suspended (manual yield, or re-suspended after event-handler resume).
+		return false
+	end
+end
+
+--- Execute all due deadline tasks, then one continuous task per tick.
+--- Phase 1: run every deadline task whose deadline has passed.
+--- Phase 2: run one non-deadline (continuous) task.
+--- Re-queues unfinished tasks. Returns the earliest remaining deadline.
 ---@return integer|nil deadline_us
 function Editor:tick_background_tasks()
 	local tasks = self._background_tasks
 	if #tasks == 0 then
 		return nil
 	end
-	local entry = table.remove(tasks, 1)
+
 	local now = now_us()
+	local pending = {}       ---@type table[] deadline tasks not yet due
+	local continuous = {}    ---@type table[] runnable tasks
 	local next_deadline ---@type integer|nil
-	local done = false
 
-	-- Check deadline for scheduled tasks. select() may wake early on
-	-- input before a timer's deadline has arrived; in that case the
-	-- task is re-queued WITHOUT running so timers fire at their
-	-- scheduled time (e.g. the cursor-blink toggle must not flip on
-	-- every input-driven tick, or the caret stays dark while moving).
-	local due = true
-	if type(entry) == "table" and entry.deadline ~= nil then
-		if now < entry.deadline then
-			next_deadline = entry.deadline
-			done = false
-			due = false
+	-- Phase 1: classify, normalise plain functions, and run all due deadline tasks.
+	for _, raw in ipairs(tasks) do
+		local entry = raw
+		-- Normalise plain-function (legacy) entries into table form.
+		if type(entry) == "function" then
+			entry = { fn = entry }
 		end
-	end
 
-	if due and not done then
-		-- Run (or resume) the task in a coroutine.
-		-- On first tick: wrap fn in coroutine.create.
-		-- On subsequent ticks: resume the existing coroutine.
-		if type(entry) == "table" then
-			if not entry.co then
-				local fn = entry.fn or entry[1] -- support plain function as array entry
-				if type(fn) == "function" then
-					entry.co = coroutine.create(fn)
-				else
-					-- Non-function entry: skip.
-					done = true
-				end
-			end
-			if entry.co then
-				local co_status = coroutine.status(entry.co)
-				-- Coroutine may have already completed via an event handler
-				-- (e.g. async.await resumed it from drain_task_inbox).
-				if co_status == "dead" then
-					-- Already ran to completion via an external resume;
-					-- just remove from the queue.
-					done = true
-				else
-					local ok, result = coroutine.resume(entry.co)
-					local status = coroutine.status(entry.co)
-					if not ok then
-						log.error("editor", "background task error", { error = tostring(result) })
-						done = true
-					elseif status == "dead" then
-						done = result ~= false
-					else
-						-- Suspended (yielded via async.await): re-queue.
-						done = false
-					end
-				end
-			end
-		else
-			-- Plain function (legacy): wrap and run.
-			local fn = entry
-			if type(fn) == "function" then
-				local co = coroutine.create(fn)
-				local ok, result = coroutine.resume(co)
-				local status = coroutine.status(co)
-				if not ok then
-					log.error("editor", "background task error", { error = tostring(result) })
-					done = true
-				elseif status == "dead" then
-					done = result ~= false
-				else
-					-- Re-wrap as a table entry for future ticks.
-					-- deadline is only meaningful for schedule_at tasks;
-					-- plain functions have no deadline (indexed via nil).
-					entry = { co = co }
-					done = false
+		if type(entry) == "table" and entry.deadline ~= nil then
+			if now >= entry.deadline then
+				-- Due deadline task: run it.
+				if not _tick_run_entry(entry) then
+					-- Suspend ended; re-queue as continuous (deadline passed).
+					entry.deadline = nil
+					continuous[#continuous + 1] = entry
 				end
 			else
-				done = true
+				-- Not due yet: keep as-is.
+				pending[#pending + 1] = entry
+				if next_deadline == nil or entry.deadline < next_deadline then
+					next_deadline = entry.deadline
+				end
 			end
+		else
+			-- Continuous task (no deadline): collect for Phase 2.
+			continuous[#continuous + 1] = entry
 		end
 	end
 
-	if not done then
-		tasks[#tasks + 1] = entry
-	end
-	for _, e in ipairs(tasks) do
-		if type(e) == "table" and e.deadline ~= nil then
-			if next_deadline == nil or e.deadline < next_deadline then
-				next_deadline = e.deadline
+	-- Phase 2: run ONE continuous task.
+	local ran_one = false
+	local remaining = {}  ---@type table[]
+	for _, entry in ipairs(continuous) do
+		if not ran_one then
+			if not _tick_run_entry(entry) then
+				remaining[#remaining + 1] = entry
 			end
+			ran_one = true
 		else
-			return now
+			remaining[#remaining + 1] = entry
 		end
+	end
+
+	-- Rebuild queue: pending (timers not yet due) first,
+	-- then remaining continuous tasks.
+	self._background_tasks = {}
+	for _, entry in ipairs(pending) do
+		self._background_tasks[#self._background_tasks + 1] = entry
+	end
+	for _, entry in ipairs(remaining) do
+		self._background_tasks[#self._background_tasks + 1] = entry
+	end
+
+	-- If continuous tasks remain, tell select() to wake immediately.
+	if #remaining > 0 then
+		return now
 	end
 	return next_deadline
 end
