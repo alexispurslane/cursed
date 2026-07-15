@@ -877,7 +877,7 @@ end
 
 while ss:running() do
     ss:heartbeat_set(constants.LANE_IDX_LSP)
-    local events, n = lsp_kq:wait(1000)
+    local events, n = lsp_kq:wait(ss:has_overflow(ss._ptr.inboxes[constants.LANE_IDX_LSP]) and 10 or 1000)
     for i = 0, n - 1 do
         local ev = events[i]
         local f = tonumber(ev.filter)
@@ -934,4 +934,6 @@ while ss:running() do
             end
         end
     end
+    -- After processing events, flush any overflow to the inbox.
+    ss:flush_overflow(ss._ptr.inboxes[constants.LANE_IDX_LSP])
 end

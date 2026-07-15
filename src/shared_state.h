@@ -24,7 +24,7 @@
 #define RING_CAP 1024
 
 #define MSG_FILE_LOAD   0   /* main → IO: please load this file (ptr = filepath string) */
-#define MSG_FILE_LOADED 1   /* IO → main: file loaded — read io_orig_* fields */
+#define MSG_FILE_LOADED 1   /* (unused — replaced by MSG_FILE_LOADED_V2 / struct FileLoadReply) */
 #define MSG_FILE_ERROR  2   /* IO → main: file load failed (arg = error code) */
 #define MSG_FILE_SAVE   3   /* main → IO: please save file (ptr = filepath string, arg = text ptr, arg2 = text len) */
 #define MSG_FILE_SAVED   4   /* IO → main: file saved */

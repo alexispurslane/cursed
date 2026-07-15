@@ -2,9 +2,9 @@
 --- sends the mmap pointer and file size through the ring buffer.
 ---
 --- Runs in its own pthread + lua_State.
---- On MSG_FILE_LOAD: mmaps the file, pushes MSG_FILE_LOADED with
----   ptr = mmap'd data and arg = file_size.
---- Main lane constructs a Buffer from these.
+--- On MSG_FILE_LOAD: mmaps the file, pushes MSG_FILE_LOADED_V2 with
+---   a FileLoadReply struct (req_id, file_size, mmap_ptr).
+--- Main lane constructs a Buffer from the reply data.
 
 local ffi = require("ffi")
 local bit = require("bit")
@@ -28,12 +28,11 @@ log.info("io_lane", "started")
 -- File loading
 ----------------------------------------------------------------------------------------------------
 
---- mmap a file and push it back as MSG_FILE_LOADED (or MSG_FILE_INSERTED
---- when `insert` is true). The reply's `arg` carries the request id so
---- main can correlate the response back to the originating editor op
---- (looked up in `editor._pending_file_ops`); older callers that
---- don't mint a req_id can pass 0 and main will skip the registry
---- lookup. The mmap ownership transfers to main on push.
+--- mmap a file and push it back as MSG_FILE_LOADED_V2 (or MSG_FILE_INSERTED
+--- when `insert` is true). The reply carries a FileLoadReply struct
+--- with req_id + file_size + mmap_ptr, routed through the event bus
+--- as file_op:<req_id>. All callers must mint a req_id via
+--- editor:_next_file_op_id(). The mmap ownership transfers to main on push.
 ---@param filepath string absolute file path
 ---@param req_id integer|nil main-assigned request id, echoed in the reply's arg
 ---@param insert boolean|nil if true, push MSG_FILE_INSERTED (no View attach)
@@ -413,7 +412,7 @@ while ss:running() do
     ss:heartbeat_set(constants.LANE_IDX_IO)
     -- Block until main lane pushes a message. ring_push on outbox_io
     -- triggers EVFILT_USER on this kq, which wakes this kevent().
-    io_kq:wait(1000)
+    io_kq:wait(ss:has_overflow(ss._ptr.inboxes[constants.LANE_IDX_IO]) and 10 or 1000)
 
     local msg = ss:pop(ss._ptr.outboxes[constants.LANE_IDX_IO])
     while msg ~= nil do
@@ -570,4 +569,6 @@ while ss:running() do
         end
         msg = ss:pop(ss._ptr.outboxes[constants.LANE_IDX_IO])
     end
+    -- After draining outbox messages, flush any overflow to the inbox.
+    ss:flush_overflow(ss._ptr.inboxes[constants.LANE_IDX_IO])
 end

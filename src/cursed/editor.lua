@@ -1888,13 +1888,13 @@ end
 
 --- Read a file and hand it off as a Buffer via a callback.
 ---
---- Reuses the existing MSG_FILE_LOAD + MSG_FILE_LOADED path: the IO
---- lane mmap's the file and replies with the mmap ptr + the req_id we
---- minted here. main.lua's MSG_FILE_LOADED handler looks the req_id
---- via the event bus. For load_buf operations the handler constructs a
---- Buffer.from_mmap and invokes on_done(buf) directly without
---- attaching to any view. To get the raw bytes without the piece-table
---- Buffer wrapper, follow up with Buffer:serialize_to_bytes.
+--- Uses MSG_FILE_LOAD + MSG_FILE_LOADED_V2: the IO lane mmap's the
+--- file and replies with a FileLoadReply struct containing req_id +
+--- file_size + mmap_ptr. main.lua's MSG_FILE_LOADED_V2 handler emits
+--- file_op:<req_id> on the event bus; the one-shot listener here
+--- constructs a Buffer.from_mmap and invokes on_done(buf). To get raw
+--- bytes without the piece-table Buffer wrapper, follow up with
+--- Buffer:serialize_to_bytes.
 ---@param filepath string absolute path to the file (already expanded)
 ---@param on_done fun(buf: Buffer|nil, err: string?) called with the Buffer
 ---                    on success, or (nil, err) on failure.

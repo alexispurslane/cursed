@@ -41,51 +41,40 @@ freeze the editor.
 
 ---
 
-## 🟡 3. No backpressure on ring buffers
+## ✅ 3. Ring buffer backpressure (resolved)
 
-`shared:push()` calls `c.ring_push` with no capacity check. If a lane
-falls behind (e.g. highlight lane stuck parsing a large file), the main
-thread could overflow the ring buffer. Either messages are silently
-dropped or `ring_push` blocks — neither is desirable.
+`SharedState:push` heap-allocates the Msg struct (fixing a pre-existing
+GC race on string payloads). If `ring_push` returns false (ring full), the
+heap-allocated Msg is queued in a Lua-side `_overflow[ring]` table instead
+of blocking or failing — the caller always sees success.
 
-**Fix:** expose ring buffer capacity and have `push` return a `full` error
-that callers can retry. A watermark callback (e.g. "ring at 75% — slow
-down") is more idiomatic but adds complexity. For v1, making `push` return
-`false` on full and having callers handle it is sufficient.
+Each producer calls `SharedState:flush_overflow(ring)` after the consumer
+has had a chance to drain: main does this for all outbox rings after each
+inbox drain cycle, and each lane does it for its inbox ring after each
+outbox drain. Lanes shorten their kqueue wait from 1000ms to ~10ms while
+overflow is pending for faster recovery.
 
----
-
-## 🟡 4. Single-step background task scheduling can starve
-
-`tick_background_tasks` processes exactly **one** task per main-loop
-iteration — strict round-robin. A coroutine-based task that does
-`async.await()` gets re-queued after each yield. With N tasks, each gets
-1/N of the ticks. The blink timer is one such task; as more deferred work
-lands (LSP didChange debounce, spellcheck, file watchers), the blink could
-visibly stutter.
-
-**Fix:** either run all ready deadline tasks per tick (not just one), or
-separate timered tasks (deadline-based) from continuous tasks (plain
-functions) and run all deadline tasks whose deadline has passed plus one
-continuous task.
+Consumers always see their ring slots freed after a drain; the deferred
+flush repopulates them. No silent drops, no blocking, fully transparent
+to callers.
 
 ---
 
-## 🟡 5. Proc lane: blocking stdin writes can stall all subprocesses
+## ✅ 4. Background task scheduling (resolved)
 
-```lua
--- proc_lane.lua: blocking write loop
-while written < len do
-    local n = ffi.C.write(proc.stdin_fd, write_ptr + written, len - written)
-```
+Replaced the one-task-per-tick round-robin with a two-phase scheduler:
+Phase 1 runs all deadline-passed tasks, Phase 2 runs one continuous task.
+Extracted `_tick_run_entry` helper with the `_async_awaiting` flag guard
+(preventing the scheduler from resuming event-waiting coroutines).
 
-The proc lane processes all subprocess I/O in a single thread. If one
-child has a full stdin pipe (not reading), this write blocks the entire
-proc lane — no stdout/stderr from *any* child is drained, no new spawns
-are processed.
+---
 
-**Fix:** make stdin writes non-blocking (like reads), buffer unwritten bytes,
-and retry on the next kqueue cycle when the fd is writable.
+## ✅ 5. Proc lane: blocking stdin writes (resolved)
+
+Stdin writes are non-blocking with `pending_write` buffering. If the
+pipe is full (EAGAIN), unwritten bytes are buffered in `proc.pending_write`
+and flushed on subsequent kqueue cycles. The proc lane never blocks on
+`write()`, so a child with a full stdin pipe can't stall other subprocesses.
 
 ---
 
@@ -97,28 +86,24 @@ housekeeping (periodic gc, heartbeat, etc.) even without an external event.
 
 ---
 
-## 🟢 7. File-load path has two codepaths
+## ✅ 7. File-load path has two codepaths (resolved)
 
-The legacy path (no `req_id`, FIFO view matching) and the v2 path
-(req_id-correlated via `file_op:<id>` events) coexist in `drain_inbox`.
-The legacy path only exists for backward compatibility and could be removed
-once all callers use req_id-based loads.
-
-**Fix:** audit remaining callers that push `MSG_FILE_LOAD` with `arg = 0`
-and migrate them to use `editor:_next_file_op_id()`. Then remove the legacy
-drain path.
+All callers use `editor:_next_file_op_id()` to mint a req_id and route
+through `file_op:<id>` events. The legacy `MSG_FILE_LOADED` type (1) is
+never pushed or handled — `drain_inbox` only handles `MSG_FILE_LOADED_V2`.
+Stale comments updated across `main.lua`, `io_lane.lua`, `editor.lua`,
+`shared.lua`, and `shared_state.h`.
 
 ---
 
-## 🟢 8. `shared:push` with Lua strings copies on every send
+## 🟢 8. `shared:push` with Lua strings copies on every send (acknowledged)
 
 The convenience path in `shared:push` (for pushes from main) copies Lua
-strings into `ffi.new("char[?]")` buffers. This is copy-on-every-send.
-For small control messages it's fine, but worth noting.
-
-**Fix:** not urgent. Could use the string's internal pointer via
-`ffi.cast("const char *", p)` plus `#p` to avoid the copy, but this is
-fragile (the string must stay alive until the consumer pops it).
+strings into `ffi.new("char[?]")` buffers. Avoiding the copy via
+`ffi.cast("const char *", p)` is fragile — the GC may collect the string
+before the consumer pops the message. Since all ring-buffer payloads are
+small (file paths, short control messages), the copy overhead is negligible.
+Accepted as a known minor cost.
 
 ---
 

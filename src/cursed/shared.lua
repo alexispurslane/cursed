@@ -39,22 +39,78 @@ end
 --- Push a message onto a ring buffer.
 --- ring_push commits the entry and triggers an EVFILT_USER wake on the
 --- ring's kq_fd, so the consumer's blocked kevent() returns.
+---
+--- When the ring is full, the message is buffered in a Lua-side overflow
+--- list (`_overflow[ring]`) instead of blocking or failing. The producer
+--- thread must call `SharedState:flush_overflow(ring)` after the consumer
+--- drains to retry queued messages — main calls this after each inbox
+--- drain, lanes call it after each outbox drain.
 ---@param ring any RingBuf pointer
 ---@param msg Msg
----@return boolean
+---@return boolean always true (overflow is transparent)
 function SharedState:push(ring, msg)
-    local raw = ffi.new("struct Msg")
-    raw.type = msg.type
-    raw.arg = msg.arg or 0
+    -- Always heap-allocate the raw Msg so it can survive overflow buffering.
+    -- This also fixes a pre-existing GC race where ffi.new("char[?]") could
+    -- be collected before the consumer pops.
+    local raw = ffi.C.malloc(ffi.sizeof("struct Msg"))
+    local r = ffi.cast("struct Msg *", raw)
+    r.type = msg.type
+    r.arg = msg.arg or 0
     local p = msg.ptr
     if type(p) == "string" then
-        local buf = ffi.new("char[?]", #p + 1)
+        local buf = ffi.C.malloc(#p + 1)
         ffi.copy(buf, p)
-        raw.ptr = buf
+        r.ptr = buf
     else
-        raw.ptr = p or nil
+        r.ptr = p or nil
     end
-    return c.ring_push(ring, raw)
+
+    if c.ring_push(ring, r) then
+        ffi.C.free(raw)  -- ring_push copied the Msg by value
+        return true
+    end
+
+    -- Ring full: keep the heap-allocated Msg for deferred flush.
+    -- The ptr data (string buf or caller-owned malloc) stays alive
+    -- through the raw Msg; flush_overflow will push it to the ring
+    -- and then free raw (the consumer handles the ptr).
+    self._overflow = self._overflow or {}
+    if not self._overflow[ring] then
+        self._overflow[ring] = {}
+    end
+    self._overflow[ring][#self._overflow[ring] + 1] = r
+    return true
+end
+
+--- Flush buffered overflow messages into the ring. The ring must have
+--- free space (the consumer drained since the overflow was queued).
+--- Must be called from the same Lua state that owns the overflow (the
+--- producer thread), after the consumer has had a chance to drain.
+---@param ring any RingBuf pointer
+function SharedState:flush_overflow(ring)
+    if not self._overflow or not self._overflow[ring] then
+        return
+    end
+    local list = self._overflow[ring]
+    local i = 1
+    while i <= #list do
+        if c.ring_push(ring, list[i]) then
+            ffi.C.free(list[i])
+            table.remove(list, i)
+        else
+            i = i + 1
+        end
+    end
+    if #list == 0 then
+        self._overflow[ring] = nil
+    end
+end
+
+--- Check whether a ring has buffered overflow.
+---@param ring any RingBuf pointer
+---@return boolean
+function SharedState:has_overflow(ring)
+    return self._overflow ~= nil and self._overflow[ring] ~= nil and #self._overflow[ring] > 0
 end
 
 --- Pop a message from a ring buffer.
@@ -62,7 +118,7 @@ end
 --- Ownership of `ptr` depends on the message type. The table below
 --- documents what each type carries and who frees it:
 ---
----   MSG_FILE_LOADED    ptr = uint8_t*  (mmap'd data)   — main takes ownership (Buffer.from_mmap)
+---   MSG_FILE_LOADED_V2  ptr = FileLoadReply* (malloc'd)  — main reads then frees (replaced MSG_FILE_LOADED)
 ---   MSG_FILE_ERROR     ptr = char*     (malloc'd str)  — main calls ffi.C.free after ffi.string
 ---   MSG_FILE_SAVED     ptr = char*     (malloc'd str)  — main calls ffi.C.free after ffi.string
 ---   MSG_FILE_INSERTED  arg only                         — no ptr

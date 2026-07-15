@@ -927,7 +927,7 @@ local function main()
 		local editor_headless = build_headless_editor()
 		local rc = run_headless(parsed)
 		-- Drain the inbox once after eval so that any async file-op
-		-- replies (MSG_FILE_LOADED for read_into_buffer,
+		-- replies (MSG_FILE_LOADED_V2 for read_into_buffer,
 		-- MSG_FILE_ERROR for failing ops) are consumed before we shut
 		-- down the lanes. Busy-wait up to 100µs worth of retries
 		-- (the IO lane processes in microseconds, so a few iterations
@@ -938,6 +938,11 @@ local function main()
 			drain_hl_inbox(editor_headless, ss_headless)
 			drain_lsp_inbox(editor_headless, ss_headless)
 			drain_proc_inbox(editor_headless, ss_headless)
+			-- Flush any overflowed outbox messages now that lanes have
+			-- had a chance to drain.
+			for i = 0, shared.NUM_LANES - 1 do
+				ss_headless:flush_overflow(ss_headless._ptr.outboxes[i])
+			end
 			local count = editor_headless._pending_ops_count or 0
 			if count == 0 then
 				break
@@ -1207,10 +1212,8 @@ local function main()
 	editor.event_system:emit("editor_open")
 
 	-- Request file load(s) from IO lane. Every file given on the
-	-- command line is opened in its own View/Buffer; views are added
-	-- in arg order and MSG_FILE_LOAD pushed in the same order so the
-	-- FIFO MSG_FILE_LOADED handler in drain_inbox matches each reply
-	-- to the right view (it picks the first `not file_loaded` view).
+	-- command line gets a req_id-backed file_op:<id> event; replies
+	-- are routed through the event bus to the matching view.
 	-- The already-created initial `view` is reused for arg[1]; further
 	-- args get fresh Buffer+View pairs.
 	local first_file_view_index = nil
@@ -1230,7 +1233,7 @@ local function main()
 		-- create it empty via the IO lane's MSG_FILE_CREATE so the
 		-- file actually exists before MSG_FILE_LOAD races the load.
 		-- The IO lane processes both ops in order (CRE THEN LOAD), so
-		-- the resulting MSG_FILE_LOADED will mmap an empty file.
+		-- the resulting MSG_FILE_LOADED_V2 reply carries mmap=nil for an empty file.
 		local tmp_path = os.tmpname() .. ".txt"
 		editor:create_file(tmp_path)
 		view.buffer:set_filepath(tmp_path)
@@ -1645,10 +1648,15 @@ local function main()
 		local d4 = profile.now_us()
 		drain_proc_inbox(editor, ss)
 		profile.span("main", "drain_proc", d4)
+		-- Flush any overflowed outbox messages now that lanes have had
+		-- a chance to drain their inbound rings (freeing ring slots).
+		for i = 0, shared.NUM_LANES - 1 do
+			ss:flush_overflow(ss._ptr.outboxes[i])
+		end
 		profile.span("main", "drain_all", drain_t0)
 
 		-- File-load watchdog: re-check pending loads after the inbox
-		-- drain above (a MSG_FILE_LOADED/MSG_FILE_ERROR may have just
+		-- drain above (a MSG_FILE_LOADED_V2/MSG_FILE_ERROR may have just
 		-- resolved a view). If everything is loaded now, cancel the
 		-- watchdog task so it never fires spuriously post-startup.
 		local watchdog_t0 = profile.now_us()

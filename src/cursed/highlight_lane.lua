@@ -860,7 +860,7 @@ end
 
 while ss:running() do
     ss:heartbeat_set(constants.LANE_IDX_HL)
-    hl_kq:wait(1000)
+    hl_kq:wait(ss:has_overflow(ss._ptr.inboxes[constants.LANE_IDX_HL]) and 10 or 1000)
 
     local msg = ss:pop(ss._ptr.outboxes[constants.LANE_IDX_HL])
     while msg ~= nil do
@@ -888,4 +888,6 @@ while ss:running() do
         end
         msg = ss:pop(ss._ptr.outboxes[constants.LANE_IDX_HL])
     end
+    -- After draining outbox messages, flush any overflow to the inbox.
+    ss:flush_overflow(ss._ptr.inboxes[constants.LANE_IDX_HL])
 end
