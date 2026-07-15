@@ -54,6 +54,7 @@ log.info("proc_lane", "started")
 --- @field buffer_bytes integer flush a stream's accumulator once it reaches this many bytes (0 = flush every read)
 --- @field stdout_acc table accumulator for buffered stdout: {parts=string[], total=int}
 --- @field stderr_acc table accumulator for buffered stderr: {parts=string[], total=int}
+--- @field pending_write {data: uint8_t*, written: integer, len: integer}? buffered stdin data (pipe full on last non-blocking write)
 local Proc = {}
 Proc.__index = Proc
 
@@ -111,6 +112,7 @@ local function new_proc(procid, pid, stdin_fd, stdout_fd, stderr_fd, buffer_byte
         buffer_bytes = buffer_bytes or DEFAULT_BUFFER_BYTES,
         stdout_acc = new_acc(),
         stderr_acc = new_acc(),
+        pending_write = nil,
     }, Proc)
 end
 
@@ -182,6 +184,52 @@ local function forget_proc(proc)
     end
     if proc.stderr_fd >= 0 then
         _procs_by_fd[proc.stderr_fd] = nil
+    end
+end
+
+--- Free a proc's buffered stdin write data (if any). Safe to call
+--- when the proc has no pending write.
+---@param proc Proc
+local function free_pending_write(proc)
+    if proc.pending_write then
+        ffi.C.free(proc.pending_write.data)
+        proc.pending_write = nil
+    end
+end
+
+--- Try to flush buffered stdin data for all procs. Called at the top
+--- of each main-loop iteration (before kq:wait). Non-blocking writes
+--- to each proc's stdin fd; on EAGAIN the remainder stays buffered.
+local function flush_pending_writes()
+    for _, proc in pairs(_procs_by_id) do
+        local pw = proc.pending_write
+        if pw then
+            if proc.stdin_fd < 0 then
+                -- stdin was closed while data was buffered; drop it.
+                free_pending_write(proc)
+            else
+                local remaining = pw.len - pw.written
+                local n = ffi.C.write(proc.stdin_fd, pw.data + pw.written, remaining)
+                local nn = tonumber(n)
+                if nn == nil or nn < 0 then
+                    local errn = kq_ffi.errno()
+                    if errn ~= 35 and errn ~= 4 then
+                        -- EPIPE or other permanent error; give up.
+                        log.warn("proc_lane", "pending stdin write failed", {
+                            procid = proc.procid,
+                            errno = errn,
+                        })
+                        free_pending_write(proc)
+                    end
+                    -- EAGAIN (35) or EINTR (4): try again next iteration.
+                else
+                    pw.written = pw.written + nn
+                    if pw.written >= pw.len then
+                        free_pending_write(proc)
+                    end
+                end
+            end
+        end
     end
 end
 
@@ -432,6 +480,7 @@ local function spawn_child(spec)
     end
     set_nonblock(child_stdout_fd)
     set_nonblock(child_stderr_fd)
+    set_nonblock(child_stdin_fd)
 
     return pid, child_stdout_fd, child_stderr_fd, child_stdin_fd, nil
 end
@@ -523,38 +572,39 @@ local function handle_stdin(msg)
     end
 
     if len == 0 then
-        -- EOF: close the child's stdin.
+        -- EOF: close the child's stdin. Drop any buffered write first.
+        free_pending_write(proc)
         close_write_fd(proc.stdin_fd)
         proc.stdin_fd = -1
         return
     end
 
-    -- Blocking write loop. A full pipe would stall the lane briefly;
-    -- acceptable for v1 (callers feed modest chunks). Retries on EINTR.
-    local write_ptr = ffi.cast("uint8_t *", ptr)
-    local written = 0
-    while written < len do
-        local n = ffi.C.write(proc.stdin_fd, write_ptr + written, len - written)
-        local nn = tonumber(n)
-        if nn == nil or nn < 0 then
-            -- EINTR (4) → retry; anything else → bail (pipe closed/EPIPE).
-            local errn = kq_ffi.errno()
-            if errn == 4 then
-                -- retry the same write
-            else
-                log.warn("proc_lane", "stdin write failed", {
-                    procid = procid,
-                    errno = errn,
-                    written = written,
-                    len = len,
-                })
-                break
-            end
+    -- Non-blocking write. If the pipe is full (EAGAIN), buffer the
+    -- unwritten bytes in proc.pending_write; flush_pending_writes()
+    -- retries on every main-loop iteration.
+    local data = ffi.cast("uint8_t *", ptr)
+    local n = ffi.C.write(proc.stdin_fd, data, len)
+    local nn = tonumber(n)
+    if nn == nil or nn < 0 then
+        local errn = kq_ffi.errno()
+        if errn == 35 or errn == 4 then -- EAGAIN or EINTR: buffer
+            proc.pending_write = { data = data, written = 0, len = len }
         else
-            written = written + nn
+            -- EPIPE or other permanent error
+            log.warn("proc_lane", "stdin write failed", {
+                procid = procid,
+                errno = errn,
+                len = len,
+            })
+            ffi.C.free(data)
         end
+    elseif nn < len then
+        -- Partial write: buffer the remainder.
+        proc.pending_write = { data = data, written = nn, len = len }
+    else
+        -- Full write.
+        ffi.C.free(data)
     end
-    ffi.C.free(ptr)
 end
 
 --- MSG_PROC_KILL: deliver a signal to the live child, then immediately
@@ -591,6 +641,7 @@ end
 
 while ss:running() do
     ss:heartbeat_set(constants.LANE_IDX_PROC)
+    flush_pending_writes()
     local events, n = proc_kq:wait(1000)
     for i = 0, n - 1 do
         local ev = events[i]
@@ -599,6 +650,7 @@ while ss:running() do
             -- outbox_proc wake: drain all queued messages.
             local msg = ss:pop(ss._ptr.outboxes[constants.LANE_IDX_PROC])
             while msg ~= nil do
+                ss:heartbeat_set(constants.LANE_IDX_PROC) -- alive while processing
                 local _, err = xpcall(function()
                     if msg.type == constants.MSG_PROC_SPAWN then
                         handle_spawn(msg)
@@ -616,6 +668,7 @@ while ss:running() do
                                     ffi.C.kill(proc.pid, 15)
                                 end)
                             end
+                            free_pending_write(proc)
                             close_write_fd(proc.stdin_fd)
                             proc.stdin_fd = -1
                             if proc.stdout_fd >= 0 then

@@ -885,6 +885,7 @@ while ss:running() do
             -- outboxes[LANE_IDX_LSP] wake: drain all queued messages.
             local msg = ss:pop(ss._ptr.outboxes[constants.LANE_IDX_LSP])
             while msg ~= nil do
+                ss:heartbeat_set(constants.LANE_IDX_LSP) -- alive while processing
                 local _, err = xpcall(function()
                     if msg.type == constants.MSG_LSP_SPAWN then
                         handle_spawn(msg)

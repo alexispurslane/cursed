@@ -149,6 +149,7 @@ while ss:running() do
 			-- outbox_task wake: drain all queued messages.
 			local msg = ss:pop(ss._ptr.outboxes[constants.LANE_IDX_TASK])
 			while msg ~= nil do
+				ss:heartbeat_set(constants.LANE_IDX_TASK) -- alive while processing
 				xpcall(function()
 					if msg.type == constants.MSG_TASK_SUBMIT then
 						handle_submit(msg)

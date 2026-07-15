@@ -417,6 +417,7 @@ while ss:running() do
 
     local msg = ss:pop(ss._ptr.outboxes[constants.LANE_IDX_IO])
     while msg ~= nil do
+        ss:heartbeat_set(constants.LANE_IDX_IO) -- alive while processing
         local ok, err = xpcall(function()
             log.info("io_lane", "got message", { type = msg.type, ptr = tostring(msg.ptr) })
             if msg.type == constants.MSG_FILE_LOAD then

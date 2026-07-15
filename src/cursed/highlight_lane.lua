@@ -864,6 +864,7 @@ while ss:running() do
 
     local msg = ss:pop(ss._ptr.outboxes[constants.LANE_IDX_HL])
     while msg ~= nil do
+        ss:heartbeat_set(constants.LANE_IDX_HL) -- alive while processing
         local _, perr = xpcall(function()
             if msg.type == constants.MSG_HL_INITIALIZE_LANGUAGE then
                 handle_init_language(msg)

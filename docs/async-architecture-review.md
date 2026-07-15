@@ -4,34 +4,40 @@ Summary of the architectural concerns identified in the lane / event-bus / corou
 
 ---
 
-## 🔴 1. No timeout on `async.await` — a crashed lane hangs the editor
+## ✅ 1. No timeout on `async.await` (resolved)
 
-If a lane thread crashes (segfault, unhandled Lua error), the expected reply event
-(`file_op:<id>`, `process_out:<id>`, `task_result:<id>`, etc.) never fires.
-The awaiting coroutine hangs forever, and the coroutine that launched it (e.g.
-a keybinding handler) is also stuck. The user sees a frozen editor.
+`async.await` can only be called from inside a coroutine — keybinding handlers,
+event listeners, and background tasks. It yields back to the event loop, never
+blocks the main thread. The awaiting coroutine pauses, but the editor continues
+running.
 
-`async.sleep` has an implicit timeout via `schedule_after`, but arbitrary
-`await` calls do not.
+Additionally, the crash case (a lane dies while replies are outstanding) is
+handled by `flush_lane_pending`, which fires when `lane_dead` is emitted: it
+emits synthetic error events (`{ err = "..." }`) for every pending op on that
+lane, unblocking all awaiting coroutines. No hanging.
 
-**Fix:** add an optional `timeout_us` to `AsyncToken`. A background deadline
-checker resumes the coroutine with `{ err = "timeout" }` if the deadline expires.
-Or, more simply: a lane health monitor that notices a dead lane and emits
-synthetic error events for all outstanding awaits on that lane's namespace.
+A fine-grained per-token timeout could still be added if desired (e.g., for
+lost replies due to bugs), but there's no mechanism by which an `await` can
+freeze the editor.
 
 ---
 
-## 🔴 2. No lane health monitoring
+## ✅ 2. Lane health monitoring (implemented)
 
-Main has no way to detect that a lane thread has died. Each lane runs
-`while ss:running() do ... end`; if it exits early, the ring buffer goes
-silent and main simply stops receiving events. Combined with #1, this means
-a dead lane = a hung editor with no error message.
-
-`main.c` already calls `pthread_create` for each lane. It could expose
-per-lane alive flags through `SharedState` (e.g. `ss._ptr.lane_alive[N]`
-as atomics) that main polls. Combined with await timeouts, you'd catch dead
-lanes quickly.
+- Each lane calls `ss:heartbeat_set(lane_idx)` at the top of its main loop
+  **and** on every message popped inside the dispatch loop, so the lane
+  stays alive as long as no single handler runs for >3s.
+- A background task (`Editor:start_heartbeat_checker`) reads and resets all
+  heartbeats every 1s. Three consecutive misses → `lane_dead` event.
+- The `lane_dead` handler in `main.lua` calls `restart_lane_thread` followed
+  by the lane's client reinitialize function.
+- `flush_lane_pending` emits synthetic error events for all in-flight ops
+  on the dead lane before restarting, so no awaiters hang.
+- Implements:
+  - `SharedState.lane_heartbeats[]` atomic array in C
+  - `shared_heartbeat_set()` / `shared_heartbeat_read_reset()`
+  - Heartbeat checker with configurable miss threshold (currently 3)
+  - Per-lane reinit functions in `main.lua`
 
 ---
 
@@ -83,17 +89,11 @@ and retry on the next kqueue cycle when the fd is writable.
 
 ---
 
-## 🟢 6. Lane kqueue timeout is always -1 (block forever)
+## ✅ 6. Lane kqueue timeout is always -1 (resolved)
 
-Every lane uses `kq:wait(-1)`. Lanes can't do periodic housekeeping
-(garbage collection of old parse trees, reaping dead LSP clients) without
-being woken by main. The highlight lane, for instance, accumulates docs
-in `per_lang[lang].docs[view_id]` indefinitely — closed views are never
-evicted.
-
-**Fix:** use a finite timeout (e.g. 5000ms) and do housekeeping on timeout
-wake, or add a lane-internal timerfd. Main could also push a periodic
-`MSG_HOUSEKEEP` message.
+All lanes now use `kq:wait(1000)` (1 second timeout) instead of blocking
+forever. This means every lane wakes at least once per second for
+housekeeping (periodic gc, heartbeat, etc.) even without an external event.
 
 ---
 
@@ -124,6 +124,6 @@ fragile (the string must stay alive until the consumer pops it).
 
 ## Legend
 
-- 🔴 Needs attention before production / heavy concurrent load
+- ✅ Resolved / implemented
 - 🟡 Worth fixing, but current usage patterns won't trigger it often
 - 🟢 Polish / cleanup — fine to defer
