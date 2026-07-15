@@ -10,6 +10,7 @@ local utf8 = require("cursed.utf8")
 local profile = require("cursed.profile")
 local log = require("cursed.log")
 local IH = require("cursed.input_hook")
+local shared = require("cursed.shared")
 --- which return the resulting cursor position; the View owns the
 --- forwarding to each cursor.
 ---
@@ -1303,7 +1304,7 @@ function View:_rebuild_highlighter()
 	-- the query source string is unchanged.
 	local injected_langs = (inj_query ~= nil) and build_injected_langs(self._major_modes) or nil
 	local req = ss():make_hl_init_lang_req(lang, query, inj_query, injected_langs)
-	ss():push(ss()._ptr.outbox_hl, {
+	ss():push(ss()._ptr.outboxes[shared.LANE_IDX_HL], {
 		type = require("cursed.shared").MSG_HL_INITIALIZE_LANGUAGE,
 		ptr = req,
 	})
@@ -1351,6 +1352,38 @@ function View:_hl_cold_requery(fallback_byte)
 	local lo_b, hi_b = self:_hl_viewport_margin_bucket_range(fallback_byte)
 	self:_hl_dispatch(lo_b, hi_b, false, nil, true)
 	self:_hl_wait_async()
+end
+
+--- Force reinitialize highlighting: re-send the language init and
+--- re-query visible spans. Useful after the highlight lane has been
+--- restarted or its state has been corrupted.
+---@return boolean true if reinitialization was dispatched
+function View:hl_reinitialize()
+	if self._hl_lang == nil then
+		return false
+	end
+	local lang = self._hl_lang
+	local query = self._hl_query
+	local inj_query = self._hl_injection_query
+	local injected_langs = (inj_query ~= nil) and build_injected_langs(self._major_modes) or nil
+	local req = ss():make_hl_init_lang_req(lang, query, inj_query, injected_langs)
+	ss():push(ss()._ptr.outboxes[shared.LANE_IDX_HL], {
+		type = shared.MSG_HL_INITIALIZE_LANGUAGE,
+		ptr = req,
+	})
+	local _keep = req
+	self._hl_bucket_cache = {}
+	self._hl_names = {}
+	self._hl_in_flight = nil
+	self._hl_pending = nil
+	self._hl_starts_cache = nil
+	self._hl_starts_gen = nil
+	self._hl_gen = self._hl_gen + 1
+	self:_hl_refresh_total_bytes()
+	local lo_b, hi_b = self:_hl_viewport_margin_bucket_range(nil)
+	self:_hl_dispatch(lo_b, hi_b, false, nil, true)
+	self:_hl_wait_async()
+	return true
 end
 
 --- Compute the total document byte length and update bucket math.
@@ -1973,7 +2006,7 @@ function View:_hl_dispatch(bucket_start, bucket_end, has_edit, edit, force_cold)
 	pffi.C.gettimeofday(tv, nil)
 	local t2 = tonumber(tv[0].tv_sec) * 1000000 + tonumber(tv[0].tv_usec)
 	self._hl_in_flight = { gen = self._hl_gen, bucket_start = bucket_start, bucket_end = bucket_end }
-	ss():push(ss()._ptr.outbox_hl, {
+	ss():push(ss()._ptr.outboxes[shared.LANE_IDX_HL], {
 		type = require("cursed.shared").MSG_HL_QUERY,
 		ptr = req,
 	})

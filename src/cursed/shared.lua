@@ -102,18 +102,34 @@ function SharedState:running()
     return self._ptr.running
 end
 
---- Signal the lanes to stop. Sends MSG_SHUTDOWN to both the IO
---- lane and the highlight lane so each exits its blocking kevent().
+--- Signal the lanes to stop. Sends MSG_SHUTDOWN to every lane's
+--- outbox so each exits its blocking kevent().
 function SharedState:stop()
     self._ptr.running = false
     -- Send an explicit shutdown message through each lane's outbox.
     -- ring_push triggers EVFILT_USER on the consumer's kqueue,
     -- waking it so it can exit.
-    self:push(self._ptr.outbox_io, { type = shared_ffi.MSG_SHUTDOWN })
-    self:push(self._ptr.outbox_hl, { type = shared_ffi.MSG_SHUTDOWN })
-    self:push(self._ptr.outbox_lsp, { type = shared_ffi.MSG_SHUTDOWN })
-    self:push(self._ptr.outbox_proc, { type = shared_ffi.MSG_SHUTDOWN })
-    self:push(self._ptr.outbox_task, { type = shared_ffi.MSG_SHUTDOWN })
+    for i = 0, shared_ffi.NUM_LANES - 1 do
+        self:push(self._ptr.outboxes[i], { type = shared_ffi.MSG_SHUTDOWN })
+    end
+end
+
+--- Set this lane's heartbeat to 1 (alive). Called at the top of each
+--- lane's main loop. lane_idx must be one of the LANE_IDX_* constants.
+---@param lane_idx integer
+function SharedState:heartbeat_set(lane_idx)
+    shared_ffi.C.shared_heartbeat_set(self._ptr, lane_idx)
+end
+
+--- Read all lane heartbeats atomically and reset them to 0. Returns
+--- an ffi cdata uint8_t[5] where out[i] == 1 if lane i was alive.
+--- Caller (main, from its heartbeat checker background task) checks
+--- each slot; a 0 means the lane missed its heartbeat this cycle.
+---@return any uint8_t[5] cdata
+function SharedState:heartbeat_read_reset()
+    local out = ffi.new("uint8_t[?]", shared_ffi.NUM_LANES)
+    shared_ffi.C.shared_heartbeat_read_reset(self._ptr, out)
+    return out
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -309,6 +325,12 @@ end
 return {
     SharedState = SharedState,
     next_file_op_id = next_file_op_id,
+    NUM_LANES = shared_ffi.NUM_LANES,
+    LANE_IDX_IO = shared_ffi.LANE_IDX_IO,
+    LANE_IDX_HL = shared_ffi.LANE_IDX_HL,
+    LANE_IDX_LSP = shared_ffi.LANE_IDX_LSP,
+    LANE_IDX_PROC = shared_ffi.LANE_IDX_PROC,
+    LANE_IDX_TASK = shared_ffi.LANE_IDX_TASK,
     MSG_FILE_LOAD = shared_ffi.MSG_FILE_LOAD,
     MSG_FILE_LOADED = shared_ffi.MSG_FILE_LOADED,
     MSG_FILE_ERROR = shared_ffi.MSG_FILE_ERROR,

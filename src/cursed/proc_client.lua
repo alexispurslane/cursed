@@ -73,7 +73,7 @@ local function push_spawn(procid, spec_json)
     req.spec_len = #spec_json
     local base = ffi.cast("char *", buf) + ffi.sizeof("struct ProcSpawnReq")
     ffi.copy(base, spec_json, #spec_json)
-    s:push(s._ptr.outbox_proc, { type = constants.MSG_PROC_SPAWN, ptr = buf })
+    s:push(s._ptr.outboxes[constants.LANE_IDX_PROC], { type = constants.MSG_PROC_SPAWN, ptr = buf })
 end
 
 --- Build + push a ProcStdinReq. len==0 → EOF (ptr NULL). Ownership of
@@ -110,7 +110,7 @@ local function push_stdin(procid, bytes)
             req.ptr = nil
         end
     end
-    s:push(s._ptr.outbox_proc, { type = constants.MSG_PROC_STDIN, ptr = buf })
+    s:push(s._ptr.outboxes[constants.LANE_IDX_PROC], { type = constants.MSG_PROC_STDIN, ptr = buf })
 end
 
 --- Build + push a ProcKillReq.
@@ -128,7 +128,7 @@ local function push_kill(procid, signal)
     local req = ffi.cast("struct ProcKillReq *", buf)
     req.procid = procid
     req.signal = signal
-    s:push(s._ptr.outbox_proc, { type = constants.MSG_PROC_KILL, ptr = buf })
+    s:push(s._ptr.outboxes[constants.LANE_IDX_PROC], { type = constants.MSG_PROC_KILL, ptr = buf })
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -162,6 +162,7 @@ function M.spawn(argv, opts)
     opts = opts or {}
     local procid = M._next_procid
     M._next_procid = procid + 1
+    M._editor:track_pending_op(constants.LANE_IDX_PROC, procid)
 
     -- Register the process_in:<procid> listener that forwards STDIN.
     -- bytes (string) → write; nil/false → EOF.
@@ -229,6 +230,17 @@ function M.shutdown()
         end
     end
     _in_handlers = {}
+end
+
+--- Reinitialize after a lane restart. All child processes died with the
+--- lane; clean up main-side listener state.
+---@param editor table
+---@param ss SharedState
+function M.reinitialize(editor, ss)
+    M._ss = ss
+    M._editor = editor
+    M.shutdown()
+    -- _next_procid stays monotonic; don't reset it.
 end
 
 return M

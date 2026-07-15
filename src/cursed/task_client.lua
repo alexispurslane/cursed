@@ -60,6 +60,7 @@ function M.send_task(fn, args, opts)
 
 	local task_id = M._next_task_id
 	M._next_task_id = task_id + 1
+	M._editor:track_pending_op(constants.LANE_IDX_TASK, task_id)
 
 	local bc = string.dump(fn, true)
 	local requires = (opts and opts.requires) or {}
@@ -82,11 +83,21 @@ function M.send_task(fn, args, opts)
 	ffi.copy(base, bc, #bc)
 	ffi.copy(base + #bc, args_json, #args_json)
 
-	s:push(s._ptr.outbox_task, { type = constants.MSG_TASK_SUBMIT, ptr = buf })
+	s:push(s._ptr.outboxes[constants.LANE_IDX_TASK], { type = constants.MSG_TASK_SUBMIT, ptr = buf })
 
 	log.info("task", "submitted", { task_id = task_id, bc_len = #bc, args_len = #args_json })
 
 	return async.token(M._editor.event_system, "task_result:" .. tostring(task_id))
+end
+
+--- Reinitialize after a lane restart. The task lane is stateless
+--- (fire-and-forget bytecode). Just restore the shared state reference.
+---@param editor table
+---@param ss SharedState
+function M.reinitialize(editor, ss)
+	M._ss = ss
+	M._editor = editor
+	-- next_task_id stays monotonic; don't reset.
 end
 
 return M

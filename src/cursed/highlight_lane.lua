@@ -18,8 +18,8 @@ local ts = require("cursed.ts")
 
 -- Wrap the highlight lane's kqueue. Main pushes to outbox_hl and
 -- ring_push triggers EVFILT_USER here; we block until that fires.
-local hl_kq = Kqueue.wrap(ss._ptr.hl_kq_fd)
-hl_kq:add_wake(assert(tonumber(ss._ptr.outbox_hl.wake_ident)))
+local hl_kq = Kqueue.wrap(ss._ptr.lane_kq_fds[constants.LANE_IDX_HL])
+hl_kq:add_wake(assert(tonumber(ss._ptr.outboxes[constants.LANE_IDX_HL].wake_ident)))
 
 log.configure({ level = "info", output = "/tmp/cursed.log" })
 log.info("highlight_lane", "started")
@@ -413,7 +413,7 @@ local function send_empty_spans(gen, bucket_start, bucket_end)
     hdr.bucket_end = bucket_end
     hdr.count = 0
     hdr.name_count = 0
-    ss:push(ss._ptr.inbox_hl, { type = constants.MSG_HL_SPANS, ptr = hdr })
+    ss:push(ss._ptr.inboxes[constants.LANE_IDX_HL], { type = constants.MSG_HL_SPANS, ptr = hdr })
 end
 --- Zero-copy send: the scratch buffer (span_buf) already has spans at
 --- their final offset (right after the reserved HlSpansHdr slot). We
@@ -459,7 +459,7 @@ local function send_spans(gen, bucket_start, bucket_end, span_count, names)
     -- Transfer ownership to main lane. The buffer we pushed is the
     -- scratch buffer itself — main will free it. We nil out our
     -- references so ensure_span_buf allocates a fresh one next time.
-    ss:push(ss._ptr.inbox_hl, { type = constants.MSG_HL_SPANS, ptr = span_buf })
+    ss:push(ss._ptr.inboxes[constants.LANE_IDX_HL], { type = constants.MSG_HL_SPANS, ptr = span_buf })
     span_buf = nil
     span_arr = nil
     span_cap = 0
@@ -859,9 +859,10 @@ end
 ----------------------------------------------------------------------------------------------------
 
 while ss:running() do
-    hl_kq:wait(-1)
+    ss:heartbeat_set(constants.LANE_IDX_HL)
+    hl_kq:wait(1000)
 
-    local msg = ss:pop(ss._ptr.outbox_hl)
+    local msg = ss:pop(ss._ptr.outboxes[constants.LANE_IDX_HL])
     while msg ~= nil do
         local _, perr = xpcall(function()
             if msg.type == constants.MSG_HL_INITIALIZE_LANGUAGE then
@@ -884,6 +885,6 @@ while ss:running() do
             -- xpcall error; payload (if any) may leak here. Acceptable
             -- v1: better to keep the lane alive than to crash it.
         end
-        msg = ss:pop(ss._ptr.outbox_hl)
+        msg = ss:pop(ss._ptr.outboxes[constants.LANE_IDX_HL])
     end
 end

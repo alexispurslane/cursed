@@ -30,8 +30,8 @@ local Kqueue = require("cursed.kqueue").Kqueue
 local kq_ffi = require("cursed.kqueue_ffi")
 local pffi = require("cursed.posix_ffi")
 
-local proc_kq = Kqueue.wrap(ss._ptr.proc_kq_fd)
-proc_kq:add_wake(assert(tonumber(ss._ptr.outbox_proc.wake_ident)))
+local proc_kq = Kqueue.wrap(ss._ptr.lane_kq_fds[constants.LANE_IDX_PROC])
+proc_kq:add_wake(assert(tonumber(ss._ptr.outboxes[constants.LANE_IDX_PROC].wake_ident)))
 
 -- Mirror main lane's log config. All lanes write to the same file.
 log.configure({ level = "info", output = "/tmp/cursed.log" })
@@ -131,7 +131,7 @@ local function send_output(proc, stream, ptr, len)
     out.stream = stream
     out.len = len
     out.ptr = ptr
-    ss:push(ss._ptr.inbox_proc, { type = constants.MSG_PROC_OUTPUT, ptr = out })
+    ss:push(ss._ptr.inboxes[constants.LANE_IDX_PROC], { type = constants.MSG_PROC_OUTPUT, ptr = out })
 end
 
 --- Ship a lifecycle report (terminal or advisory) to main. Main frees.
@@ -143,7 +143,7 @@ local function send_exit(proc, kind, code)
     e.procid = proc.procid
     e.kind = kind
     e.code = code
-    ss:push(ss._ptr.inbox_proc, { type = constants.MSG_PROC_EXIT, ptr = e })
+    ss:push(ss._ptr.inboxes[constants.LANE_IDX_PROC], { type = constants.MSG_PROC_EXIT, ptr = e })
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -590,13 +590,14 @@ end
 ----------------------------------------------------------------------------------------------------
 
 while ss:running() do
-    local events, n = proc_kq:wait(-1)
+    ss:heartbeat_set(constants.LANE_IDX_PROC)
+    local events, n = proc_kq:wait(1000)
     for i = 0, n - 1 do
         local ev = events[i]
         local f = tonumber(ev.filter)
         if f == kq_ffi.EVFILT_USER then
             -- outbox_proc wake: drain all queued messages.
-            local msg = ss:pop(ss._ptr.outbox_proc)
+            local msg = ss:pop(ss._ptr.outboxes[constants.LANE_IDX_PROC])
             while msg ~= nil do
                 local _, err = xpcall(function()
                     if msg.type == constants.MSG_PROC_SPAWN then
@@ -641,7 +642,7 @@ while ss:running() do
                 if not _ and err then
                     -- xpcall error; payload may leak. Keep the lane alive.
                 end
-                msg = ss:pop(ss._ptr.outbox_proc)
+                msg = ss:pop(ss._ptr.outboxes[constants.LANE_IDX_PROC])
             end
         elseif f == kq_ffi.EVFILT_READ then
             local fd = tonumber(ev.ident)

@@ -2,15 +2,15 @@
 --- JSON-RPC framing + JSON decode/encode, off the main thread.
 ---
 --- Runs in its own pthread + lua_State (spawned from main.c::lsp_lane_thread).
---- Two event sources on its kqueue (lsp_kq_fd):
----   1. EVFILT_USER (ident 1) — main pushed a message to outbox_lsp
+--- Two event sources on its kqueue (lane_kq_fds[LANE_IDX_LSP]):
+---   1. EVFILT_USER (ident 1) — main pushed a message to outboxes[LANE_IDX_LSP]
 ---      (SPAWN / SEND / KILL / SHUTDOWN). Ring_push triggers it.
 ---   2. EVFILT_READ — a child server's stdout became readable. We drain,
 ---      frame, and decode here; heavy JSON never touches the main loop.
 ---
 --- Main relays outbound requests as messages to this lane and receives
 --- inbound (decoded + packed into bespoke C structs per message type)
---- via inbox_lsp. v1 relays only the initialize handshake
+--- via inboxes[LANE_IDX_LSP]. v1 relays only the initialize handshake
 --- (MSG_LSP_HANDSHAKE → modeline ⛏ status). Other inbound message types
 --- are decoded here then logged and dropped — each gets its own packed
 --- struct + main-side consumer as its feature lands.
@@ -28,8 +28,8 @@ local Kqueue = require("cursed.kqueue").Kqueue
 local kq_ffi = require("cursed.kqueue_ffi")
 local pffi = require("cursed.posix_ffi")
 
-local lsp_kq = Kqueue.wrap(ss._ptr.lsp_kq_fd)
-lsp_kq:add_wake(assert(tonumber(ss._ptr.outbox_lsp.wake_ident)))
+local lsp_kq = Kqueue.wrap(ss._ptr.lane_kq_fds[constants.LANE_IDX_LSP])
+lsp_kq:add_wake(assert(tonumber(ss._ptr.outboxes[constants.LANE_IDX_LSP].wake_ident)))
 
 log.configure({ level = "info", output = "/tmp/cursed.log" })
 log.info("lsp_lane", "started")
@@ -100,7 +100,7 @@ local function send_handshake(client)
     if client.trigger_chars ~= nil and #client.trigger_chars > 0 then
         ffi.copy(hs.trigger_chars, client.trigger_chars, math.min(#client.trigger_chars, 63))
     end
-    ss:push(ss._ptr.inbox_lsp, { type = constants.MSG_LSP_HANDSHAKE, ptr = hs })
+    ss:push(ss._ptr.inboxes[constants.LANE_IDX_LSP], { type = constants.MSG_LSP_HANDSHAKE, ptr = hs })
 end
 
 --- Relay a response to a main-owned request back to main.
@@ -153,7 +153,7 @@ local function relay_response(client, msg, body_text)
             doc_handed = doc ~= nil,
         })
     end
-    ss:push(ss._ptr.inbox_lsp, { type = constants.MSG_LSP_RESPONSE, ptr = buf })
+    ss:push(ss._ptr.inboxes[constants.LANE_IDX_LSP], { type = constants.MSG_LSP_RESPONSE, ptr = buf })
 end
 
 --- Relay a server→main JSON-RPC notification (any `msg.method` set,
@@ -196,7 +196,7 @@ local function relay_notification(client, msg, body_text)
         method = method,
         doc_handed = true,
     })
-    ss:push(ss._ptr.inbox_lsp, { type = constants.MSG_LSP_NOTIFICATION, ptr = buf })
+    ss:push(ss._ptr.inboxes[constants.LANE_IDX_LSP], { type = constants.MSG_LSP_NOTIFICATION, ptr = buf })
 end
 
 --- Relay a server\xe2\x86\x92main JSON-RPC request (any `msg.method` set,
@@ -237,7 +237,7 @@ local function relay_request(client, msg, body_text)
         method = method,
         id = rid,
     })
-    ss:push(ss._ptr.inbox_lsp, { type = constants.MSG_LSP_SERVER_REQUEST, ptr = buf })
+    ss:push(ss._ptr.inboxes[constants.LANE_IDX_LSP], { type = constants.MSG_LSP_SERVER_REQUEST, ptr = buf })
 end
 
 --- Framing + send
@@ -677,7 +677,7 @@ local function kill_client(client, signal)
 end
 
 ----------------------------------------------------------------------------------------------------
--- outbox_lsp handlers (main → lane)
+-- outboxes[LANE_IDX_LSP] handlers (main → lane)
 ----------------------------------------------------------------------------------------------------
 
 local function handle_spawn(msg)
@@ -876,13 +876,14 @@ end
 ----------------------------------------------------------------------------------------------------
 
 while ss:running() do
-    local events, n = lsp_kq:wait(-1)
+    ss:heartbeat_set(constants.LANE_IDX_LSP)
+    local events, n = lsp_kq:wait(1000)
     for i = 0, n - 1 do
         local ev = events[i]
         local f = tonumber(ev.filter)
         if f == kq_ffi.EVFILT_USER then
-            -- outbox_lsp wake: drain all queued messages.
-            local msg = ss:pop(ss._ptr.outbox_lsp)
+            -- outboxes[LANE_IDX_LSP] wake: drain all queued messages.
+            local msg = ss:pop(ss._ptr.outboxes[constants.LANE_IDX_LSP])
             while msg ~= nil do
                 local _, err = xpcall(function()
                     if msg.type == constants.MSG_LSP_SPAWN then
@@ -912,7 +913,7 @@ while ss:running() do
                 if not _ and err then
                     -- xpcall error; payload may leak. Keep the lane alive.
                 end
-                msg = ss:pop(ss._ptr.outbox_lsp)
+                msg = ss:pop(ss._ptr.outboxes[constants.LANE_IDX_LSP])
             end
         elseif f == kq_ffi.EVFILT_READ then
             local fd = tonumber(ev.ident)

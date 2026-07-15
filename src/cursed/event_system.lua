@@ -7,22 +7,27 @@
 --- handler are logged but do not abort the dispatch — every remaining
 --- handler still runs.
 ---
+--- Each handler runs in its own coroutine, so handlers can call
+--- `async.await()` to suspend themselves waiting for other events or
+--- lane replies without blocking the rest of the event dispatch.
+---
+--- Reentrancy: a handler that re-emits the same event name increments
+--- a per-event depth counter. If depth exceeds MAX_REENTRANCY (10),
+--- the re-emit is logged and dropped as a likely infinite loop.
+---
 --- The event system is reachable from the editor as
 --- `editor.event_system`, so a handler running inside one event can
 --- re-enter the hub and emit further events (`editor.event_system:emit(...)`)
 --- if needed.
----
---- Recursion is the caller's responsibility: handlers that emit the
---- same event they're handling will recurse. The system itself imposes
---- no reentrancy guard, so trivial infinite loops are possible; trace
---- your emit chains if you suspect one.
 
 local log = require("cursed.log")
+
+local MAX_REENTRANCY = 10
 
 ---@class EventSystem
 ---@field _editor table owning editor; passed as the first argument to every handler
 ---@field _handlers table<string, function[]> event_name → ordered handler list
----@field _emitting table<string, boolean> reentrancy guard: event → currently-emitting flag
+---@field _depth table<string, integer> reentrancy depth counter per event name
 local EventSystem = {}
 EventSystem.__index = EventSystem
 
@@ -35,7 +40,7 @@ function EventSystem.new(editor)
     return setmetatable({
         _editor = editor,
         _handlers = {},
-        _emitting = {},
+        _depth = {},
     }, EventSystem)
 end
 
@@ -98,22 +103,54 @@ function EventSystem:emit(name, ...)
     if fns == nil then
         return
     end
-    if self._emitting[name] then
-        log.warn("event_system", "reentrant emit blocked", { event = name })
+
+    -- Reentrancy guard: per-event depth counter. Handlers can re-emit
+    -- the same event (e.g. post_command_hook within post_command_hook)
+    -- up to MAX_REENTRANCY levels deep before we treat it as a loop.
+    local depth = (self._depth[name] or 0) + 1
+    if depth > MAX_REENTRANCY then
+        log.error("event_system", "reentrant emit blocked", {
+            event = name,
+            depth = depth,
+        })
         return
     end
-    self._emitting[name] = true
+    self._depth[name] = depth
+
+    -- Capture varargs into a stable table so the inner coroutine
+    -- functions can reference them. In Lua, `...` inside a non-vararg
+    -- function is a syntax error, so we must pack/unpack explicitly.
+    local nargs = select("#", ...)
+    local args = { ... }
+
     local editor = self._editor
     for i = 1, #fns do
-        local ok, err = pcall(fns[i], editor, ...)
+        -- Run each handler in its own coroutine so handlers can
+        -- async.await() on other events or lane communication.
+        local fn = fns[i]
+        local co = coroutine.create(function()
+            fn(editor, unpack(args, 1, nargs))
+        end)
+        local ok, err = coroutine.resume(co)
         if not ok then
             log.error("event_system", "handler error", {
                 event = name,
                 error = tostring(err),
             })
         end
+        -- If the coroutine suspended (called async.await), it will
+        -- be resumed later when the awaited event fires. We don't
+        -- need to track it — the async token's one-shot handler
+        -- holds a reference to the coroutine.
     end
-    self._emitting[name] = nil
+
+    -- Decrement depth; clear key when back to zero.
+    local new_depth = depth - 1
+    if new_depth == 0 then
+        self._depth[name] = nil
+    else
+        self._depth[name] = new_depth
+    end
 end
 
 return EventSystem

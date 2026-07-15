@@ -15,8 +15,8 @@ local Kqueue = require("cursed.kqueue").Kqueue
 
 -- Wrap the IO lane's kqueue. Main pushes to outbox_io and ring_push
 -- triggers EVFILT_USER here; we block until that fires, then drain.
-local io_kq = Kqueue.wrap(ss._ptr.io_kq_fd)
-io_kq:add_wake(assert(tonumber(ss._ptr.outbox_io.wake_ident)))
+local io_kq = Kqueue.wrap(ss._ptr.lane_kq_fds[constants.LANE_IDX_IO])
+io_kq:add_wake(assert(tonumber(ss._ptr.outboxes[constants.LANE_IDX_IO].wake_ident)))
 
 -- Mirror main lane's log config. Both lanes write to the same file.
 -- io.open(path, "a") opens with O_APPEND on POSIX, so concurrent writes
@@ -46,7 +46,7 @@ local function load_file(filepath, req_id, insert)
     local f = io.open(filepath, "rb")
     if f == nil then
         log.error("io_lane", "io.open failed", { path = filepath })
-        ss:push(ss._ptr.inbox_io, { type = constants.MSG_FILE_ERROR, arg = req_id })
+        ss:push(ss._ptr.inboxes[constants.LANE_IDX_IO], { type = constants.MSG_FILE_ERROR, arg = req_id })
         return false
     end
     local file_size = f:seek("end")
@@ -62,13 +62,13 @@ local function load_file(filepath, req_id, insert)
                 hdr.file_size = 0
                 hdr.mmap_ptr = nil
             end
-            ss:push(ss._ptr.inbox_io, {
+            ss:push(ss._ptr.inboxes[constants.LANE_IDX_IO], {
                 type = constants.MSG_FILE_LOADED_V2,
                 ptr = reply,
                 arg = 0,
             })
         else
-            ss:push(ss._ptr.inbox_io, {
+            ss:push(ss._ptr.inboxes[constants.LANE_IDX_IO], {
                 type = constants.MSG_FILE_INSERTED,
                 ptr = nil,
                 arg = req_id,
@@ -80,7 +80,7 @@ local function load_file(filepath, req_id, insert)
     local fd = ffi.C.open(filepath, constants.O_RDONLY)
     if fd < 0 then
         log.error("io_lane", "open() failed", { path = filepath, fd = fd })
-        ss:push(ss._ptr.inbox_io, { type = constants.MSG_FILE_ERROR, arg = req_id })
+        ss:push(ss._ptr.inboxes[constants.LANE_IDX_IO], { type = constants.MSG_FILE_ERROR, arg = req_id })
         return false
     end
 
@@ -93,7 +93,7 @@ local function load_file(filepath, req_id, insert)
 
     if data == constants.MAP_FAILED then
         log.error("io_lane", "mmap failed", { path = filepath, cap = cap })
-        ss:push(ss._ptr.inbox_io, { type = constants.MSG_FILE_ERROR, arg = req_id })
+        ss:push(ss._ptr.inboxes[constants.LANE_IDX_IO], { type = constants.MSG_FILE_ERROR, arg = req_id })
         return false
     end
 
@@ -106,21 +106,21 @@ local function load_file(filepath, req_id, insert)
         local reply = ffi.C.malloc(ffi.sizeof("struct FileLoadReply"))
         if reply == nil then
             ffi.C.munmap(data, cap)
-            ss:push(ss._ptr.inbox_io, { type = constants.MSG_FILE_ERROR, arg = req_id })
+            ss:push(ss._ptr.inboxes[constants.LANE_IDX_IO], { type = constants.MSG_FILE_ERROR, arg = req_id })
             return false
         end
         local hdr = ffi.cast("struct FileLoadReply *", reply)
         hdr.req_id = req_id
         hdr.file_size = file_size
         hdr.mmap_ptr = data
-        ss:push(ss._ptr.inbox_io, {
+        ss:push(ss._ptr.inboxes[constants.LANE_IDX_IO], {
             type = reply_type,
             ptr = reply,
             arg = 0,
         })
     else
         -- MSG_FILE_INSERTED: keep old format (no FileLoadReply needed)
-        ss:push(ss._ptr.inbox_io, {
+        ss:push(ss._ptr.inboxes[constants.LANE_IDX_IO], {
             type = reply_type,
             ptr = data,
             arg = req_id,
@@ -158,7 +158,7 @@ local function report_error(req_id, op, err)
     local bytes = err .. "\0"
     local ptr = ffi.C.malloc(#bytes)
     ffi.copy(ffi.cast("char *", ptr), bytes, #bytes)
-    ss:push(ss._ptr.inbox_io, {
+    ss:push(ss._ptr.inboxes[constants.LANE_IDX_IO], {
         type = constants.MSG_FILE_ERROR,
         arg = req_id,
         ptr = ptr,
@@ -349,7 +349,7 @@ end
 --- Send a packed dirlist back to main. 3-tuple convention from
 --- dirlist_pack: (count, nil, buf).
 local function send_dirlist_ok(req_id, count, buf)
-    ss:push(ss._ptr.inbox_io, {
+    ss:push(ss._ptr.inboxes[constants.LANE_IDX_IO], {
         type = constants.MSG_FILE_DIRLIST_RESP,
         arg = req_id,
         ptr = buf, -- ownership → main; main walks plus ffi.C.free
@@ -397,7 +397,7 @@ local function save_file(req)
         log.error("io_lane", "save_file failed", { path = filepath })
     end
 
-    ss:push(ss._ptr.inbox_io, {
+    ss:push(ss._ptr.inboxes[constants.LANE_IDX_IO], {
         type = success and constants.MSG_FILE_SAVED or constants.MSG_FILE_ERROR,
         ptr = req,
     })
@@ -410,11 +410,12 @@ end
 ----------------------------------------------------------------------------------------------------
 
 while ss:running() do
+    ss:heartbeat_set(constants.LANE_IDX_IO)
     -- Block until main lane pushes a message. ring_push on outbox_io
     -- triggers EVFILT_USER on this kq, which wakes this kevent().
-    io_kq:wait(-1)
+    io_kq:wait(1000)
 
-    local msg = ss:pop(ss._ptr.outbox_io)
+    local msg = ss:pop(ss._ptr.outboxes[constants.LANE_IDX_IO])
     while msg ~= nil do
         local ok, err = xpcall(function()
             log.info("io_lane", "got message", { type = msg.type, ptr = tostring(msg.ptr) })
@@ -425,14 +426,14 @@ while ss:running() do
                 else
                     log.error("io_lane", "bad filepath from ptr", { ok = tostring(ok2) })
                     local req_id3 = tonumber(msg.arg) or 0
-                    ss:push(ss._ptr.inbox_io, { type = constants.MSG_FILE_ERROR, arg = req_id3 })
+                    ss:push(ss._ptr.inboxes[constants.LANE_IDX_IO], { type = constants.MSG_FILE_ERROR, arg = req_id3 })
                 end
             elseif msg.type == constants.MSG_FILE_SAVE then
                 if msg.ptr ~= nil then
                     save_file(ffi.cast("struct SaveRequest *", msg.ptr))
                 else
                     log.error("io_lane", "MSG_FILE_SAVE with nil ptr")
-                    ss:push(ss._ptr.inbox_io, { type = constants.MSG_FILE_ERROR, arg = 4 })
+                    ss:push(ss._ptr.inboxes[constants.LANE_IDX_IO], { type = constants.MSG_FILE_ERROR, arg = 4 })
                 end
             elseif msg.type == constants.MSG_INSERT_FILE then
                 local ok2, filepath = pcall(ffi.string, msg.ptr)
@@ -441,7 +442,7 @@ while ss:running() do
                 else
                     log.error("io_lane", "bad insert filepath from ptr", { ok = tostring(ok2) })
                     local req_id3 = tonumber(msg.arg) or 0
-                    ss:push(ss._ptr.inbox_io, { type = constants.MSG_FILE_ERROR, arg = req_id3 })
+                    ss:push(ss._ptr.inboxes[constants.LANE_IDX_IO], { type = constants.MSG_FILE_ERROR, arg = req_id3 })
                 end
             elseif msg.type == constants.MSG_FILE_DELETE then
                 local req_id = tonumber(msg.arg)
@@ -564,8 +565,8 @@ while ss:running() do
             log.error("io_lane", "unhandled error", { error = tostring(err) })
         end)
         if not ok then
-            ss:push(ss._ptr.inbox_io, { type = constants.MSG_FILE_ERROR, arg = 5 })
+            ss:push(ss._ptr.inboxes[constants.LANE_IDX_IO], { type = constants.MSG_FILE_ERROR, arg = 5 })
         end
-        msg = ss:pop(ss._ptr.outbox_io)
+        msg = ss:pop(ss._ptr.outboxes[constants.LANE_IDX_IO])
     end
 end

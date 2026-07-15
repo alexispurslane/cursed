@@ -35,24 +35,13 @@ struct SharedTree {
 };
 
 struct SharedState {
-    struct RingBuf outbox_io;
-    struct RingBuf inbox_io;
-    struct RingBuf outbox_hl;
-    struct RingBuf inbox_hl;
-    struct RingBuf outbox_lsp;
-    struct RingBuf inbox_lsp;
-    struct RingBuf outbox_proc;
-    struct RingBuf inbox_proc;
-    struct RingBuf outbox_task; /* main → task */
-    struct RingBuf inbox_task;  /* task → main */
-    int            task_kq_fd;  /* kqueue for task lane */
+    struct RingBuf outboxes[5];  /* NUM_LANES */
+    struct RingBuf inboxes[5];
+    int            lane_kq_fds[5];
     int            main_kq_fd;
-    int            io_kq_fd;
-    int            hl_kq_fd;
-    int            lsp_kq_fd;
-    int            proc_kq_fd;
-    bool    running;
-    uint8_t _pad[7]; /* alignment for shared_tree */
+    bool           running;
+    uint8_t        lane_heartbeats[5];
+    uint8_t        _pad[2];      /* alignment for shared_tree */
     struct SharedTree shared_tree;
 };
 
@@ -63,6 +52,11 @@ extern struct SharedState *g_shared_state;
 
 bool ring_push(struct RingBuf *rb, struct Msg *msg);
 bool ring_pop(struct RingBuf *rb, struct Msg *msg);
+
+void shared_heartbeat_set(struct SharedState *ss, uint8_t lane_idx);
+void shared_heartbeat_read_reset(struct SharedState *ss, uint8_t *out);
+
+void restart_lane_thread(uint8_t lane_idx);
 
 /* ── Shared parse-tree slot table (highlight lane → main) ───────── */
 /* A lane-published TSTree snapshot, keyed by view_id, mutex-guarded in
@@ -402,8 +396,21 @@ local LSP_DOC_CLOSE = 2
 -- Module export
 ----------------------------------------------------------------------------------------------------
 
+local NUM_LANES = 5
+local LANE_IDX_IO = 0
+local LANE_IDX_HL = 1
+local LANE_IDX_LSP = 2
+local LANE_IDX_PROC = 3
+local LANE_IDX_TASK = 4
+
 return {
 	C = ffi.C,
+	NUM_LANES = NUM_LANES,
+	LANE_IDX_IO = LANE_IDX_IO,
+	LANE_IDX_HL = LANE_IDX_HL,
+	LANE_IDX_LSP = LANE_IDX_LSP,
+	LANE_IDX_PROC = LANE_IDX_PROC,
+	LANE_IDX_TASK = LANE_IDX_TASK,
 	MSG_FILE_LOAD = MSG_FILE_LOAD,
 	MSG_FILE_LOADED = MSG_FILE_LOADED,
 	MSG_FILE_ERROR = MSG_FILE_ERROR,

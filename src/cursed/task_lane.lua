@@ -25,8 +25,8 @@ local json = require("cursed.json_ffi")
 local Kqueue = require("cursed.kqueue").Kqueue
 local kq_ffi = require("cursed.kqueue_ffi")
 
-local task_kq = Kqueue.wrap(tonumber(ss._ptr.task_kq_fd))
-task_kq:add_wake(assert(tonumber(ss._ptr.outbox_task.wake_ident)))
+local task_kq = Kqueue.wrap(tonumber(ss._ptr.lane_kq_fds[constants.LANE_IDX_TASK]))
+task_kq:add_wake(assert(tonumber(ss._ptr.outboxes[constants.LANE_IDX_TASK].wake_ident)))
 
 log.configure({ level = "info", output = "/tmp/cursed.log" })
 log.info("task_lane", "started")
@@ -51,7 +51,7 @@ local function send_result(task_id, result_json, is_error)
 	end
 	ffi.copy(copy, result_json, #result_json)
 	out.result = ffi.cast("uint8_t *", copy)
-	ss:push(ss._ptr.inbox_task, { type = constants.MSG_TASK_RESULT, ptr = out })
+	ss:push(ss._ptr.inboxes[constants.LANE_IDX_TASK], { type = constants.MSG_TASK_RESULT, ptr = out })
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -140,13 +140,14 @@ end
 ----------------------------------------------------------------------------------------------------
 
 while ss:running() do
-	local events, n = task_kq:wait(-1)
+    ss:heartbeat_set(constants.LANE_IDX_TASK)
+	local events, n = task_kq:wait(1000)
 	for i = 0, n - 1 do
 		local ev = events[i]
 		local f = tonumber(ev.filter)
 		if f == kq_ffi.EVFILT_USER then
 			-- outbox_task wake: drain all queued messages.
-			local msg = ss:pop(ss._ptr.outbox_task)
+			local msg = ss:pop(ss._ptr.outboxes[constants.LANE_IDX_TASK])
 			while msg ~= nil do
 				xpcall(function()
 					if msg.type == constants.MSG_TASK_SUBMIT then
@@ -163,7 +164,7 @@ while ss:running() do
 						error = tostring(e),
 					})
 				end)
-				msg = ss:pop(ss._ptr.outbox_task)
+				msg = ss:pop(ss._ptr.outboxes[constants.LANE_IDX_TASK])
 			end
 		end
 	end

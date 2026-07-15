@@ -80,7 +80,7 @@ end
 ----------------------------------------------------------------------------------------------------
 
 local function drain_inbox(editor, ss)
-	drain_generic(ss, ss._ptr.inbox_io, editor, {
+	drain_generic(ss, ss._ptr.inboxes[shared.LANE_IDX_IO], editor, {
 		[shared.MSG_FILE_LOADED_V2] = function(msg)
 			-- Read the FileLoadReply struct: req_id, file_size, mmap_ptr.
 			-- Main frees the struct after extracting and emits to the
@@ -189,7 +189,7 @@ end
 ----------------------------------------------------------------------------------------------------
 
 local function drain_hl_inbox(editor, ss)
-	drain_generic(ss, ss._ptr.inbox_hl, editor, {
+	drain_generic(ss, ss._ptr.inboxes[shared.LANE_IDX_HL], editor, {
 		[shared.MSG_HL_SPANS] = function(msg)
 			if msg.ptr ~= nil then
 				local hdr = ffi.cast("struct HlSpansHdr *", msg.ptr)
@@ -238,7 +238,7 @@ local function drain_hl_inbox(editor, ss)
 end
 
 local function drain_lsp_inbox(editor, ss)
-	drain_generic(ss, ss._ptr.inbox_lsp, editor, {
+	drain_generic(ss, ss._ptr.inboxes[shared.LANE_IDX_LSP], editor, {
 		[shared.MSG_LSP_HANDSHAKE] = function(msg)
 			local info = require("cursed.lsp_client").apply_handshake(msg.ptr)
 			if info ~= nil then
@@ -303,7 +303,7 @@ end
 
 local function drain_proc_inbox(editor, ss)
 	local proc_client = require("cursed.proc_client")
-	drain_generic(ss, ss._ptr.inbox_proc, editor, {
+	drain_generic(ss, ss._ptr.inboxes[shared.LANE_IDX_PROC], editor, {
 		[shared.MSG_PROC_OUTPUT] = function(msg)
 			if msg.ptr ~= nil then
 				local out = ffi.cast("struct ProcOutput *", msg.ptr)
@@ -333,6 +333,7 @@ local function drain_proc_inbox(editor, ss)
 				---@cast procid integer
 				---@cast kind integer
 				---@cast code integer
+				editor:clear_pending_op(shared.LANE_IDX_PROC, procid)
 				editor.event_system:emit("process_out:" .. procid, proc_kind_tag(kind), code)
 				ffi.C.free(msg.ptr)
 			end
@@ -346,7 +347,7 @@ end
 
 local function drain_task_inbox(editor, ss)
 	local json = require("cursed.json_ffi")
-	drain_generic(ss, ss._ptr.inbox_task, editor, {
+	drain_generic(ss, ss._ptr.inboxes[shared.LANE_IDX_TASK], editor, {
 		[shared.MSG_TASK_RESULT] = function(msg)
 			if msg.ptr ~= nil then
 				local r = ffi.cast("struct TaskResult *", msg.ptr)
@@ -354,6 +355,7 @@ local function drain_task_inbox(editor, ss)
 				local task_result_len = tonumber(r.result_len)
 				local task_result_ptr = r.result
 				---@cast task_id integer
+				editor:clear_pending_op(shared.LANE_IDX_TASK, task_id)
 				---@cast task_result_len integer
 				local result_json = ""
 				if task_result_ptr ~= nil and task_result_len > 0 then
@@ -1095,11 +1097,9 @@ local function main()
 	-- select() returns immediately. (resizefd is added later, once
 	-- termbox is up; it has no ordering dependency.)
 	local main_kq = Kqueue.wrap(ss._ptr.main_kq_fd)
-	main_kq:add_wake(assert(tonumber(ss._ptr.inbox_io.wake_ident)))
-	main_kq:add_wake(assert(tonumber(ss._ptr.inbox_hl.wake_ident)))
-	main_kq:add_wake(assert(tonumber(ss._ptr.inbox_lsp.wake_ident)))
-	main_kq:add_wake(assert(tonumber(ss._ptr.inbox_proc.wake_ident)))
-	main_kq:add_wake(assert(tonumber(ss._ptr.inbox_task.wake_ident)))
+	for i = 0, shared.NUM_LANES - 1 do
+		main_kq:add_wake(assert(tonumber(ss._ptr.inboxes[i].wake_ident)))
+	end
 
 	-- Wire the LSP module's SharedState handle so it can enqueue
 	-- SPAWN/SEND/KILL to the LSP lane (outbox_lsp). The lane owns all
@@ -1120,6 +1120,14 @@ local function main()
 	local task_client = require("cursed.task_client")
 	task_client.setup(editor, ss)
 	editor.task = task_client
+
+	local io_client = require("cursed.io_client")
+	io_client.setup(editor, ss)
+	editor.io = io_client
+
+	local hl_client = require("cursed.hl_client")
+	hl_client.setup(editor, ss)
+	editor.hl = hl_client
 
 	-- Expose the editor's main kqueue + workspace root to the
 	-- editor-level LSP manager (registered in cursed.editor_listeners):
@@ -1157,6 +1165,27 @@ local function main()
 	require("cursed.editor_listeners").setup(editor)
 	require("cursed.whichkey").setup(editor)
 	require("cursed.mdview").setup(editor)
+
+	editor.event_system:on("lane_dead", function(_, lane_idx, lane_name)
+		log.error("main", "lane died, restarting", { lane_idx = lane_idx, name = lane_name })
+		editor.status_message = lane_name .. " lane died; restarting..."
+		editor:flush_lane_pending(lane_idx)
+		ffi.C.restart_lane_thread(lane_idx)
+		local reinitializers = {
+			[shared.LANE_IDX_IO]   = function() require("cursed.io_client").reinitialize(editor, ss) end,
+			[shared.LANE_IDX_HL]   = function() require("cursed.hl_client").reinitialize(editor, ss) end,
+			[shared.LANE_IDX_LSP]  = function() require("cursed.lsp_client").reinitialize(editor, ss) end,
+			[shared.LANE_IDX_PROC] = function() require("cursed.proc_client").reinitialize(editor, ss) end,
+			[shared.LANE_IDX_TASK] = function() require("cursed.task_client").reinitialize(editor, ss) end,
+		}
+		local reinit = reinitializers[lane_idx]
+		if reinit then
+			local ok, err = pcall(reinit)
+			if not ok then
+				log.error("main", "lane reinit failed", { lane_idx = lane_idx, error = tostring(err) })
+			end
+		end
+	end)
 
 	-- Backfill textobject commands for views opened BEFORE
 	-- editor_listeners.setup (the initial view + anything init.lua
@@ -1216,6 +1245,7 @@ local function main()
 		handler = editor.event_system:on(event_name, function(_, payload)
 			editor.event_system:off(event_name, handler)
 			editor._pending_ops_count = editor._pending_ops_count - 1
+			editor:clear_pending_op(shared.LANE_IDX_IO, req_id)
 			if payload.err then
 				editor.status_message = payload.err
 				return
@@ -1247,7 +1277,8 @@ local function main()
 				end
 			end
 		end)
-		ss:push(ss._ptr.outbox_io, {
+		editor:track_pending_op(shared.LANE_IDX_IO, req_id)
+		ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
 			type = shared.MSG_FILE_LOAD,
 			arg = req_id,
 			ptr = tmp_path,
@@ -1332,6 +1363,7 @@ local function main()
 					handler = editor.event_system:on(event_name, function(_, payload)
 						editor.event_system:off(event_name, handler)
 						editor._pending_ops_count = editor._pending_ops_count - 1
+						editor:clear_pending_op(shared.LANE_IDX_IO, req_id2)
 						if payload.err then
 							editor.status_message = payload.err
 							return
@@ -1363,7 +1395,8 @@ local function main()
 							end
 						end
 					end)
-					ss:push(ss._ptr.outbox_io, {
+					editor:track_pending_op(shared.LANE_IDX_IO, req_id2)
+					ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
 						type = shared.MSG_FILE_LOAD,
 						arg = req_id2,
 						ptr = expanded,
@@ -1502,6 +1535,7 @@ local function main()
 	-- Initial render (empty buffer; file load event will wake us via kq)
 	editor:render()
 	editor:schedule_blink() -- start the periodic blink timer
+	editor:start_heartbeat_checker() -- monitor lane health every second
 	log.info("main", "entering main loop")
 
 	-- Main loop: select(ttyfd, kq_fd, wake_pipe_r), then dispatch
@@ -1549,18 +1583,27 @@ local function main()
 				local ev = events[i]
 				local f = tonumber(ev.filter)
 				if f == kq_ffi.EVFILT_USER then
-					-- inbox_io (ident 1) carries file load/save replies;
-					-- inbox_hl (ident 2) carries highlight span replies;
-					-- inbox_lsp (ident 3) carries LSP handshakes.
-					if tonumber(ev.ident) == tonumber(ss._ptr.inbox_hl.wake_ident) then
-						drain_hl_inbox(editor, ss)
-					elseif tonumber(ev.ident) == tonumber(ss._ptr.inbox_lsp.wake_ident) then
-						drain_lsp_inbox(editor, ss)
-					elseif tonumber(ev.ident) == tonumber(ss._ptr.inbox_proc.wake_ident) then
-						drain_proc_inbox(editor, ss)
-					elseif tonumber(ev.ident) == tonumber(ss._ptr.inbox_task.wake_ident) then
-						drain_task_inbox(editor, ss)
-					else
+					-- Match the event ident against each inbox's wake ident.
+					-- i=0 (IO), i=1 (HL), i=2 (LSP), i=3 (PROC), i=4 (TASK).
+					local matched = false
+					for i = 0, shared.NUM_LANES - 1 do
+						if tonumber(ev.ident) == tonumber(ss._ptr.inboxes[i].wake_ident) then
+							if i == shared.LANE_IDX_IO then
+								drain_inbox(editor, ss)
+							elseif i == shared.LANE_IDX_HL then
+								drain_hl_inbox(editor, ss)
+							elseif i == shared.LANE_IDX_LSP then
+								drain_lsp_inbox(editor, ss)
+							elseif i == shared.LANE_IDX_PROC then
+								drain_proc_inbox(editor, ss)
+							elseif i == shared.LANE_IDX_TASK then
+								drain_task_inbox(editor, ss)
+							end
+							matched = true
+							break
+						end
+					end
+					if not matched then
 						drain_inbox(editor, ss)
 					end
 				elseif f == kq_ffi.EVFILT_READ then

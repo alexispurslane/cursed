@@ -123,6 +123,14 @@
 /* MSG_TASK_RESULT (task → main): JSON result. Main frees struct + result ptr. */
 #define MSG_TASK_RESULT 34
 
+/* ── Lane heartbeat indices ────────────────────────────────────── */
+#define NUM_LANES       5
+#define LANE_IDX_IO     0
+#define LANE_IDX_HL     1
+#define LANE_IDX_LSP    2
+#define LANE_IDX_PROC   3
+#define LANE_IDX_TASK   4
+
 struct TaskSubmit {
     uint32_t task_id;       /* main mints; echoed in result */
     uint32_t bytecode_len;  /* bytes of string.dump(fn, true) */
@@ -195,24 +203,21 @@ struct SharedTree {
 };
 
 struct SharedState {
-    /* Ring buffers for lane communication */
-    struct RingBuf outbox_io;
-    struct RingBuf inbox_io;
-    struct RingBuf outbox_hl;   /* main → highlight */
-    struct RingBuf inbox_hl;    /* highlight → main */
-    struct RingBuf outbox_lsp;  /* main → LSP */
-    struct RingBuf inbox_lsp;  /* LSP → main */
-    struct RingBuf outbox_proc; /* main → proc */
-    struct RingBuf inbox_proc;  /* proc → main */
-    struct RingBuf outbox_task; /* main → task */
-    struct RingBuf inbox_task;  /* task → main */
-    int            task_kq_fd;  /* kqueue for task lane */
-    int            main_kq_fd;  /* central kqueue for main lane (tty, resize, inbox wakes) */
-    int            io_kq_fd;    /* kqueue for IO lane (outbox wake) */
-    int            hl_kq_fd;   /* kqueue for highlight lane (outbox_hl wake) */
-    int            lsp_kq_fd; /* kqueue for LSP lane (outbox_lsp wake + child stdout EVFILT_READ) */
-    int            proc_kq_fd; /* kqueue for proc lane (outbox_proc wake + child stdout/stderr EVFILT_READ) */
+    /* Ring buffers for lane communication — indexed by LANE_IDX_* */
+    struct RingBuf outboxes[NUM_LANES];  /* main → lane */
+    struct RingBuf inboxes[NUM_LANES];   /* lane → main */
+
+    /* Kqueue fds — indexed by LANE_IDX_* for lanes; main_kq_fd is separate */
+    int            lane_kq_fds[NUM_LANES];
+    int            main_kq_fd;           /* central kqueue for main lane (tty, resize, inbox wakes) */
+
     _Atomic bool   running;
+
+    /* Heartbeat array: one slot per lane. Each lane sets its slot to 1
+     * at the top of its main loop. Main reads + resets all slots every
+     * second; a slot that stays 0 for 3 consecutive checks signals a
+     * dead lane. Indexed by LANE_IDX_* constants. */
+    _Atomic uint8_t lane_heartbeats[NUM_LANES];
 
     /* Shared parse-tree slot table (highlight → main). */
     struct SharedTree shared_tree;
@@ -231,60 +236,30 @@ static inline struct SharedState *shared_state_alloc(void)
     struct SharedState *ss = calloc(1, sizeof(*ss));
     if (!ss) return NULL;
 
-    atomic_store_explicit(&ss->inbox_io.head, 0, memory_order_relaxed);
-    atomic_store_explicit(&ss->inbox_io.tail, 0, memory_order_relaxed);
-    atomic_store_explicit(&ss->outbox_io.head, 0, memory_order_relaxed);
-    atomic_store_explicit(&ss->outbox_io.tail, 0, memory_order_relaxed);
-    atomic_store_explicit(&ss->inbox_hl.head, 0, memory_order_relaxed);
-    atomic_store_explicit(&ss->inbox_hl.tail, 0, memory_order_relaxed);
-    atomic_store_explicit(&ss->outbox_hl.head, 0, memory_order_relaxed);
-    atomic_store_explicit(&ss->outbox_hl.tail, 0, memory_order_relaxed);
-    atomic_store_explicit(&ss->inbox_lsp.head, 0, memory_order_relaxed);
-    atomic_store_explicit(&ss->inbox_lsp.tail, 0, memory_order_relaxed);
-    atomic_store_explicit(&ss->outbox_lsp.head, 0, memory_order_relaxed);
-    atomic_store_explicit(&ss->outbox_lsp.tail, 0, memory_order_relaxed);
-    atomic_store_explicit(&ss->outbox_proc.head, 0, memory_order_relaxed);
-    atomic_store_explicit(&ss->outbox_proc.tail, 0, memory_order_relaxed);
-    atomic_store_explicit(&ss->outbox_task.head, 0, memory_order_relaxed);
-    atomic_store_explicit(&ss->outbox_task.tail, 0, memory_order_relaxed);
+    /* calloc zeroed all ring buffer head/tail fields; running starts false */
     atomic_store_explicit(&ss->running, true, memory_order_relaxed);
 
+    /* Create kqueues */
+    for (int i = 0; i < NUM_LANES; i++) {
+        ss->lane_kq_fds[i] = kqueue();
+    }
     ss->main_kq_fd = kqueue();
-    ss->io_kq_fd = kqueue();
-    ss->hl_kq_fd = kqueue();
-    ss->lsp_kq_fd = kqueue();
-    ss->proc_kq_fd = kqueue();
-    ss->task_kq_fd = kqueue();
 
-    /* Each ring wakes its consumer lane via a distinct EVFILT_USER ident.
-     * Idents are lane-local: outbox_* wakes the consumer lane (io/hl/lsp),
-     * inbox_* wakes main. Using distinct idents per ring on main's kq lets
-     * the main loop tell which lane replied. */
-    ss->outbox_io.consumer_kq_fd = ss->io_kq_fd;
-    ss->outbox_io.wake_ident = 1;
-    ss->inbox_io.consumer_kq_fd = ss->main_kq_fd;
-    ss->inbox_io.wake_ident = 1;
-    ss->outbox_hl.consumer_kq_fd = ss->hl_kq_fd;
-    ss->outbox_hl.wake_ident = 1;
-    ss->inbox_hl.consumer_kq_fd = ss->main_kq_fd;
-    ss->inbox_hl.wake_ident = 2;
-    ss->outbox_lsp.consumer_kq_fd = ss->lsp_kq_fd;
-    ss->outbox_lsp.wake_ident = 1;
-    ss->inbox_lsp.consumer_kq_fd = ss->main_kq_fd;
-    ss->inbox_lsp.wake_ident = 3;
-    ss->outbox_proc.consumer_kq_fd = ss->proc_kq_fd;
-    ss->outbox_proc.wake_ident = 1;
-    ss->inbox_proc.consumer_kq_fd = ss->main_kq_fd;
-    ss->inbox_proc.wake_ident = 4;
+    /* Wire outboxes: each wakes its lane on ident 1 */
+    for (int i = 0; i < NUM_LANES; i++) {
+        ss->outboxes[i].consumer_kq_fd = ss->lane_kq_fds[i];
+        ss->outboxes[i].wake_ident = 1;
+    }
+    /* Wire inboxes: each wakes main with a distinct ident (i+1) */
+    for (int i = 0; i < NUM_LANES; i++) {
+        ss->inboxes[i].consumer_kq_fd = ss->main_kq_fd;
+        ss->inboxes[i].wake_ident = i + 1;
+    }
 
-    ss->outbox_task.consumer_kq_fd = ss->task_kq_fd;
-    ss->outbox_task.wake_ident = 1;
-    ss->inbox_task.consumer_kq_fd = ss->main_kq_fd;
-    ss->inbox_task.wake_ident = 5;
-
-    if (ss->main_kq_fd < 0 || ss->io_kq_fd < 0 || ss->hl_kq_fd < 0 || ss->lsp_kq_fd < 0 || ss->proc_kq_fd < 0 || ss->task_kq_fd < 0) {
-        shared_state_free(ss);
-        return NULL;
+    /* Check all kqueue fds */
+    if (ss->main_kq_fd < 0) { shared_state_free(ss); return NULL; }
+    for (int i = 0; i < NUM_LANES; i++) {
+        if (ss->lane_kq_fds[i] < 0) { shared_state_free(ss); return NULL; }
     }
 
     pthread_mutex_init(&ss->shared_tree.lock, NULL);
@@ -305,12 +280,10 @@ static inline void shared_state_free(struct SharedState *ss)
         }
     }
     pthread_mutex_destroy(&ss->shared_tree.lock);
+    for (int i = 0; i < NUM_LANES; i++) {
+        if (ss->lane_kq_fds[i] >= 0) close(ss->lane_kq_fds[i]);
+    }
     if (ss->main_kq_fd >= 0) close(ss->main_kq_fd);
-    if (ss->io_kq_fd >= 0) close(ss->io_kq_fd);
-    if (ss->hl_kq_fd >= 0) close(ss->hl_kq_fd);
-    if (ss->lsp_kq_fd >= 0) close(ss->lsp_kq_fd);
-    if (ss->proc_kq_fd >= 0) close(ss->proc_kq_fd);
-    if (ss->task_kq_fd >= 0) close(ss->task_kq_fd);
     free(ss);
 }
 
@@ -346,6 +319,27 @@ bool ring_pop(struct RingBuf *rb, struct Msg *msg)
     __atomic_load(&rb->entries[tail & (RING_CAP - 1)], msg, __ATOMIC_ACQUIRE);
     atomic_store_explicit(&rb->tail, tail + 1, memory_order_release);
     return true;
+}
+
+/* ── Lane heartbeat ────────────────────────────────────────────────
+ *
+ * Each lane calls heartbeat_set at the top of its main loop. Main
+ * calls heartbeat_read_reset once per second from a background task:
+ * it reads all slots atomically (replacing with 0), and any lane whose
+ * slot was 0 missed its heartbeat. Three consecutive misses signal a
+ * dead lane. */
+void shared_heartbeat_set(struct SharedState *ss, uint8_t lane_idx)
+{
+    if (lane_idx < NUM_LANES) {
+        atomic_store_explicit(&ss->lane_heartbeats[lane_idx], 1, memory_order_release);
+    }
+}
+
+void shared_heartbeat_read_reset(struct SharedState *ss, uint8_t *out)
+{
+    for (int i = 0; i < NUM_LANES; i++) {
+        out[i] = atomic_exchange_explicit(&ss->lane_heartbeats[i], 0, memory_order_acq_rel);
+    }
 }
 
 /* ── Shared parse-tree slot table ───────────────────────────────────

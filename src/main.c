@@ -160,6 +160,48 @@ static void *lane_thread(void *arg)
     return NULL;
 }
 
+/* ── Lane restart (FFI-callable) ──────────────────────────────── */
+
+void restart_lane_thread(uint8_t lane_idx)
+{
+    static const char *lane_modules[] = {
+        "cursed.io_lane",
+        "cursed.highlight_lane",
+        "cursed.lsp_lane",
+        "cursed.proc_lane",
+        "cursed.task_lane"
+    };
+
+    if (lane_idx > 4) {
+        fprintf(stderr, "cursed: restart_lane_thread: invalid lane index %u\n", lane_idx);
+        return;
+    }
+
+    lua_State *L = create_lane_state();
+    if (L == NULL) return;
+
+    setup_lane_globals(L, 0, NULL);
+
+    struct LaneThreadArgs *args = malloc(sizeof(*args));
+    if (args == NULL) {
+        lua_close(L);
+        return;
+    }
+    args->L = L;
+    args->module = lane_modules[lane_idx];
+
+    pthread_t thread;
+    int rc = pthread_create(&thread, NULL, lane_thread, args);
+    if (rc != 0) {
+        fprintf(stderr, "cursed: failed to restart lane %u thread\n", lane_idx);
+        lua_close(L);
+        free(args);
+        return;
+    }
+
+    pthread_detach(thread);
+}
+
 static int run_main(lua_State *L)
 {
     size_t main_len = 0;

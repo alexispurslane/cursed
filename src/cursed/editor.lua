@@ -485,6 +485,7 @@ function Editor.new(term)
 		_digit_value = 0,
 		_digit_negative = false,
 		_pending_ops_count = 0, -- tracked for headless drain loop; event bus handles callbacks
+		_pending_ops = {}, -- [lane_idx] = { [op_id] = true } — in-flight async ops
 		_last_was_kill = false,
 		_kill_called = false,
 		_printable_fn = nil,
@@ -632,6 +633,52 @@ function Editor:reset_blink()
 		self:cancel_task(self._blink_task)
 	end
 	self:schedule_blink()
+end
+
+--- Start the lane heartbeat checker. Fires every second: reads all lane
+--- heartbeats atomically (resetting them to 0), then emits events for
+--- missed or dead lanes. Self-scheduling: each invocation creates the
+--- next one, so it never clogs the background task queue.
+---
+--- Events emitted:
+---   lane_missed_heartbeat(lane_idx, lane_name)  — first missed beat
+---   lane_dead(lane_idx, lane_name)              — 3 consecutive misses
+---   lane_alive(lane_idx, lane_name)             — recovered after ≥1 miss
+---
+--- Lane names: "io", "hl", "lsp", "proc", "task"
+function Editor:start_heartbeat_checker()
+	local shared = require("cursed.shared")
+	local ss = shared.SharedState.from_global()
+	local NUM_LANES = shared.NUM_LANES
+	local MISS_THRESHOLD = 3
+	local lane_names = { "io", "hl", "lsp", "proc", "task" }
+	local misses = {} ---@type table<integer, integer>
+
+	local function check()
+		local beats = ss:heartbeat_read_reset()
+		for i = 0, NUM_LANES - 1 do
+			if beats[i] == 1 then
+				if misses[i] and misses[i] > 0 then
+					self.event_system:emit("lane_alive", i, lane_names[i + 1])
+				end
+				misses[i] = 0
+			else
+				misses[i] = (misses[i] or 0) + 1
+				if misses[i] == 1 then
+					self.event_system:emit("lane_missed_heartbeat", i, lane_names[i + 1])
+				elseif misses[i] == MISS_THRESHOLD then
+					self.event_system:emit("lane_dead", i, lane_names[i + 1])
+				end
+			end
+		end
+		-- Schedule the next check. Each check returns true (one-shot)
+		-- so it's removed from the queue; the fresh schedule_after
+		-- creates a new task 1s in the future.
+		self:schedule_after(1000000, check)
+		return true
+	end
+
+	self:schedule_after(1000000, check)
 end
 
 --- Rebuild the active keybind trie by merging the active view's mode
@@ -783,6 +830,86 @@ function Editor:define_command(name, fn)
 	local commands = require("cursed.commands")
 	local key = name:gsub(" ", "_"):lower()
 	commands[key] = fn
+end
+
+--- Track an in-flight async operation on a lane so it can be cancelled
+--- with an error event if the lane dies and is restarted.
+---@param lane_idx integer LANE_IDX_* constant
+---@param op_id integer the request/task/proc id
+function Editor:track_pending_op(lane_idx, op_id)
+	local lane_ops = self._pending_ops[lane_idx]
+	if not lane_ops then
+		lane_ops = {}
+		self._pending_ops[lane_idx] = lane_ops
+	end
+	lane_ops[op_id] = true
+end
+
+--- Clear a completed async operation from the pending-op tracker.
+---@param lane_idx integer
+---@param op_id integer
+function Editor:clear_pending_op(lane_idx, op_id)
+	local lane_ops = self._pending_ops[lane_idx]
+	if lane_ops then
+		lane_ops[op_id] = nil
+	end
+end
+
+--- Flush all pending ops for a dead lane by emitting synthetic error
+--- events so awaiting coroutines can resume instead of hanging.
+--- Clears the pending set after emitting.
+---@param lane_idx integer
+function Editor:flush_lane_pending(lane_idx)
+	local lane_ops = self._pending_ops[lane_idx]
+	if not lane_ops then
+		return
+	end
+	local shared = require("cursed.shared")
+	local es = self.event_system
+	-- Event patterns per lane. Each maps op_id to an event name and payload.
+	-- HL and PROC are future-proofed — no callers use them yet but the
+	-- flush path is correct when they do.
+	local patterns = {
+		[shared.LANE_IDX_IO] = {
+			event = "file_op",
+			payload = function(id)
+				return { err = "IO lane restarted" }
+			end,
+		},
+		[shared.LANE_IDX_HL] = {
+			event = "hl_spans",
+			payload = function(id)
+				return { err = "HL lane restarted" }
+			end,
+		},
+		[shared.LANE_IDX_LSP] = {
+			event = "lsp_response",
+			payload = function(id)
+				return nil, true, id
+			end,
+		},
+		[shared.LANE_IDX_PROC] = {
+			event = "process_out",
+			payload = function(id)
+				return "failed", 0
+			end,
+		},
+		[shared.LANE_IDX_TASK] = {
+			event = "task_result",
+			payload = function(id)
+				return { success = false, error = "task lane restarted" }
+			end,
+		},
+	}
+	local pattern = patterns[lane_idx]
+	if not pattern then
+		self._pending_ops[lane_idx] = nil
+		return
+	end
+	for op_id in pairs(lane_ops) do
+		es:emit(pattern.event .. ":" .. tostring(op_id), pattern.payload(op_id))
+	end
+	self._pending_ops[lane_idx] = nil
 end
 
 --- Schedule a plain function to run incrementally on the main thread.
@@ -1135,6 +1262,7 @@ function Editor:open_file(filepath)
 		self.event_system:off(event_name, handler)
 		self._pending_ops_count = self._pending_ops_count - 1
 		if payload.err then
+			self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 			editor.status_message = payload.err
 			return
 		end
@@ -1169,10 +1297,12 @@ function Editor:open_file(filepath)
 				view._bench_open_t0 = nil
 			end
 		end
+		self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 	end)
 
 	local ss = shared.SharedState.from_global()
-	ss:push(ss._ptr.outbox_io, {
+	self:track_pending_op(shared.LANE_IDX_IO, req_id)
+	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
 		type = shared.MSG_FILE_LOAD,
 		arg = req_id,
 		ptr = expanded,
@@ -1215,6 +1345,7 @@ function Editor:open_file_background(filepath)
 		self.event_system:off(event_name, handler)
 		self._pending_ops_count = self._pending_ops_count - 1
 		if payload.err then
+			self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 			editor.status_message = payload.err
 			return
 		end
@@ -1242,10 +1373,12 @@ function Editor:open_file_background(filepath)
 			end
 			editor.event_system:emit("file_loaded", view, loaded_buf)
 		end
+		self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 	end)
 
 	local ss = shared.SharedState.from_global()
-	ss:push(ss._ptr.outbox_io, {
+	self:track_pending_op(shared.LANE_IDX_IO, req_id)
+	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
 		type = shared.MSG_FILE_LOAD,
 		arg = req_id,
 		ptr = expanded,
@@ -1726,10 +1859,12 @@ function Editor:insert_file(filepath)
 		if payload.err then
 			editor.status_message = payload.err
 		end
+		self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 	end)
 
 	local ss = shared.SharedState.from_global()
-	ss:push(ss._ptr.outbox_io, {
+	self:track_pending_op(shared.LANE_IDX_IO, req_id)
+	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
 		type = shared.MSG_INSERT_FILE,
 		arg = req_id,
 		ptr = expanded,
@@ -1766,6 +1901,7 @@ function Editor:read_into_buffer(filepath, on_done)
 		self.event_system:off(event_name, handler)
 		self._pending_ops_count = self._pending_ops_count - 1
 		if payload.err then
+			self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 			if on_done then
 				on_done(nil, payload.err)
 			end
@@ -1775,6 +1911,7 @@ function Editor:read_into_buffer(filepath, on_done)
 		local file_size = payload.size
 		---@cast file_size integer
 		if mmap_ptr == nil then
+			self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 			local placeholder = Buffer.new()
 			placeholder:set_filepath(expanded)
 			if on_done then
@@ -1789,10 +1926,12 @@ function Editor:read_into_buffer(filepath, on_done)
 		if on_done then
 			on_done(buf, nil)
 		end
+		self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 	end)
 
 	local ss = shared.SharedState.from_global()
-	ss:push(ss._ptr.outbox_io, {
+	self:track_pending_op(shared.LANE_IDX_IO, req_id)
+	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
 		type = shared.MSG_FILE_LOAD,
 		arg = req_id,
 		ptr = expanded,
@@ -1816,13 +1955,15 @@ function Editor:load_async(filepath)
 	local req_id = self:_next_file_op_id()
 	self._pending_ops_count = (self._pending_ops_count or 0) + 1
 	local ss = shared.SharedState.from_global()
-	ss:push(ss._ptr.outbox_io, {
+	self:track_pending_op(shared.LANE_IDX_IO, req_id)
+	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
 		type = shared.MSG_FILE_LOAD,
 		arg = req_id,
 		ptr = expanded,
 	})
 	return async.token(self.event_system, "file_op:" .. req_id, function()
 		self._pending_ops_count = (self._pending_ops_count or 1) - 1
+		self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 	end)
 end
 
@@ -1914,13 +2055,16 @@ function Editor:delete_file(filepath, on_done)
 			self.event_system:off(event_name, handler)
 			self._pending_ops_count = self._pending_ops_count - 1
 			if payload.err then
+				self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 				on_done(false, payload.err)
 			else
+				self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 				on_done(true, nil)
 			end
 		end)
 	end
-	ss:push(ss._ptr.outbox_io, {
+	self:track_pending_op(shared.LANE_IDX_IO, req_id)
+	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
 		type = shared.MSG_FILE_DELETE,
 		arg = req_id,
 		ptr = filepath,
@@ -1934,13 +2078,15 @@ function Editor:delete_async(filepath)
 	local req_id = self:_next_file_op_id()
 	self._pending_ops_count = (self._pending_ops_count or 0) + 1
 	local ss = shared.SharedState.from_global()
-	ss:push(ss._ptr.outbox_io, {
+	self:track_pending_op(shared.LANE_IDX_IO, req_id)
+	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
 		type = shared.MSG_FILE_DELETE,
 		arg = req_id,
 		ptr = filepath,
 	})
 	return async.token(self.event_system, "file_op:" .. req_id, function()
 		self._pending_ops_count = (self._pending_ops_count or 1) - 1
+		self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 	end)
 end
 
@@ -1958,13 +2104,16 @@ function Editor:create_file(filepath, on_done)
 			self.event_system:off(event_name, handler)
 			self._pending_ops_count = self._pending_ops_count - 1
 			if payload.err then
+				self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 				on_done(false, payload.err)
 			else
+				self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 				on_done(true, nil)
 			end
 		end)
 	end
-	ss:push(ss._ptr.outbox_io, {
+	self:track_pending_op(shared.LANE_IDX_IO, req_id)
+	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
 		type = shared.MSG_FILE_CREATE,
 		arg = req_id,
 		ptr = filepath,
@@ -1978,13 +2127,15 @@ function Editor:create_async(filepath)
 	local req_id = self:_next_file_op_id()
 	self._pending_ops_count = (self._pending_ops_count or 0) + 1
 	local ss = shared.SharedState.from_global()
-	ss:push(ss._ptr.outbox_io, {
+	self:track_pending_op(shared.LANE_IDX_IO, req_id)
+	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
 		type = shared.MSG_FILE_CREATE,
 		arg = req_id,
 		ptr = filepath,
 	})
 	return async.token(self.event_system, "file_op:" .. req_id, function()
 		self._pending_ops_count = (self._pending_ops_count or 1) - 1
+		self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 	end)
 end
 
@@ -2003,13 +2154,16 @@ function Editor:mkdir(dirpath, on_done)
 			self.event_system:off(event_name, handler)
 			self._pending_ops_count = self._pending_ops_count - 1
 			if payload.err then
+				self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 				on_done(false, payload.err)
 			else
+				self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 				on_done(true, nil)
 			end
 		end)
 	end
-	ss:push(ss._ptr.outbox_io, {
+	self:track_pending_op(shared.LANE_IDX_IO, req_id)
+	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
 		type = shared.MSG_FILE_MKDIR,
 		arg = req_id,
 		ptr = dirpath,
@@ -2023,13 +2177,15 @@ function Editor:mkdir_async(dirpath)
 	local req_id = self:_next_file_op_id()
 	self._pending_ops_count = (self._pending_ops_count or 0) + 1
 	local ss = shared.SharedState.from_global()
-	ss:push(ss._ptr.outbox_io, {
+	self:track_pending_op(shared.LANE_IDX_IO, req_id)
+	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
 		type = shared.MSG_FILE_MKDIR,
 		arg = req_id,
 		ptr = dirpath,
 	})
 	return async.token(self.event_system, "file_op:" .. req_id, function()
 		self._pending_ops_count = (self._pending_ops_count or 1) - 1
+		self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 	end)
 end
 
@@ -2048,15 +2204,18 @@ function Editor:chmod(filepath, mode, on_done)
 			self.event_system:off(event_name, handler)
 			self._pending_ops_count = self._pending_ops_count - 1
 			if payload.err then
+				self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 				on_done(false, payload.err)
 			else
+				self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 				on_done(true, nil)
 			end
 		end)
 	end
 	-- Pack mode in low 9 bits, req_id above; lane splits them back.
 	local packed = bit.bor(bit.lshift(req_id, 9), bit.band(mode, 0x1FF))
-	ss:push(ss._ptr.outbox_io, {
+	self:track_pending_op(shared.LANE_IDX_IO, req_id)
+	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
 		type = shared.MSG_FILE_CHMOD,
 		arg = packed,
 		ptr = filepath,
@@ -2072,13 +2231,15 @@ function Editor:chmod_async(filepath, mode)
 	self._pending_ops_count = (self._pending_ops_count or 0) + 1
 	local packed = bit.bor(bit.lshift(req_id, 9), bit.band(mode, 0x1FF))
 	local ss = shared.SharedState.from_global()
-	ss:push(ss._ptr.outbox_io, {
+	self:track_pending_op(shared.LANE_IDX_IO, req_id)
+	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
 		type = shared.MSG_FILE_CHMOD,
 		arg = packed,
 		ptr = filepath,
 	})
 	return async.token(self.event_system, "file_op:" .. req_id, function()
 		self._pending_ops_count = (self._pending_ops_count or 1) - 1
+		self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 	end)
 end
 
@@ -2097,8 +2258,10 @@ function Editor:rename(src, dst, on_done)
 			self.event_system:off(event_name, handler)
 			self._pending_ops_count = self._pending_ops_count - 1
 			if payload.err then
+				self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 				on_done(false, payload.err)
 			else
+				self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 				on_done(true, nil)
 			end
 		end)
@@ -2121,7 +2284,8 @@ function Editor:rename(src, dst, on_done)
 	-- Inline dst bytes after that
 	ffi.copy(src_dst + #src, dst, #dst)
 
-	ss:push(ss._ptr.outbox_io, {
+	self:track_pending_op(shared.LANE_IDX_IO, req_id)
+	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
 		type = shared.MSG_FILE_RENAME,
 		arg = req_id,
 		ptr = req, -- lane frees on completion
@@ -2140,13 +2304,15 @@ function Editor:rename_async(src, dst)
 	local req = ffi.C.malloc(req_size)
 	if req == nil then
 		-- Fire the completion now so the count still decrements.
-		ss:push(ss._ptr.inbox_io, {
+		self:track_pending_op(shared.LANE_IDX_IO, req_id)
+		ss:push(ss._ptr.inboxes[shared.LANE_IDX_IO], {
 			type = shared.MSG_FILE_ERROR,
 			arg = req_id,
 			ptr = nil,
 		})
 		return async.token(self.event_system, "file_op:" .. req_id, function()
 			self._pending_ops_count = (self._pending_ops_count or 1) - 1
+			self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 		end)
 	end
 	local hdr = ffi.cast("struct FileMoveReq *", req)
@@ -2155,13 +2321,15 @@ function Editor:rename_async(src, dst)
 	local src_dst = ffi.cast("char *", req) + ffi.sizeof("struct FileMoveReq")
 	ffi.copy(src_dst, src, #src)
 	ffi.copy(src_dst + #src, dst, #dst)
-	ss:push(ss._ptr.outbox_io, {
+	self:track_pending_op(shared.LANE_IDX_IO, req_id)
+	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
 		type = shared.MSG_FILE_RENAME,
 		arg = req_id,
 		ptr = req,
 	})
 	return async.token(self.event_system, "file_op:" .. req_id, function()
 		self._pending_ops_count = (self._pending_ops_count or 1) - 1
+		self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 	end)
 end
 
@@ -2181,12 +2349,15 @@ function Editor:dirlist(dirpath, on_done)
 		self.event_system:off(event_name, handler)
 		self._pending_ops_count = self._pending_ops_count - 1
 		if payload.err then
+			self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 			on_done(nil, payload.err)
 		else
+			self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 			on_done(payload.entries, nil)
 		end
 	end)
-	ss:push(ss._ptr.outbox_io, {
+	self:track_pending_op(shared.LANE_IDX_IO, req_id)
+	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
 		type = shared.MSG_FILE_DIRLIST,
 		arg = req_id,
 		ptr = dirpath,
@@ -2201,13 +2372,15 @@ function Editor:dirlist_async(dirpath)
 	local req_id = self:_next_file_op_id()
 	self._pending_ops_count = (self._pending_ops_count or 0) + 1
 	local ss = shared.SharedState.from_global()
-	ss:push(ss._ptr.outbox_io, {
+	self:track_pending_op(shared.LANE_IDX_IO, req_id)
+	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
 		type = shared.MSG_FILE_DIRLIST,
 		arg = req_id,
 		ptr = dirpath,
 	})
 	return async.token(self.event_system, "file_op:" .. req_id, function()
 		self._pending_ops_count = (self._pending_ops_count or 1) - 1
+		self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 	end)
 end
 
@@ -2267,14 +2440,17 @@ function Editor:save_buffer_to_file(buffer, filepath, on_done)
 			self.event_system:off(event_name, handler)
 			self._pending_ops_count = self._pending_ops_count - 1
 			if payload.err then
+				self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 				on_done(false, payload.err)
 			else
+				self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 				on_done(true, nil)
 			end
 		end)
 	end
 
-	ss:push(ss._ptr.outbox_io, {
+	self:track_pending_op(shared.LANE_IDX_IO, req_id)
+	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
 		type = shared.MSG_FILE_WRITE,
 		arg = req_id,
 		ptr = req, -- lane frees on completion (after `write_file`)
@@ -2315,13 +2491,15 @@ function Editor:save_buffer_async(buffer, filepath)
 	ffi.copy(payload + data_len, filepath, #filepath)
 	ffi.C.free(data_ptr)
 
-	ss:push(ss._ptr.outbox_io, {
+	self:track_pending_op(shared.LANE_IDX_IO, req_id)
+	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
 		type = shared.MSG_FILE_WRITE,
 		arg = req_id,
 		ptr = req,
 	})
 	return async.token(self.event_system, "file_op:" .. req_id, function()
 		self._pending_ops_count = (self._pending_ops_count or 1) - 1
+		self:clear_pending_op(shared.LANE_IDX_IO, req_id)
 	end)
 end
 
@@ -2476,7 +2654,7 @@ function Editor:_async_save(buf)
 	req.filepath = fp_buf
 
 	local ss = shared.SharedState.from_global()
-	ss:push(ss._ptr.outbox_io, {
+	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
 		type = shared.MSG_FILE_SAVE,
 		ptr = req,
 	})

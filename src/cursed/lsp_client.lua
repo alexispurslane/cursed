@@ -209,7 +209,7 @@ local function enqueue_spawn(cands, workspace_dir, client_id)
     local base = ffi.cast("char *", buf) + ffi.sizeof("struct LspSpawnReq")
     ffi.copy(base, spec, #spec)
     ffi.copy(base + #spec, workspace_dir, #workspace_dir)
-    s:push(s._ptr.outbox_lsp, { type = constants.MSG_LSP_SPAWN, ptr = buf })
+    s:push(s._ptr.outboxes[constants.LANE_IDX_LSP], { type = constants.MSG_LSP_SPAWN, ptr = buf })
 end
 
 --- @param method string
@@ -243,7 +243,10 @@ local function enqueue_send(method, params, id, client_id)
     local base = ffi.cast("char *", buf) + ffi.sizeof("struct LspSendReq")
     ffi.copy(base, method, #method)
     ffi.copy(base + #method, params_json, #params_json)
-    s:push(s._ptr.outbox_lsp, { type = constants.MSG_LSP_SEND, ptr = buf })
+    if id ~= 0 and M._editor then
+        M._editor:track_pending_op(constants.LANE_IDX_LSP, id)
+    end
+    s:push(s._ptr.outboxes[constants.LANE_IDX_LSP], { type = constants.MSG_LSP_SEND, ptr = buf })
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -390,7 +393,10 @@ function M.kill_client(client_id)
             ffi.cast("struct LspKillReq *", ffi.C.calloc(1, ffi.sizeof("struct LspKillReq")))
         req.client_id = client_id
         ffi.copy(req.exe_name, entry.exe_name, math.min(#entry.exe_name, 63))
-        s:push(s._ptr.outbox_lsp, { type = constants.MSG_LSP_KILL, ptr = req })
+        s:push(
+            s._ptr.outboxes[constants.LANE_IDX_LSP],
+            { type = constants.MSG_LSP_KILL, ptr = req }
+        )
     end
     -- Proactively mark killed + clear bindings/docs so callers can treat
     -- this client as gone without a handshake round-trip (mirrors the
@@ -861,7 +867,7 @@ local function enqueue_doc_sync(client_id, kind, uri, language_id, version, text
     ffi.copy(d.language_id, language_id, math.min(#language_id, 31))
     d.text_ptr = text_ptr
     d.text_len = text_len
-    s:push(s._ptr.outbox_lsp, { type = constants.MSG_LSP_DOC_SYNC, ptr = d })
+    s:push(s._ptr.outboxes[constants.LANE_IDX_LSP], { type = constants.MSG_LSP_DOC_SYNC, ptr = d })
 end
 
 --- Is this client ready to accept didOpen (initialize handshake done)?
@@ -1081,9 +1087,12 @@ function M.shutdown()
             ffi.cast("struct LspKillReq *", ffi.C.calloc(1, ffi.sizeof("struct LspKillReq")))
         req.client_id = cid
         ffi.copy(req.exe_name, entry.exe_name, math.min(#entry.exe_name, 63))
-        s:push(s._ptr.outbox_lsp, { type = constants.MSG_LSP_KILL, ptr = req })
+        s:push(
+            s._ptr.outboxes[constants.LANE_IDX_LSP],
+            { type = constants.MSG_LSP_KILL, ptr = req }
+        )
     end
-    s:push(s._ptr.outbox_lsp, { type = constants.MSG_SHUTDOWN })
+    s:push(s._ptr.outboxes[constants.LANE_IDX_LSP], { type = constants.MSG_SHUTDOWN })
     M.clients = {}
     M.mode_bindings = {}
     M.exe_to_client = {}
@@ -1175,6 +1184,7 @@ end
 --- @param s any SharedState
 function M.set_shared_state(s)
     M._ss = s
+    M._editor = _G.editor
 end
 
 --- Consume a MSG_LSP_RESPONSE (called from main.lua's drain_lsp_inbox).
@@ -1225,6 +1235,9 @@ function M.apply_response(ptr)
         id = id,
         is_error = is_err,
     })
+    if M._editor then
+        M._editor:clear_pending_op(constants.LANE_IDX_LSP, id)
+    end
     return id, result, is_err, cid
 end
 
@@ -1466,6 +1479,35 @@ function M.on_status_async(editor, client_id)
         es:emit(token._ev, { exe_name, status, prev_status })
     end)
     return token
+end
+
+--- Reinitialize after a lane restart. Respawns all known LSP servers.
+--- The old subprocesses died with the lane; main-side client tracking
+--- (client_id -> exe_name, workspace) is still intact. Since the full
+--- candidate spec (args/env) is not preserved in M.clients entries,
+--- each server is re-spawned with the stored exe_name and empty args/
+--- env. Modes whose servers require non-default arguments (e.g.
+--- --stdio) will re-spawn with correct args on the next mode_enter.
+--- @param editor table
+--- @param ss SharedState
+function M.reinitialize(editor, ss)
+    M._ss = ss
+    M._editor = editor
+    for client_id, info in pairs(M.clients) do
+        if info.exe_name and info.workspace_dir then
+            local cands = { { bin = info.exe_name, args = {}, env = {} } }
+            local ok, err = pcall(enqueue_spawn, cands, info.workspace_dir, client_id)
+            if not ok then
+                log.warn("lsp", "reinitialize spawn failed", {
+                    client_id = client_id,
+                    exe = info.exe_name,
+                    error = tostring(err),
+                })
+            else
+                info.status = "spawning"
+            end
+        end
+    end
 end
 
 return M
