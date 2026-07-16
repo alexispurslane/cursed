@@ -43,6 +43,7 @@ local constants = require("cursed.shared")
 local log = require("cursed.log")
 local json = require("cursed.json_ffi")
 local async = require("cursed.async")
+local drain_generic = require("cursed.lane_registry").drain_generic
 
 --- Module exports table.
 --- @class LSPModule
@@ -1530,6 +1531,44 @@ function M.pending_count()
         n = n + 1
     end
     return n
+end
+
+--- Drain the LSP lane inbox: pop handshake, response, and
+--- notification messages and emit them on the editor's event bus.
+function M.drain_inbox(editor)
+	drain_generic(M._ss, M._ss._ptr.inboxes[constants.LANE_IDX_LSP], editor, {
+		[constants.MSG_LSP_HANDSHAKE] = function(msg)
+			local info = M.apply_handshake(msg.ptr)
+			if info ~= nil then
+				editor.event_system:emit(
+					"lsp_status:" .. tostring(info.client_id),
+					info.exe_name,
+					info.status,
+					info.prev_status
+				)
+			end
+		end,
+		[constants.MSG_LSP_RESPONSE] = function(msg)
+			-- apply_response handles decoding + freeing; returns the id-routed
+			-- tuple so we can re-emit on the event bus.
+			local id, result, is_err, cid = M.apply_response(msg.ptr)
+			if id ~= nil then
+				editor.event_system:emit("lsp_response:" .. tostring(id), result, is_err, cid)
+			end
+		end,
+		[constants.MSG_LSP_NOTIFICATION] = function(msg)
+			local method, params, cid = M.apply_notification(msg.ptr)
+			if method ~= nil and method ~= "" then
+				editor.event_system:emit("lsp_notification:" .. method, params, cid)
+			end
+		end,
+		[constants.MSG_LSP_SERVER_REQUEST] = function(msg)
+			local method, params, rid, cid = M.apply_server_request(msg.ptr)
+			if method ~= nil and method ~= "" then
+				editor.event_system:emit("lsp_server_request:" .. method, params, rid, cid)
+			end
+		end,
+	})
 end
 
 require("cursed.lane_registry").register(constants.LANE_IDX_LSP, M)

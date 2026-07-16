@@ -21,10 +21,9 @@ local ColorScheme = require("cursed.colorscheme")
 local find_file = require("cursed.find_file")
 local log = require("cursed.log")
 local profile = require("cursed.profile")
+local lane_registry = require("cursed.lane_registry")
 local lsp = require("cursed.lsp_client")
 local io_client = require("cursed.io_client")
-local proc_client = require("cursed.proc_client")
-local task_client = require("cursed.task_client")
 
 ----------------------------------------------------------------------------------------------------
 -- Keybind building (config-aware)
@@ -57,348 +56,6 @@ local function prime_default_keybindings(editor)
 	editor:rebuild_base_trie()
 	editor._active_trie = editor._base_trie
 	editor._chord_for_command = keybind.build_chord_for_command(bindings)
-end
-
-----------------------------------------------------------------------------------------------------
--- Generic inbox drain
-----------------------------------------------------------------------------------------------------
-
---- Pop messages from `inbox`, emit `ring_buffer_message` for each,
---- and route by `msg.type` through `handlers[msg.type](msg, editor,
---- ss)`. Returns when the inbox is empty.
-local function drain_generic(ss, inbox, editor, handlers)
-	local msg = ss:pop(inbox)
-	while msg ~= nil do
-		editor.event_system:emit("ring_buffer_message", msg.type, msg)
-		local handler = handlers[msg.type]
-		if handler then
-			handler(msg, editor, ss)
-		end
-		msg = ss:pop(inbox)
-	end
-end
-
-----------------------------------------------------------------------------------------------------
--- Inbox drain
-----------------------------------------------------------------------------------------------------
-
-local function drain_inbox(editor, ss)
-	drain_generic(ss, ss._ptr.inboxes[shared.LANE_IDX_IO], editor, {
-		[shared.MSG_FILE_LOADED_V2] = function(msg)
-			-- Read the FileLoadReply struct: req_id, file_size, mmap_ptr.
-			-- Main frees the struct after extracting and emits to the
-			-- event bus; callers subscribe one-shot "file_op:<req_id>"
-			-- handlers that self-unsubscribe on first delivery.
-			if msg.ptr == nil then
-				return
-			end
-			local hdr = ffi.cast("struct FileLoadReply *", msg.ptr)
-			local req_id = tonumber(hdr.req_id) or 0
-			---@cast req_id integer
-			local file_size = tonumber(hdr.file_size) or 0
-			local mmap_ptr = hdr.mmap_ptr
-			ffi.C.free(msg.ptr)
-
-			log.info("main", "file loaded v2", { req_id = req_id, size = file_size })
-
-			editor.event_system:emit("file_load:" .. req_id, {
-				mmap = mmap_ptr,
-				size = file_size,
-			})
-		end,
-		[shared.MSG_FILE_ERROR] = function(msg)
-			-- File-op errors carry a req_id in arg and dispatch through
-			-- the event bus ("file_op:<req_id>" with { err = ... }).
-			-- Legacy load errors (req_id=0) fall through to the old path.
-			local req_id = tonumber(msg.arg)
-			local err_str = msg.ptr ~= nil and ffi.string(msg.ptr) or "<no message>"
-			if msg.ptr ~= nil then
-				ffi.C.free(msg.ptr)
-			end
-			if req_id and req_id ~= 0 then
-				-- Emit error on every possible file_<op>:<id> event so the
-				-- correct async.token catches it regardless of which op sent
-				-- the request. Only one token is actually listening.
-				for _, op in ipairs({ "load", "insert", "delete", "create",
-					                 "mkdir", "chmod", "rename", "dirlist",
-					                 "write" }) do
-					editor.event_system:emit("file_" .. op .. ":" .. req_id, { err = err_str })
-				end
-				return
-			end
-			-- Legacy load error without req_id.
-			editor.status_message = err_str
-			log.error("main", "file load error", { error = err_str })
-			local failed_view = nil
-			for _, v in ipairs(editor.views) do
-				if not v.file_loaded then
-					failed_view = v
-					break
-				end
-			end
-			if failed_view ~= nil then
-				editor.event_system:emit("file_load_error", failed_view, err_str)
-			end
-		end,
-		[shared.MSG_FILE_DIRLIST_RESP] = function(msg)
-			local req_id = tonumber(msg.arg) or 0
-			---@cast req_id integer
-			if msg.ptr == nil then
-				editor.event_system:emit("file_dirlist:" .. req_id, { err = "null pointer in dirlist reply" })
-				return
-			end
-			local hdr = ffi.cast("struct FileDirListResp *", msg.ptr)
-			local count = tonumber(hdr.count) or 0
-			local entries = {}
-			if count > 0 then
-				local header_size = ffi.sizeof("struct FileDirListResp")
-				local entry_size = ffi.sizeof("struct FileDirEntry")
-				local cursor = (ffi.cast("uint8_t *", msg.ptr)) + header_size
-				for _ = 1, count do
-					local entry_ptr = ffi.cast("struct FileDirEntry *", cursor)
-					local nlen = tonumber(entry_ptr.name_len) or 0
-					local name = ffi.string((ffi.cast("char *", cursor)) + entry_size, nlen)
-					entries[#entries + 1] = {
-						name = name,
-						is_dir = tonumber(entry_ptr.is_dir) == 1,
-					}
-					cursor = cursor + entry_size + nlen
-				end
-			end
-			ffi.C.free(msg.ptr)
-			editor.event_system:emit("file_dirlist:" .. req_id, { entries = entries })
-		end,
-		[shared.MSG_FILE_SAVED] = function(msg)
-			local saved_filepath = ffi.string(msg.ptr or "")
-			ffi.C.free(msg.ptr)
-			editor.status_message = "Wrote " .. saved_filepath
-		end,
-		[shared.MSG_FILE_INSERTED] = function(msg)
-			-- arg is req_id (echoed by the IO lane from MSG_INSERT_FILE).
-			-- Emit to event bus so the one-shot handler self-cleans.
-			local req_id = tonumber(msg.arg) or 0
-			---@cast req_id integer
-			if req_id ~= 0 then
-				editor.event_system:emit("file_insert:" .. req_id, {})
-			end
-			-- Re-calculate line geometry for the current view's buffer
-			-- after a do_insert_file request completes.
-			local cv = editor:current_view()
-			if cv and cv.file_loaded then
-				cv.buffer:build_lines()
-				cv:invalidate_cached_text()
-				cv.pending_cursors = {}
-				cv:update_cached_text(cv.buffer, 0)
-			end
-		end,
-	})
-end
-
-----------------------------------------------------------------------------------------------------
--- Highlight inbox drain — install span replies from the highlight lane
-----------------------------------------------------------------------------------------------------
-
-local function drain_hl_inbox(editor, ss)
-	drain_generic(ss, ss._ptr.inboxes[shared.LANE_IDX_HL], editor, {
-		[shared.MSG_HL_SPANS] = function(msg)
-			if msg.ptr ~= nil then
-				local hdr = ffi.cast("struct HlSpansHdr *", msg.ptr)
-				local gen = tonumber(hdr.gen)
-				local bucket_start = tonumber(hdr.bucket_start)
-				local bucket_end = tonumber(hdr.bucket_end)
-				local count = tonumber(hdr.count)
-				local name_count = tonumber(hdr.name_count)
-				local raw_ptr = ffi.cast("char *", msg.ptr)
-				local spans_ptr = ffi.cast("struct HlSpan *", raw_ptr + ffi.sizeof("struct HlSpansHdr"))
-				local names_ptr = ffi.cast(
-					"struct HlName *",
-					raw_ptr + ffi.sizeof("struct HlSpansHdr") + count * ffi.sizeof("struct HlSpan")
-				)
-				-- Route to the view that owns the in-flight request.
-				-- Ownership follows the return value: on `true`, the
-				-- view took ownership (retained in cache via ffi.gc, or
-				-- freed itself on a stale/skip-install path) and we must
-				-- NOT free. On `false` (no view claimed it), free here.
-				local claimed = false
-				for _, v in ipairs(editor.views) do
-					if v._hl_install_spans then
-						if
-							v:_hl_install_spans(
-								gen,
-								bucket_start,
-								bucket_end,
-								count,
-								msg.ptr,
-								spans_ptr,
-								name_count,
-								names_ptr
-							)
-						then
-							claimed = true
-							break
-						end
-					end
-				end
-				if not claimed then
-					ffi.C.free(hdr)
-				end
-			end
-		end,
-	})
-end
-
-local function drain_lsp_inbox(editor, ss)
-	drain_generic(ss, ss._ptr.inboxes[shared.LANE_IDX_LSP], editor, {
-		[shared.MSG_LSP_HANDSHAKE] = function(msg)
-			local info = require("cursed.lsp_client").apply_handshake(msg.ptr)
-			if info ~= nil then
-				-- Per-client event so subscribers can scope to one server
-				-- (mirrors lsp_response:<id> / lsp_notification:<method>).
-				-- The payload carries prev_status so a smart listener can
-				-- dedupe a repeated same-state re-emit.
-				editor.event_system:emit(
-					"lsp_status:" .. tostring(info.client_id),
-					info.exe_name,
-					info.status,
-					info.prev_status
-				)
-			end
-		end,
-		[shared.MSG_LSP_RESPONSE] = function(msg)
-			-- lsp_client decodes + frees; returns the id-routed tuple so
-			-- main can re-emit on the event bus. Subscribers register
-			-- one-shot listeners against `"lsp_response:" .. id`.
-			local id, result, is_err, cid = require("cursed.lsp_client").apply_response(msg.ptr)
-			if id ~= nil then
-				editor.event_system:emit("lsp_response:" .. tostring(id), result, is_err, cid)
-			end
-		end,
-		[shared.MSG_LSP_NOTIFICATION] = function(msg)
-			local method, params, cid = require("cursed.lsp_client").apply_notification(msg.ptr)
-			if method ~= nil and method ~= "" then
-				editor.event_system:emit("lsp_notification:" .. method, params, cid)
-			end
-		end,
-		[shared.MSG_LSP_SERVER_REQUEST] = function(msg)
-			local method, params, rid, cid = require("cursed.lsp_client").apply_server_request(msg.ptr)
-			if method ~= nil and method ~= "" then
-				editor.event_system:emit("lsp_server_request:" .. method, params, rid, cid)
-			end
-		end,
-	})
-end
-
-----------------------------------------------------------------------------------------------------
--- Proc inbox drain — relay subprocess output + lifecycle as
--- `process_out:<procid>` events on the editor event bus.
-----------------------------------------------------------------------------------------------------
-
---- Terminal exit kinds (mirror proc_lane.lua / shared_state.h)
-local PROC_KIND_EXITED = 0
-local PROC_KIND_SIGNALED = 1
-local PROC_KIND_FAILED = 2
-
---- Map a kind code to the event tag callers see as the second arg to
---- `process_out:<procid>` listeners.
-local function proc_kind_tag(kind)
-	if kind == PROC_KIND_EXITED then
-		return "exited"
-	elseif kind == PROC_KIND_SIGNALED then
-		return "signaled"
-	elseif kind == PROC_KIND_FAILED then
-		return "failed"
-	end
-	return "unknown"
-end
-
-local function drain_proc_inbox(editor, ss)
-	drain_generic(ss, ss._ptr.inboxes[shared.LANE_IDX_PROC], editor, {
-		[shared.MSG_PROC_OUTPUT] = function(msg)
-			if msg.ptr ~= nil then
-				local out = ffi.cast("struct ProcOutput *", msg.ptr)
-				local procid = tonumber(out.procid)
-				local stream = tonumber(out.stream)
-				local len = tonumber(out.len)
-				local ptr = out.ptr
-				---@cast procid integer
-				---@cast stream integer
-				---@cast len integer
-				local bytes = ""
-				if ptr ~= nil and len > 0 then
-					bytes = ffi.string(ptr, len)
-				end
-				ffi.C.free(ptr)
-				ffi.C.free(out)
-				local stream_tag = (stream == 2) and "stderr" or "stdout"
-				editor.event_system:emit("process_out:" .. procid, stream_tag, bytes)
-			end
-		end,
-		[shared.MSG_PROC_EXIT] = function(msg)
-			if msg.ptr ~= nil then
-				local e = ffi.cast("struct ProcExit *", msg.ptr)
-				local procid = tonumber(e.procid)
-				local kind = tonumber(e.kind)
-				local code = tonumber(e.code)
-				---@cast procid integer
-				---@cast kind integer
-				---@cast code integer
-				proc_client.clear(procid)
-				proc_client.on_proc_exit(procid)
-				editor.event_system:emit("process_out:" .. procid, proc_kind_tag(kind), code)
-				ffi.C.free(msg.ptr)
-			end
-		end,
-		[shared.MSG_PROC_SPAWNED] = function(msg)
-			if msg.ptr ~= nil then
-				local s = ffi.cast("struct ProcSpawned *", msg.ptr)
-				local procid = tonumber(s.procid)
-				local ok = tonumber(s.ok)
-				---@cast procid integer
-				---@cast ok integer
-				ffi.C.free(msg.ptr)
-				if ok ~= 0 then
-					editor.event_system:emit("process_start:" .. procid, { procid = procid })
-				else
-					-- Spawn failed: resolve the spawn token with an error, and
-					-- also emit process_out for backwards compat (existing
-					-- listeners expect "failed" on process_out).
-					proc_client.clear(procid)
-					proc_client.on_proc_exit(procid)
-					editor.event_system:emit("process_start:" .. procid, { err = "spawn failed" })
-					editor.event_system:emit("process_out:" .. procid, "failed", 0)
-				end
-			end
-		end,
-	})
-end
-
-----------------------------------------------------------------------------------------------------
--- Task lane inbox drain (task lane → main)
-----------------------------------------------------------------------------------------------------
-
-local function drain_task_inbox(editor, ss)
-	local json = require("cursed.json_ffi")
-	drain_generic(ss, ss._ptr.inboxes[shared.LANE_IDX_TASK], editor, {
-		[shared.MSG_TASK_RESULT] = function(msg)
-			if msg.ptr ~= nil then
-				local r = ffi.cast("struct TaskResult *", msg.ptr)
-				local task_id = tonumber(r.task_id)
-				local task_result_len = tonumber(r.result_len)
-				local task_result_ptr = r.result
-				---@cast task_id integer
-				task_client.clear(task_id)
-				---@cast task_result_len integer
-				local result_json = ""
-				if task_result_ptr ~= nil and task_result_len > 0 then
-					result_json = ffi.string(task_result_ptr, task_result_len)
-				end
-				ffi.C.free(task_result_ptr)
-				ffi.C.free(msg.ptr)
-				local result = json.decode(result_json)
-				editor.event_system:emit("task_result:" .. tostring(task_id), result)
-			end
-		end,
-	})
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -965,10 +622,7 @@ local function main()
 		-- with a yield are enough).
 		local ss_headless = require("cursed.shared").SharedState.from_global()
 		for _ = 1, 100 do
-			drain_inbox(editor_headless, ss_headless)
-			drain_hl_inbox(editor_headless, ss_headless)
-			drain_lsp_inbox(editor_headless, ss_headless)
-			drain_proc_inbox(editor_headless, ss_headless)
+			lane_registry.drain_all(editor_headless)
 			-- Flush any overflowed outbox messages now that lanes have
 			-- had a chance to drain.
 			for i = 0, shared.NUM_LANES - 1 do
@@ -1141,7 +795,6 @@ local function main()
 	-- uniform setup(ss, editor, es) signature.  Requiring the module
 	-- triggers self-registration; setup_all iterates the registry to
 	-- call each module's setup (which also sets editor.<field>).
-	local lane_registry = require("cursed.lane_registry")
 	require("cursed.lsp_client")
 	require("cursed.proc_client")
 	require("cursed.task_client")
@@ -1167,7 +820,7 @@ local function main()
 	-- sync-wait path in View:_hl_wait_response). The closure captures
 	-- `editor` and `ss` from this scope.
 	editor.drain_hl_inbox = function()
-		drain_hl_inbox(editor, ss)
+		lane_registry.get(shared.LANE_IDX_HL).drain_inbox(editor)
 	end
 
 	-- ------------------------------------------------------------------
@@ -1600,23 +1253,16 @@ local function main()
 					local matched = false
 					for i = 0, shared.NUM_LANES - 1 do
 						if tonumber(ev.ident) == tonumber(ss._ptr.inboxes[i].wake_ident) then
-							if i == shared.LANE_IDX_IO then
-								drain_inbox(editor, ss)
-							elseif i == shared.LANE_IDX_HL then
-								drain_hl_inbox(editor, ss)
-							elseif i == shared.LANE_IDX_LSP then
-								drain_lsp_inbox(editor, ss)
-							elseif i == shared.LANE_IDX_PROC then
-								drain_proc_inbox(editor, ss)
-							elseif i == shared.LANE_IDX_TASK then
-								drain_task_inbox(editor, ss)
+							local mod = lane_registry.get(i)
+							if mod and mod.drain_inbox then
+								mod.drain_inbox(editor)
 							end
 							matched = true
 							break
 						end
 					end
 					if not matched then
-						drain_inbox(editor, ss)
+						lane_registry.drain_all(editor)
 					end
 				elseif f == kq_ffi.EVFILT_READ then
 					-- All child-stdout drains now happen on the LSP lane;
@@ -1645,18 +1291,7 @@ local function main()
 		-- change to the wake registration ordering. ss:pop is a no-op on
 		-- an empty ring, so this is cheap.
 		local drain_t0 = profile.now_us()
-		local d1 = profile.now_us()
-		drain_inbox(editor, ss)
-		profile.span("main", "drain_io", d1)
-		local d2 = profile.now_us()
-		drain_hl_inbox(editor, ss)
-		profile.span("main", "drain_hl", d2)
-		local d3 = profile.now_us()
-		drain_lsp_inbox(editor, ss)
-		profile.span("main", "drain_lsp", d3)
-		local d4 = profile.now_us()
-		drain_proc_inbox(editor, ss)
-		profile.span("main", "drain_proc", d4)
+		lane_registry.drain_all(editor)
 		-- Flush any overflowed outbox messages now that lanes have had
 		-- a chance to drain their inbound rings (freeing ring slots).
 		for i = 0, shared.NUM_LANES - 1 do

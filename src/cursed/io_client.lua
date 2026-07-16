@@ -14,6 +14,8 @@
 local ffi = require("ffi")
 local async = require("cursed.async")
 local constants = require("cursed.shared")
+local drain_generic = require("cursed.lane_registry").drain_generic
+local log = require("cursed.log")
 
 local M = {
 	_ss = nil,  -- SharedState (for outbox push)
@@ -370,6 +372,101 @@ function M.reinitialize(ss, _editor, es)
 	-- flush_pending should have been called before us by lane_dead handler.
 	M._ss = ss
 	M._es = es
+end
+
+--- Drain the IO lane inbox: pop all messages and dispatch file-op
+--- replies to the editor event bus.
+---@param editor table
+function M.drain_inbox(editor)
+	drain_generic(M._ss, M._ss._ptr.inboxes[LANE], editor, {
+		[constants.MSG_FILE_LOADED_V2] = function(msg)
+			if msg.ptr == nil then
+				return
+			end
+			local hdr = ffi.cast("struct FileLoadReply *", msg.ptr)
+			local req_id = tonumber(hdr.req_id) or 0
+			---@cast req_id integer
+			local file_size = tonumber(hdr.file_size) or 0
+			local mmap_ptr = hdr.mmap_ptr
+			ffi.C.free(msg.ptr)
+			log.info("main", "file loaded v2", { req_id = req_id, size = file_size })
+			editor.event_system:emit("file_load:" .. req_id, {
+				mmap = mmap_ptr,
+				size = file_size,
+			})
+		end,
+		[constants.MSG_FILE_ERROR] = function(msg)
+			local req_id = tonumber(msg.arg)
+			local err_str = msg.ptr ~= nil and ffi.string(msg.ptr) or "<no message>"
+			if msg.ptr ~= nil then
+				ffi.C.free(msg.ptr)
+			end
+			if req_id and req_id ~= 0 then
+				emit_all(req_id, { err = err_str })
+				return
+			end
+			-- Legacy load error without req_id.
+			editor.status_message = err_str
+			log.error("main", "file load error", { error = err_str })
+			local failed_view = nil
+			for _, v in ipairs(editor.views) do
+				if not v.file_loaded then
+					failed_view = v
+					break
+				end
+			end
+			if failed_view ~= nil then
+				editor.event_system:emit("file_load_error", failed_view, err_str)
+			end
+		end,
+		[constants.MSG_FILE_DIRLIST_RESP] = function(msg)
+			local req_id = tonumber(msg.arg) or 0
+			---@cast req_id integer
+			if msg.ptr == nil then
+				editor.event_system:emit("file_dirlist:" .. req_id, { err = "null pointer in dirlist reply" })
+				return
+			end
+			local hdr = ffi.cast("struct FileDirListResp *", msg.ptr)
+			local count = tonumber(hdr.count) or 0
+			local entries = {}
+			if count > 0 then
+				local header_size = ffi.sizeof("struct FileDirListResp")
+				local entry_size = ffi.sizeof("struct FileDirEntry")
+				local cursor = (ffi.cast("uint8_t *", msg.ptr)) + header_size
+				for _ = 1, count do
+					local entry_ptr = ffi.cast("struct FileDirEntry *", cursor)
+					local nlen = tonumber(entry_ptr.name_len) or 0
+					local name = ffi.string((ffi.cast("char *", cursor)) + entry_size, nlen)
+					entries[#entries + 1] = {
+						name = name,
+						is_dir = tonumber(entry_ptr.is_dir) == 1,
+					}
+					cursor = cursor + entry_size + nlen
+				end
+			end
+			ffi.C.free(msg.ptr)
+			editor.event_system:emit("file_dirlist:" .. req_id, { entries = entries })
+		end,
+		[constants.MSG_FILE_SAVED] = function(msg)
+			local saved_filepath = ffi.string(msg.ptr or "")
+			ffi.C.free(msg.ptr)
+			editor.status_message = "Wrote " .. saved_filepath
+		end,
+		[constants.MSG_FILE_INSERTED] = function(msg)
+			local req_id = tonumber(msg.arg) or 0
+			---@cast req_id integer
+			if req_id ~= 0 then
+				editor.event_system:emit("file_insert:" .. req_id, {})
+			end
+			local cv = editor:current_view()
+			if cv and cv.file_loaded then
+				cv.buffer:build_lines()
+				cv:invalidate_cached_text()
+				cv.pending_cursors = {}
+				cv:update_cached_text(cv.buffer, 0)
+			end
+		end,
+	})
 end
 
 require("cursed.lane_registry").register(LANE, M)

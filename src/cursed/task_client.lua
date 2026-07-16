@@ -16,6 +16,7 @@ local log = require("cursed.log")
 local json = require("cursed.json_ffi")
 local constants = require("cursed.shared")
 local async = require("cursed.async")
+local drain_generic = require("cursed.lane_registry").drain_generic
 
 local M = {}
 
@@ -129,6 +130,33 @@ function M.reinitialize(shared_state, _editor, _es)
 	M._ss = shared_state
 	M._es = _es
 	-- next_task_id stays monotonic; don't reset.
+end
+
+--- Drain the task lane inbox: pop result messages and emit them on
+--- the editor's event bus as `task_result:<task_id>` events.
+---@param editor table
+function M.drain_inbox(editor)
+	drain_generic(M._ss, M._ss._ptr.inboxes[constants.LANE_IDX_TASK], editor, {
+		[constants.MSG_TASK_RESULT] = function(msg)
+			if msg.ptr ~= nil then
+				local r = ffi.cast("struct TaskResult *", msg.ptr)
+				local task_id = tonumber(r.task_id)
+				local task_result_len = tonumber(r.result_len)
+				local task_result_ptr = r.result
+				---@cast task_id integer
+				M.clear(task_id)
+				---@cast task_result_len integer
+				local result_json = ""
+				if task_result_ptr ~= nil and task_result_len > 0 then
+					result_json = ffi.string(task_result_ptr, task_result_len)
+				end
+				ffi.C.free(task_result_ptr)
+				ffi.C.free(msg.ptr)
+				local result = json.decode(result_json)
+				editor.event_system:emit("task_result:" .. tostring(task_id), result)
+			end
+		end,
+	})
 end
 
 require("cursed.lane_registry").register(constants.LANE_IDX_TASK, M)

@@ -66,6 +66,35 @@ function M.reinitialize(lane_idx, ss, editor, es)
 	end
 end
 
+--- Drain all messages from a ring buffer, dispatching each to the
+--- matching handler in `handlers` (a msg.type → function table).
+--- Handlers receive (msg, editor, ss) and are responsible for freeing
+--- malloc'd payloads.
+---@param ss SharedState
+---@param inbox any  ring buffer (a RingBuf* ffi cdata)
+---@param editor table
+---@param handlers table<integer, fun(msg: table, editor: table, ss: table)>
+function M.drain_generic(ss, inbox, editor, handlers)
+	local msg = ss:pop(inbox)
+	while msg ~= nil do
+		editor.event_system:emit("ring_buffer_message", msg.type, msg)
+		local handler = handlers[msg.type]
+		if handler then
+			handler(msg, editor, ss)
+		end
+		msg = ss:pop(inbox)
+	end
+end
+
+--- Call drain_inbox(editor) on every registered module that has one.
+function M.drain_all(editor)
+	for _, mod in pairs(_lanes) do
+		if mod.drain_inbox then
+			mod.drain_inbox(editor)
+		end
+	end
+end
+
 --- Sum all registered pending_count() values.
 function M.total_pending()
 	local count = 0

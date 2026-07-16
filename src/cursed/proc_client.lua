@@ -39,6 +39,7 @@ local ffi = require("ffi")
 local log = require("cursed.log")
 local json = require("cursed.json_ffi")
 local constants = require("cursed.shared")
+local drain_generic = require("cursed.lane_registry").drain_generic
 
 local M = {}
 
@@ -281,6 +282,86 @@ function M.reinitialize(shared_state, _editor, es)
     M._es = es
     M.shutdown()
     -- _next_procid stays monotonic; don't reset it.
+end
+
+--- Terminal exit kind codes (mirror proc_lane.lua / shared_state.h).
+local PROC_KIND_EXITED = 0
+local PROC_KIND_SIGNALED = 1
+local PROC_KIND_FAILED = 2
+
+--- Map a kind code to the event tag.
+---@param kind integer
+---@return string
+local function proc_kind_tag(kind)
+	if kind == PROC_KIND_EXITED then
+		return "exited"
+	elseif kind == PROC_KIND_SIGNALED then
+		return "signaled"
+	elseif kind == PROC_KIND_FAILED then
+		return "failed"
+	end
+	return "unknown"
+end
+
+--- Drain the proc lane inbox: pop all messages and emit the
+--- corresponding events on the editor's event bus.
+---@param editor table
+function M.drain_inbox(editor)
+	drain_generic(M._ss, M._ss._ptr.inboxes[constants.LANE_IDX_PROC], editor, {
+		[constants.MSG_PROC_OUTPUT] = function(msg)
+			if msg.ptr ~= nil then
+				local out = ffi.cast("struct ProcOutput *", msg.ptr)
+				local procid = tonumber(out.procid)
+				local stream = tonumber(out.stream)
+				local len = tonumber(out.len)
+				local ptr = out.ptr
+				---@cast procid integer
+				---@cast stream integer
+				---@cast len integer
+				local bytes = ""
+				if ptr ~= nil and len > 0 then
+					bytes = ffi.string(ptr, len)
+				end
+				ffi.C.free(ptr)
+				ffi.C.free(out)
+				local stream_tag = (stream == 2) and "stderr" or "stdout"
+				editor.event_system:emit("process_out:" .. procid, stream_tag, bytes)
+			end
+		end,
+		[constants.MSG_PROC_EXIT] = function(msg)
+			if msg.ptr ~= nil then
+				local e = ffi.cast("struct ProcExit *", msg.ptr)
+				local procid = tonumber(e.procid)
+				local kind = tonumber(e.kind)
+				local code = tonumber(e.code)
+				---@cast procid integer
+				---@cast kind integer
+				---@cast code integer
+				M.clear(procid)
+				M.on_proc_exit(procid)
+				editor.event_system:emit("process_out:" .. procid, proc_kind_tag(kind), code)
+				ffi.C.free(msg.ptr)
+			end
+		end,
+		[constants.MSG_PROC_SPAWNED] = function(msg)
+			if msg.ptr ~= nil then
+				local s = ffi.cast("struct ProcSpawned *", msg.ptr)
+				local procid = tonumber(s.procid)
+				local ok = tonumber(s.ok)
+				---@cast procid integer
+				---@cast ok integer
+				ffi.C.free(msg.ptr)
+				if ok ~= 0 then
+					editor.event_system:emit("process_start:" .. procid, { procid = procid })
+				else
+					M.clear(procid)
+					M.on_proc_exit(procid)
+					editor.event_system:emit("process_start:" .. procid, { err = "spawn failed" })
+					editor.event_system:emit("process_out:" .. procid, "failed", 0)
+				end
+			end
+		end,
+	})
 end
 
 require("cursed.lane_registry").register(constants.LANE_IDX_PROC, M)
