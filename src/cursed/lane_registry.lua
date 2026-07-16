@@ -6,11 +6,48 @@
 --- iterate over all registered modules to call setup/reinitialize
 --- uniformly instead of hardcoding each module's lifecycle calls.
 ---
---- Registered module interface (all optional):
----   setup(ss, editor, es)       — initialize the module
----   reinitialize(ss, editor, es) — post-lane-crash recovery
----   flush_pending()              — emit synthetic errors for in-flight ops
----   pending_count()              — integer for headless drain loop
+--- === Lane Client Module Interface ===
+---
+--- Every module that self-registers via `.register()` should conform to
+--- this interface.  All methods are optional; a minimal client only
+--- needs `drain_inbox`.  The registry's iterators (`each`, `setup_all`,
+--- `drain_all`, `total_pending`) and main.lua's lane-death handler call
+--- whichever methods exist on each module.
+---
+---   setup(ss, es)
+---       Initialize the module at startup.  Receives the SharedState
+---       ffi cdata and the event system.  Called exactly once from
+---       `setup_all()` after all lane threads are spawned.
+---
+---   reinitialize(ss, editor, es)
+---       Post-lane-crash recovery.  Restores references (typically the
+---       SharedState pointer, which is re-mmap'd by the restarted lane
+---       thread) and re-queues any state the lane needs to resume
+---       operation (e.g. re-sending language identifiers for open
+---       views, re-spawning subprocesses).  Called by main.lua's
+---       lane_dead handler AFTER flush_pending and the C-level
+---       restart_lane_thread.
+---
+---   drain_inbox(editor)
+---       Drain the lane's ring buffer inbox, dispatching each message
+---       to the appropriate handler.  Most modules implement this by
+---       calling `drain_generic(ss, inbox, editor, handlers)` from this
+---       very module.  Called by the editor's main loop on every
+---       iteration (via `drain_all`) and also on specific lanes when
+---       synchronously waiting (e.g. hl_client's drain for sync
+---       highlighting).
+---
+---   flush_pending()
+---       Emit synthetic errors (or otherwise clean up) for every
+---       in-flight operation that was pending toward a now-dead lane.
+---       Called ONCE by main.lua's lane_dead handler BEFORE
+---       reinitialize, so the module can fail outstanding promises
+---       before the lane restarts.
+---
+---   pending_count()
+---       Return the number of outstanding operations this module is
+---       tracking.  Used by headless test runs (main.lua's drain loop)
+---       to know when the system has quiesced.
 
 local M = {}
 local _lanes = {}  -- [lane_idx] = module_table
