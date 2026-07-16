@@ -243,8 +243,8 @@ local function enqueue_send(method, params, id, client_id)
     local base = ffi.cast("char *", buf) + ffi.sizeof("struct LspSendReq")
     ffi.copy(base, method, #method)
     ffi.copy(base + #method, params_json, #params_json)
-    if id ~= 0 and M._editor then
-        M._editor:track_pending_op(constants.LANE_IDX_LSP, id)
+    if id ~= 0 then
+        M._pending[id] = true
     end
     s:push(s._ptr.outboxes[constants.LANE_IDX_LSP], { type = constants.MSG_LSP_SEND, ptr = buf })
 end
@@ -1180,11 +1180,12 @@ function M.apply_handshake(ptr)
     return { client_id = cid, exe_name = name, status = status, prev_status = prev_status }
 end
 
---- Install the SharedState wrapper (called once from main.lua after init).
---- @param s any SharedState
-function M.set_shared_state(s)
-    M._ss = s
-    M._editor = _G.editor
+---@param shared_state SharedState
+---@param es table
+function M.setup(shared_state, es)
+    M._ss = shared_state
+    M._es = es
+    M._pending = {}
 end
 
 --- Consume a MSG_LSP_RESPONSE (called from main.lua's drain_lsp_inbox).
@@ -1235,9 +1236,7 @@ function M.apply_response(ptr)
         id = id,
         is_error = is_err,
     })
-    if M._editor then
-        M._editor:clear_pending_op(constants.LANE_IDX_LSP, id)
-    end
+    M._pending[id] = nil
     return id, result, is_err, cid
 end
 
@@ -1488,11 +1487,12 @@ end
 --- each server is re-spawned with the stored exe_name and empty args/
 --- env. Modes whose servers require non-default arguments (e.g.
 --- --stdio) will re-spawn with correct args on the next mode_enter.
---- @param editor table
---- @param ss SharedState
-function M.reinitialize(editor, ss)
-    M._ss = ss
-    M._editor = editor
+--- @param shared_state SharedState
+--- @param _editor table
+--- @param es table
+function M.reinitialize(shared_state, _editor, es)
+    M._ss = shared_state
+    M._es = es
     for client_id, info in pairs(M.clients) do
         if info.exe_name and info.workspace_dir then
             local cands = { { bin = info.exe_name, args = {}, env = {} } }
@@ -1510,4 +1510,27 @@ function M.reinitialize(editor, ss)
     end
 end
 
+--- Emit synthetic error events for all still-pending LSP requests
+--- after an LSP lane restart, so awaiting coroutines resume.
+function M.flush_pending()
+    for id in pairs(M._pending) do
+        M._pending[id] = nil
+        -- Emit matching what drain_lsp_inbox would: (result, is_error, client_id)
+        -- Uses nil for result since we don't know the client_id at this point.
+        -- The id-routed listener gets nil result + is_error = true.
+        M._es:emit("lsp_response:" .. tostring(id), nil, true, 0)
+    end
+    M._pending = {}
+end
+
+---@return integer
+function M.pending_count()
+    local n = 0
+    for _ in pairs(M._pending) do
+        n = n + 1
+    end
+    return n
+end
+
+require("cursed.lane_registry").register(constants.LANE_IDX_LSP, M)
 return M

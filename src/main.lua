@@ -22,6 +22,9 @@ local find_file = require("cursed.find_file")
 local log = require("cursed.log")
 local profile = require("cursed.profile")
 local lsp = require("cursed.lsp_client")
+local io_client = require("cursed.io_client")
+local proc_client = require("cursed.proc_client")
+local task_client = require("cursed.task_client")
 
 ----------------------------------------------------------------------------------------------------
 -- Keybind building (config-aware)
@@ -98,7 +101,7 @@ local function drain_inbox(editor, ss)
 
 			log.info("main", "file loaded v2", { req_id = req_id, size = file_size })
 
-			editor.event_system:emit("file_op:" .. req_id, {
+			editor.event_system:emit("file_load:" .. req_id, {
 				mmap = mmap_ptr,
 				size = file_size,
 			})
@@ -113,7 +116,14 @@ local function drain_inbox(editor, ss)
 				ffi.C.free(msg.ptr)
 			end
 			if req_id and req_id ~= 0 then
-				editor.event_system:emit("file_op:" .. req_id, { err = err_str })
+				-- Emit error on every possible file_<op>:<id> event so the
+				-- correct async.token catches it regardless of which op sent
+				-- the request. Only one token is actually listening.
+				for _, op in ipairs({ "load", "insert", "delete", "create",
+					                 "mkdir", "chmod", "rename", "dirlist",
+					                 "write" }) do
+					editor.event_system:emit("file_" .. op .. ":" .. req_id, { err = err_str })
+				end
 				return
 			end
 			-- Legacy load error without req_id.
@@ -134,7 +144,7 @@ local function drain_inbox(editor, ss)
 			local req_id = tonumber(msg.arg) or 0
 			---@cast req_id integer
 			if msg.ptr == nil then
-				editor.event_system:emit("file_op:" .. req_id, { err = "null pointer in dirlist reply" })
+				editor.event_system:emit("file_dirlist:" .. req_id, { err = "null pointer in dirlist reply" })
 				return
 			end
 			local hdr = ffi.cast("struct FileDirListResp *", msg.ptr)
@@ -156,7 +166,7 @@ local function drain_inbox(editor, ss)
 				end
 			end
 			ffi.C.free(msg.ptr)
-			editor.event_system:emit("file_op:" .. req_id, { entries = entries })
+			editor.event_system:emit("file_dirlist:" .. req_id, { entries = entries })
 		end,
 		[shared.MSG_FILE_SAVED] = function(msg)
 			local saved_filepath = ffi.string(msg.ptr or "")
@@ -169,7 +179,7 @@ local function drain_inbox(editor, ss)
 			local req_id = tonumber(msg.arg) or 0
 			---@cast req_id integer
 			if req_id ~= 0 then
-				editor.event_system:emit("file_op:" .. req_id, {})
+				editor.event_system:emit("file_insert:" .. req_id, {})
 			end
 			-- Re-calculate line geometry for the current view's buffer
 			-- after a do_insert_file request completes.
@@ -302,7 +312,6 @@ local function proc_kind_tag(kind)
 end
 
 local function drain_proc_inbox(editor, ss)
-	local proc_client = require("cursed.proc_client")
 	drain_generic(ss, ss._ptr.inboxes[shared.LANE_IDX_PROC], editor, {
 		[shared.MSG_PROC_OUTPUT] = function(msg)
 			if msg.ptr ~= nil then
@@ -333,9 +342,31 @@ local function drain_proc_inbox(editor, ss)
 				---@cast procid integer
 				---@cast kind integer
 				---@cast code integer
-				editor:clear_pending_op(shared.LANE_IDX_PROC, procid)
+				proc_client.clear(procid)
+				proc_client.on_proc_exit(procid)
 				editor.event_system:emit("process_out:" .. procid, proc_kind_tag(kind), code)
 				ffi.C.free(msg.ptr)
+			end
+		end,
+		[shared.MSG_PROC_SPAWNED] = function(msg)
+			if msg.ptr ~= nil then
+				local s = ffi.cast("struct ProcSpawned *", msg.ptr)
+				local procid = tonumber(s.procid)
+				local ok = tonumber(s.ok)
+				---@cast procid integer
+				---@cast ok integer
+				ffi.C.free(msg.ptr)
+				if ok ~= 0 then
+					editor.event_system:emit("process_start:" .. procid, { procid = procid })
+				else
+					-- Spawn failed: resolve the spawn token with an error, and
+					-- also emit process_out for backwards compat (existing
+					-- listeners expect "failed" on process_out).
+					proc_client.clear(procid)
+					proc_client.on_proc_exit(procid)
+					editor.event_system:emit("process_start:" .. procid, { err = "spawn failed" })
+					editor.event_system:emit("process_out:" .. procid, "failed", 0)
+				end
 			end
 		end,
 	})
@@ -355,7 +386,7 @@ local function drain_task_inbox(editor, ss)
 				local task_result_len = tonumber(r.result_len)
 				local task_result_ptr = r.result
 				---@cast task_id integer
-				editor:clear_pending_op(shared.LANE_IDX_TASK, task_id)
+				task_client.clear(task_id)
 				---@cast task_result_len integer
 				local result_json = ""
 				if task_result_ptr ~= nil and task_result_len > 0 then
@@ -1106,33 +1137,17 @@ local function main()
 		main_kq:add_wake(assert(tonumber(ss._ptr.inboxes[i].wake_ident)))
 	end
 
-	-- Wire the LSP module's SharedState handle so it can enqueue
-	-- SPAWN/SEND/KILL to the LSP lane (outbox_lsp). The lane owns all
-	-- subprocess mgmt + JSON decode; main relays via this facade.
-	require("cursed.lsp_client").set_shared_state(ss)
-
-	-- Wire the proc lane's SharedState + editor handle so spawn/send_stdin/
-	-- kill can push to outbox_proc and register per-procid `process_in`
-	-- listeners on the bus. drain_proc_inbox (below) is the inverse path.
-	local proc_client = require("cursed.proc_client")
-	proc_client.setup(editor, ss)
-	-- Expose on the editor so init.lua / user code can spawn processes
-	-- against the live image: `editor.proc.spawn({...}, {cwd=...})`.
-	editor.proc = proc_client
-
-	-- Wire the task lane's SharedState + editor handle so send_task
-	-- can push to outbox_task. drain_task_inbox (above) is the inverse.
-	local task_client = require("cursed.task_client")
-	task_client.setup(editor, ss)
-	editor.task = task_client
-
-	local io_client = require("cursed.io_client")
-	io_client.setup(editor, ss)
-	editor.io = io_client
-
-	local hl_client = require("cursed.hl_client")
-	hl_client.setup(editor, ss)
-	editor.hl = hl_client
+	-- Each lane module registers itself in the lane_registry with a
+	-- uniform setup(ss, editor, es) signature.  Requiring the module
+	-- triggers self-registration; setup_all iterates the registry to
+	-- call each module's setup (which also sets editor.<field>).
+	local lane_registry = require("cursed.lane_registry")
+	require("cursed.lsp_client")
+	require("cursed.proc_client")
+	require("cursed.task_client")
+	require("cursed.io_client")
+	require("cursed.hl_client")
+	lane_registry.setup_all(ss, editor.event_system)
 
 	-- Expose the editor's main kqueue + workspace root to the
 	-- editor-level LSP manager (registered in cursed.editor_listeners):
@@ -1174,21 +1189,15 @@ local function main()
 	editor.event_system:on("lane_dead", function(_, lane_idx, lane_name)
 		log.error("main", "lane died, restarting", { lane_idx = lane_idx, name = lane_name })
 		editor.status_message = lane_name .. " lane died; restarting..."
-		editor:flush_lane_pending(lane_idx)
+		lane_registry.flush_pending(lane_idx)
+		if lane_registry.get(lane_idx) == nil then
+			-- Non-module lane: fall back to editor-level pending flush.
+			editor:flush_lane_pending(lane_idx)
+		end
 		ffi.C.restart_lane_thread(lane_idx)
-		local reinitializers = {
-			[shared.LANE_IDX_IO]   = function() require("cursed.io_client").reinitialize(editor, ss) end,
-			[shared.LANE_IDX_HL]   = function() require("cursed.hl_client").reinitialize(editor, ss) end,
-			[shared.LANE_IDX_LSP]  = function() require("cursed.lsp_client").reinitialize(editor, ss) end,
-			[shared.LANE_IDX_PROC] = function() require("cursed.proc_client").reinitialize(editor, ss) end,
-			[shared.LANE_IDX_TASK] = function() require("cursed.task_client").reinitialize(editor, ss) end,
-		}
-		local reinit = reinitializers[lane_idx]
-		if reinit then
-			local ok, err = pcall(reinit)
-			if not ok then
-				log.error("main", "lane reinit failed", { lane_idx = lane_idx, error = tostring(err) })
-			end
+		local ok, err = pcall(lane_registry.reinitialize, lane_registry, lane_idx, ss, editor, editor.event_system)
+		if not ok then
+			log.error("main", "lane reinit failed", { lane_idx = lane_idx, error = tostring(err) })
 		end
 	end)
 
@@ -1280,7 +1289,7 @@ local function main()
 				end
 			end
 		end)
-		editor:track_pending_op(shared.LANE_IDX_IO, req_id)
+		io_client.track_pending(req_id)
 		ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
 			type = shared.MSG_FILE_LOAD,
 			arg = req_id,
@@ -1341,14 +1350,14 @@ local function main()
 						-- file. On create failure nothing else dies:
 						-- the subsequent LOAD pushes MSG_FILE_ERROR
 						-- and the view gets an error message.
-						editor:create_file(expanded, function(ok, err)
-							if ok then
-								log.info("main", "created missing file", { path = expanded })
-							else
+						async.unwrap(io_client.send_file_create(expanded), function(payload)
+							if payload.err then
 								log.warn("main", "could not create missing file", {
 									path = expanded,
-									error = err,
+									error = payload.err,
 								})
+							else
+								log.info("main", "created missing file", { path = expanded })
 							end
 						end)
 					else
@@ -1359,14 +1368,14 @@ local function main()
 					cur_view._bench_open_t0 = require("cursed.bench").now_us()
 					-- Req_id-correlated load so the lane's reply
 					-- routes through the event bus.
-					local req_id2 = editor:_next_file_op_id()
+					local req_id2 = io_client.reserve_id()
 					editor._pending_ops_count = (editor._pending_ops_count or 0) + 1
-					local event_name = "file_op:" .. req_id2
+					local event_name = "file_load:" .. req_id2
 					local handler
 					handler = editor.event_system:on(event_name, function(_, payload)
 						editor.event_system:off(event_name, handler)
 						editor._pending_ops_count = editor._pending_ops_count - 1
-						editor:clear_pending_op(shared.LANE_IDX_IO, req_id2)
+						io_client.clear_pending(req_id2)
 						if payload.err then
 							editor.status_message = payload.err
 							return
@@ -1398,7 +1407,7 @@ local function main()
 							end
 						end
 					end)
-					editor:track_pending_op(shared.LANE_IDX_IO, req_id2)
+					io_client.track_pending(req_id2)
 					ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
 						type = shared.MSG_FILE_LOAD,
 						arg = req_id2,

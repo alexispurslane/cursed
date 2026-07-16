@@ -76,7 +76,6 @@ local STREAM_STDERR = 2
 --- Lifecycle kinds carried in ProcExit.kind (mirror shared_state.h).
 local KIND_EXITED = 0
 local KIND_SIGNALED = 1
-local KIND_FAILED = 2
 
 --- waitpid status macros (BSD/macOS layout). Evaluated inline so we
 --- don't need <sys/wait.h> macros through FFI.
@@ -146,6 +145,16 @@ local function send_exit(proc, kind, code)
     e.kind = kind
     e.code = code
     ss:push(ss._ptr.inboxes[constants.LANE_IDX_PROC], { type = constants.MSG_PROC_EXIT, ptr = e })
+end
+
+--- Ship a spawn result (success or failure) to main. Main frees.
+---@param procid integer
+---@param ok boolean true = spawned successfully, false = spawn failed
+local function send_spawned(procid, ok)
+    local s = ffi.cast("struct ProcSpawned *", ffi.C.calloc(1, ffi.sizeof("struct ProcSpawned")))
+    s.procid = procid
+    s.ok = ok and 1 or 0
+    ss:push(ss._ptr.inboxes[constants.LANE_IDX_PROC], { type = constants.MSG_PROC_SPAWNED, ptr = s })
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -508,23 +517,19 @@ local function handle_spawn(msg)
     local spec, derr = json.decode(spec_json)
     if type(spec) ~= "table" then
         log.warn("proc_lane", "spawn spec decode failed", { procid = procid, error = derr })
-        -- Fabricate a FAILED report so main drops the id.
-        local dummy = new_proc(procid, 0, -1, -1, -1)
-        dummy.reported = true
-        send_exit(dummy, KIND_FAILED, 0)
+        send_spawned(procid, false)
         return
     end
 
     local pid, out_fd, err_fd, in_fd, serr = spawn_child(spec)
     if pid < 0 then
         log.warn("proc_lane", "spawn failed", { procid = procid, error = serr })
-        local dummy = new_proc(procid, 0, -1, -1, -1)
-        dummy.reported = true
-        send_exit(dummy, KIND_FAILED, 0)
+        send_spawned(procid, false)
         return
     end
 
     local proc = new_proc(procid, pid, in_fd, out_fd, err_fd, spec.buffer_bytes)
+    send_spawned(procid, true)
     _procs_by_id[procid] = proc
     _procs_by_fd[out_fd] = proc
     if err_fd ~= out_fd then

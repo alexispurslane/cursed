@@ -23,6 +23,7 @@ local CompletionMenu = require("cursed.completion_menu")
 local log = require("cursed.log")
 local profile = require("cursed.profile")
 local async = require("cursed.async")
+local io_client = require("cursed.io_client")
 
 --- Cached space-fill buffer: avoids per-frame string.rep allocations
 --- in the render path. Grown lazily to the widest request seen.
@@ -1268,16 +1269,15 @@ function Editor:open_file(filepath)
 
 	log.debug("editor", "open_file begin", { path = expanded })
 
-	local editor = self
-	local req_id = self:_next_file_op_id()
+	local req_id = io_client.reserve_id()
 	self._pending_ops_count = (self._pending_ops_count or 0) + 1
-	local event_name = "file_op:" .. req_id
+	local event_name = "file_load:" .. req_id
 	local handler
 	handler = self.event_system:on(event_name, function(_, payload)
 		self.event_system:off(event_name, handler)
 		self._pending_ops_count = self._pending_ops_count - 1
 		if payload.err then
-			self:clear_pending_op(shared.LANE_IDX_IO, req_id)
+			io_client.clear_pending(req_id)
 			editor.status_message = payload.err
 			return
 		end
@@ -1312,11 +1312,11 @@ function Editor:open_file(filepath)
 				view._bench_open_t0 = nil
 			end
 		end
-		self:clear_pending_op(shared.LANE_IDX_IO, req_id)
+		io_client.clear_pending(req_id)
 	end)
 
 	local ss = shared.SharedState.from_global()
-	self:track_pending_op(shared.LANE_IDX_IO, req_id)
+	io_client.track_pending(req_id)
 	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
 		type = shared.MSG_FILE_LOAD,
 		arg = req_id,
@@ -1351,16 +1351,15 @@ function Editor:open_file_background(filepath)
 	self.event_system:emit("view_open", view)
 	log.debug("editor", "open_file_background begin", { path = expanded })
 
-	local editor = self
-	local req_id = self:_next_file_op_id()
+	local req_id = io_client.reserve_id()
 	self._pending_ops_count = (self._pending_ops_count or 0) + 1
-	local event_name = "file_op:" .. req_id
+	local event_name = "file_load:" .. req_id
 	local handler
 	handler = self.event_system:on(event_name, function(_, payload)
 		self.event_system:off(event_name, handler)
 		self._pending_ops_count = self._pending_ops_count - 1
 		if payload.err then
-			self:clear_pending_op(shared.LANE_IDX_IO, req_id)
+			io_client.clear_pending(req_id)
 			editor.status_message = payload.err
 			return
 		end
@@ -1388,11 +1387,11 @@ function Editor:open_file_background(filepath)
 			end
 			editor.event_system:emit("file_loaded", view, loaded_buf)
 		end
-		self:clear_pending_op(shared.LANE_IDX_IO, req_id)
+		io_client.clear_pending(req_id)
 	end)
 
 	local ss = shared.SharedState.from_global()
-	self:track_pending_op(shared.LANE_IDX_IO, req_id)
+	io_client.track_pending(req_id)
 	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
 		type = shared.MSG_FILE_LOAD,
 		arg = req_id,
@@ -1849,163 +1848,6 @@ function Editor:_drain_pending_apply_edits(view, ok)
 	end
 end
 
---- Insert a file's contents at the cursor (async via IO lane).
----@param filepath string raw path from the user (may contain ~, $ENV)
-function Editor:insert_file(filepath)
-	local expanded = find_file.expand_path(filepath)
-
-	if find_file.is_directory(expanded) then
-		self.status_message = "cannot insert directory: " .. filepath
-		return
-	end
-
-	local editor = self
-	local req_id = self:_next_file_op_id()
-	-- The on_done is a no-op — MSG_INSERT_FILE doesn't return a
-	-- Buffer; the lane runs the insert synchronously-off-main and
-	-- the reply MSG_FILE_INSERTED is a separate drain path. We
-	-- register just so the req_id is tracked for error replies.
-	self._pending_ops_count = (self._pending_ops_count or 0) + 1
-	local event_name = "file_op:" .. req_id
-	local handler
-	handler = self.event_system:on(event_name, function(_, payload)
-		self.event_system:off(event_name, handler)
-		self._pending_ops_count = self._pending_ops_count - 1
-		if payload.err then
-			editor.status_message = payload.err
-		end
-		self:clear_pending_op(shared.LANE_IDX_IO, req_id)
-	end)
-
-	local ss = shared.SharedState.from_global()
-	self:track_pending_op(shared.LANE_IDX_IO, req_id)
-	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
-		type = shared.MSG_INSERT_FILE,
-		arg = req_id,
-		ptr = expanded,
-	})
-end
-
---- Read a file and hand it off as a Buffer via a callback.
----
---- Uses MSG_FILE_LOAD + MSG_FILE_LOADED_V2: the IO lane mmap's the
---- file and replies with a FileLoadReply struct containing req_id +
---- file_size + mmap_ptr. main.lua's MSG_FILE_LOADED_V2 handler emits
---- file_op:<req_id> on the event bus; the one-shot listener here
---- constructs a Buffer.from_mmap and invokes on_done(buf). To get raw
---- bytes without the piece-table Buffer wrapper, follow up with
---- Buffer:serialize_to_bytes.
----@param filepath string absolute path to the file (already expanded)
----@param on_done fun(buf: Buffer|nil, err: string?) called with the Buffer
----                    on success, or (nil, err) on failure.
-function Editor:read_into_buffer(filepath, on_done)
-	local expanded = find_file.expand_path(filepath)
-
-	if find_file.is_directory(expanded) then
-		if on_done then
-			on_done(nil, "is a directory: " .. filepath)
-		end
-		return
-	end
-
-	local req_id = self:_next_file_op_id()
-	self._pending_ops_count = (self._pending_ops_count or 0) + 1
-	local event_name = "file_op:" .. req_id
-	local handler
-	handler = self.event_system:on(event_name, function(_, payload)
-		self.event_system:off(event_name, handler)
-		self._pending_ops_count = self._pending_ops_count - 1
-		if payload.err then
-			self:clear_pending_op(shared.LANE_IDX_IO, req_id)
-			if on_done then
-				on_done(nil, payload.err)
-			end
-			return
-		end
-		local mmap_ptr = payload.mmap
-		local file_size = payload.size
-		---@cast file_size integer
-		if mmap_ptr == nil then
-			self:clear_pending_op(shared.LANE_IDX_IO, req_id)
-			local placeholder = Buffer.new()
-			placeholder:set_filepath(expanded)
-			if on_done then
-				on_done(placeholder, nil)
-			end
-			return
-		end
-		local psize = tonumber(ffi.C.sysconf(require("cursed.shared")._SC_PAGESIZE)) or 4096
-		local cap = file_size > 0 and bit.band(file_size + psize - 1, bit.bnot(psize - 1)) or psize
-		local buf = Buffer.from_mmap(mmap_ptr, file_size, cap)
-		buf:set_filepath(expanded)
-		if on_done then
-			on_done(buf, nil)
-		end
-		self:clear_pending_op(shared.LANE_IDX_IO, req_id)
-	end)
-
-	local ss = shared.SharedState.from_global()
-	self:track_pending_op(shared.LANE_IDX_IO, req_id)
-	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
-		type = shared.MSG_FILE_LOAD,
-		arg = req_id,
-		ptr = expanded,
-	})
-end
-
---- Load a file into a Buffer (coroutine variant).
---- Returns (buf, nil) on success, (nil, err) on failure.
----
---- Usage:
----   local payload = async.await(editor:read_into_buffer_async(path))
----   if payload.err then ... end
----   local buf = Editor._payload_to_buffer(payload, path)
----
---- The raw token payload has {mmap, size} or {err}. Use the helper
---- or construct a Buffer directly from the mmap.
----@param filepath string
----@return AsyncToken
-function Editor:load_async(filepath)
-	local expanded = find_file.expand_path(filepath)
-	local req_id = self:_next_file_op_id()
-	self._pending_ops_count = (self._pending_ops_count or 0) + 1
-	local ss = shared.SharedState.from_global()
-	self:track_pending_op(shared.LANE_IDX_IO, req_id)
-	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
-		type = shared.MSG_FILE_LOAD,
-		arg = req_id,
-		ptr = expanded,
-	})
-	return async.token(self.event_system, "file_op:" .. req_id, function()
-		self._pending_ops_count = (self._pending_ops_count or 1) - 1
-		self:clear_pending_op(shared.LANE_IDX_IO, req_id)
-	end)
-end
-
---- Convert a load_async payload into a Buffer (or nil on error/empty).
---- Shared by read_into_buffer and open_file flows.
----@param payload table {mmap, size} or {err}
----@param filepath string
----@return Buffer|nil
----@return string|nil err
-function Editor._payload_to_buffer(payload, filepath)
-	if payload.err then
-		return nil, payload.err
-	end
-	local mmap_ptr = payload.mmap
-	local file_size = payload.size
-	---@cast file_size integer
-	if mmap_ptr == nil then
-		local placeholder = Buffer.new()
-		placeholder:set_filepath(filepath)
-		return placeholder, nil
-	end
-	local psize = tonumber(ffi.C.sysconf(require("cursed.shared")._SC_PAGESIZE)) or 4096
-	local cap = file_size > 0 and bit.band(file_size + psize - 1, bit.bnot(psize - 1)) or psize
-	local buf = Buffer.from_mmap(mmap_ptr, file_size, cap)
-	buf:set_filepath(filepath)
-	return buf, nil
-end
 --- Save the current buffer to its filepath (async via IO lane).
 function Editor:save()
 	local view = self:current_view()
@@ -2019,7 +1861,7 @@ function Editor:save()
 		return
 	end
 	self.event_system:emit("before_save", view, buf)
-	self:_async_save(buf)
+	io_client.send_file_save(buf)
 end
 
 --- Save the current buffer to a new filepath (async via IO lane).
@@ -2031,13 +1873,10 @@ function Editor:save_as(filepath)
 	end
 	local expanded = find_file.expand_path(filepath)
 	view.buffer:set_filepath(expanded)
-	self:_async_save(view.buffer)
+	io_client.send_file_save(view.buffer)
 end
 
-----------------------------------------------------------------------------------------------------
--- Async file operations (delete / create / mkdir / chmod / rename / dirlist)
---
--- Each method mints a request id, registers an on_done callback in
+
 -- the event bus, and pushes a MSG_FILE_* to the IO lane.
 -- The IO lane pushes MSG_FILE_ERROR (with arg=req_id, ptr=malloc'd
 -- error string) on failure or MSG_FILE_DIRLIST_RESP (with arg=req_id,
@@ -2154,394 +1993,10 @@ function Editor:create_async(filepath)
 	end)
 end
 
---- Make a single directory via IO lane (mkdir(2), NOT mkdir -p).
---- Editor code that wants -p semantics chains a sequence of calls.
----@param dirpath string absolute directory path (already expanded)
----@param on_done fun(success: boolean, err: string?)? optional callback
-function Editor:mkdir(dirpath, on_done)
-	local ss = shared.SharedState.from_global()
-	local req_id = self:_next_file_op_id()
-	if on_done then
-		self._pending_ops_count = (self._pending_ops_count or 0) + 1
-		local event_name = "file_op:" .. req_id
-		local handler
-		handler = self.event_system:on(event_name, function(_, payload)
-			self.event_system:off(event_name, handler)
-			self._pending_ops_count = self._pending_ops_count - 1
-			if payload.err then
-				self:clear_pending_op(shared.LANE_IDX_IO, req_id)
-				on_done(false, payload.err)
-			else
-				self:clear_pending_op(shared.LANE_IDX_IO, req_id)
-				on_done(true, nil)
-			end
-		end)
-	end
-	self:track_pending_op(shared.LANE_IDX_IO, req_id)
-	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
-		type = shared.MSG_FILE_MKDIR,
-		arg = req_id,
-		ptr = dirpath,
-	})
-end
 
---- Make a directory (coroutine variant). Returns a token for async.await().
----@param dirpath string
----@return AsyncToken
-function Editor:mkdir_async(dirpath)
-	local req_id = self:_next_file_op_id()
-	self._pending_ops_count = (self._pending_ops_count or 0) + 1
-	local ss = shared.SharedState.from_global()
-	self:track_pending_op(shared.LANE_IDX_IO, req_id)
-	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
-		type = shared.MSG_FILE_MKDIR,
-		arg = req_id,
-		ptr = dirpath,
-	})
-	return async.token(self.event_system, "file_op:" .. req_id, function()
-		self._pending_ops_count = (self._pending_ops_count or 1) - 1
-		self:clear_pending_op(shared.LANE_IDX_IO, req_id)
-	end)
-end
 
---- chmod(2): set the file mode bits.
----@param filepath string absolute path (already expanded)
----@param mode integer 9-bit mode (e.g. tonumber("0755", 8) → 493)
----@param on_done fun(success: boolean, err: string?)? optional callback
-function Editor:chmod(filepath, mode, on_done)
-	local ss = shared.SharedState.from_global()
-	local req_id = self:_next_file_op_id()
-	if on_done then
-		self._pending_ops_count = (self._pending_ops_count or 0) + 1
-		local event_name = "file_op:" .. req_id
-		local handler
-		handler = self.event_system:on(event_name, function(_, payload)
-			self.event_system:off(event_name, handler)
-			self._pending_ops_count = self._pending_ops_count - 1
-			if payload.err then
-				self:clear_pending_op(shared.LANE_IDX_IO, req_id)
-				on_done(false, payload.err)
-			else
-				self:clear_pending_op(shared.LANE_IDX_IO, req_id)
-				on_done(true, nil)
-			end
-		end)
-	end
-	-- Pack mode in low 9 bits, req_id above; lane splits them back.
-	local packed = bit.bor(bit.lshift(req_id, 9), bit.band(mode, 0x1FF))
-	self:track_pending_op(shared.LANE_IDX_IO, req_id)
-	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
-		type = shared.MSG_FILE_CHMOD,
-		arg = packed,
-		ptr = filepath,
-	})
-end
 
---- chmod (coroutine variant). Returns a token for async.await().
----@param filepath string
----@param mode integer
----@return AsyncToken
-function Editor:chmod_async(filepath, mode)
-	local req_id = self:_next_file_op_id()
-	self._pending_ops_count = (self._pending_ops_count or 0) + 1
-	local packed = bit.bor(bit.lshift(req_id, 9), bit.band(mode, 0x1FF))
-	local ss = shared.SharedState.from_global()
-	self:track_pending_op(shared.LANE_IDX_IO, req_id)
-	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
-		type = shared.MSG_FILE_CHMOD,
-		arg = packed,
-		ptr = filepath,
-	})
-	return async.token(self.event_system, "file_op:" .. req_id, function()
-		self._pending_ops_count = (self._pending_ops_count or 1) - 1
-		self:clear_pending_op(shared.LANE_IDX_IO, req_id)
-	end)
-end
 
---- rename(2) via IO lane.
----@param src string absolute source path (already expanded)
----@param dst string absolute destination path (already expanded)
----@param on_done fun(success: boolean, err: string?)? optional callback
-function Editor:rename(src, dst, on_done)
-	local ss = shared.SharedState.from_global()
-	local req_id = self:_next_file_op_id()
-	if on_done then
-		self._pending_ops_count = (self._pending_ops_count or 0) + 1
-		local event_name = "file_op:" .. req_id
-		local handler
-		handler = self.event_system:on(event_name, function(_, payload)
-			self.event_system:off(event_name, handler)
-			self._pending_ops_count = self._pending_ops_count - 1
-			if payload.err then
-				self:clear_pending_op(shared.LANE_IDX_IO, req_id)
-				on_done(false, payload.err)
-			else
-				self:clear_pending_op(shared.LANE_IDX_IO, req_id)
-				on_done(true, nil)
-			end
-		end)
-	end
-	-- Build a heap FileMoveReq{ src_len, dst_len, src bytes, dst bytes }.
-	local req_size = ffi.sizeof("struct FileMoveReq") + #src + #dst
-	local req = ffi.C.malloc(req_size)
-	if req == nil then
-		if on_done then
-			on_done(false, "malloc failed")
-		end
-		return
-	end
-	local hdr = ffi.cast("struct FileMoveReq *", req)
-	hdr.src_len = #src
-	hdr.dst_len = #dst
-	-- Inline src bytes at offset = sizeof(FileMoveReq)
-	local src_dst = ffi.cast("char *", req) + ffi.sizeof("struct FileMoveReq")
-	ffi.copy(src_dst, src, #src)
-	-- Inline dst bytes after that
-	ffi.copy(src_dst + #src, dst, #dst)
-
-	self:track_pending_op(shared.LANE_IDX_IO, req_id)
-	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
-		type = shared.MSG_FILE_RENAME,
-		arg = req_id,
-		ptr = req, -- lane frees on completion
-	})
-end
-
---- Rename a file (coroutine variant). Returns a token for async.await().
----@param src string
----@param dst string
----@return AsyncToken
-function Editor:rename_async(src, dst)
-	local req_id = self:_next_file_op_id()
-	self._pending_ops_count = (self._pending_ops_count or 0) + 1
-	local ss = shared.SharedState.from_global()
-	local req_size = ffi.sizeof("struct FileMoveReq") + #src + #dst
-	local req = ffi.C.malloc(req_size)
-	if req == nil then
-		-- Fire the completion now so the count still decrements.
-		self:track_pending_op(shared.LANE_IDX_IO, req_id)
-		ss:push(ss._ptr.inboxes[shared.LANE_IDX_IO], {
-			type = shared.MSG_FILE_ERROR,
-			arg = req_id,
-			ptr = nil,
-		})
-		return async.token(self.event_system, "file_op:" .. req_id, function()
-			self._pending_ops_count = (self._pending_ops_count or 1) - 1
-			self:clear_pending_op(shared.LANE_IDX_IO, req_id)
-		end)
-	end
-	local hdr = ffi.cast("struct FileMoveReq *", req)
-	hdr.src_len = #src
-	hdr.dst_len = #dst
-	local src_dst = ffi.cast("char *", req) + ffi.sizeof("struct FileMoveReq")
-	ffi.copy(src_dst, src, #src)
-	ffi.copy(src_dst + #src, dst, #dst)
-	self:track_pending_op(shared.LANE_IDX_IO, req_id)
-	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
-		type = shared.MSG_FILE_RENAME,
-		arg = req_id,
-		ptr = req,
-	})
-	return async.token(self.event_system, "file_op:" .. req_id, function()
-		self._pending_ops_count = (self._pending_ops_count or 1) - 1
-		self:clear_pending_op(shared.LANE_IDX_IO, req_id)
-	end)
-end
-
---- List directory entries via IO lane. Reads dirlist_pack layout
---- (FileDirListResp{count} + N × FileDirEntry with inline name bytes).
---- Mirrors find_file.list_dir: returns `entries = { {name, is_dir}, … }`.
---- Skips `.` and `..`. Hidden-file filtering is the editor's call.
----@param dirpath string absolute directory path (already expanded)
----@param on_done fun(entries: table[]?, err: string?)
-function Editor:dirlist(dirpath, on_done)
-	local ss = shared.SharedState.from_global()
-	local req_id = self:_next_file_op_id()
-	self._pending_ops_count = (self._pending_ops_count or 0) + 1
-	local event_name = "file_op:" .. req_id
-	local handler
-	handler = self.event_system:on(event_name, function(_, payload)
-		self.event_system:off(event_name, handler)
-		self._pending_ops_count = self._pending_ops_count - 1
-		if payload.err then
-			self:clear_pending_op(shared.LANE_IDX_IO, req_id)
-			on_done(nil, payload.err)
-		else
-			self:clear_pending_op(shared.LANE_IDX_IO, req_id)
-			on_done(payload.entries, nil)
-		end
-	end)
-	self:track_pending_op(shared.LANE_IDX_IO, req_id)
-	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
-		type = shared.MSG_FILE_DIRLIST,
-		arg = req_id,
-		ptr = dirpath,
-	})
-end
-
---- List directory entries (coroutine variant). Returns a token for async.await().
---- Payload is { entries = { {name, is_dir}, ... } } on success, { err = ... } on failure.
----@param dirpath string
----@return AsyncToken
-function Editor:dirlist_async(dirpath)
-	local req_id = self:_next_file_op_id()
-	self._pending_ops_count = (self._pending_ops_count or 0) + 1
-	local ss = shared.SharedState.from_global()
-	self:track_pending_op(shared.LANE_IDX_IO, req_id)
-	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
-		type = shared.MSG_FILE_DIRLIST,
-		arg = req_id,
-		ptr = dirpath,
-	})
-	return async.token(self.event_system, "file_op:" .. req_id, function()
-		self._pending_ops_count = (self._pending_ops_count or 1) - 1
-		self:clear_pending_op(shared.LANE_IDX_IO, req_id)
-	end)
-end
-
---- Serialize a Buffer and write it to a file via MSG_FILE_WRITE.
----
---- Builds a heap-owned byte buffer via Buffer:serialize_to_bytes
---- (caller-owned ptr + len; main ffi.C.free's after the lane write).
---- Pushes a single MSG_FILE_WRITE that ships the bytes + the
---- filepath; success is silent, failure pushes MSG_FILE_ERROR.
---- Useful for "save as" prompts from non-file-backed buffers (the
---- file manager's new entry, the picker exporting selected lines, …)
---- or any caller that has a Buffer's piece-table content and wants
---- to persist it.
----@param buffer Buffer|View a Buffer (or a View from which we'll take .buffer)
----@param filepath string absolute path (already expanded)
----@param on_done fun(success: boolean, err: string?)? optional callback
-function Editor:save_buffer_to_file(buffer, filepath, on_done)
-	local real_buf
-	if type(buffer) == "table" and buffer.buffer ~= nil then
-		-- View
-		real_buf = buffer.buffer
-	else
-		real_buf = buffer
-	end
-	local data_ptr, data_len = real_buf:serialize_to_bytes()
-	local ss = shared.SharedState.from_global()
-	local req_id = self:_next_file_op_id()
-
-	-- Pack the request: struct{src_len, filepath_len} + src + path.
-	-- IMPORTANT: the IO lane reads bytes synchronously from the heap
-	-- FileWriteReq (no async reference to data_ptr), so we can free
-	-- data_ptr RIGHT NOW — even before the lane pop. The lane frees
-	-- its own `req` allocation after writing.
-	local req_size = ffi.sizeof("struct FileWriteReq") + data_len + #filepath
-	local req = ffi.C.malloc(req_size)
-	if req == nil then
-		ffi.C.free(data_ptr)
-		if on_done then
-			on_done(false, "malloc failed")
-		end
-		return
-	end
-	local hdr = ffi.cast("struct FileWriteReq *", req)
-	hdr.src_len = data_len
-	hdr.filepath_len = #filepath
-	local payload = ffi.cast("uint8_t *", req) + ffi.sizeof("struct FileWriteReq")
-	ffi.copy(payload, ffi.cast("uint8_t *", data_ptr), data_len)
-	ffi.copy(payload + data_len, filepath, #filepath)
-	-- data_ptr is now redundant: all bytes are in `req`.
-	ffi.C.free(data_ptr)
-
-	if on_done then
-		self._pending_ops_count = (self._pending_ops_count or 0) + 1
-		local event_name = "file_op:" .. req_id
-		local handler
-		handler = self.event_system:on(event_name, function(_, payload)
-			self.event_system:off(event_name, handler)
-			self._pending_ops_count = self._pending_ops_count - 1
-			if payload.err then
-				self:clear_pending_op(shared.LANE_IDX_IO, req_id)
-				on_done(false, payload.err)
-			else
-				self:clear_pending_op(shared.LANE_IDX_IO, req_id)
-				on_done(true, nil)
-			end
-		end)
-	end
-
-	self:track_pending_op(shared.LANE_IDX_IO, req_id)
-	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
-		type = shared.MSG_FILE_WRITE,
-		arg = req_id,
-		ptr = req, -- lane frees on completion (after `write_file`)
-	})
-end
-
---- Save a buffer to file (coroutine variant). Returns a token for async.await().
----@param buffer Buffer|View
----@param filepath string
----@return AsyncToken
-function Editor:save_buffer_async(buffer, filepath)
-	local real_buf
-	if type(buffer) == "table" and buffer.buffer ~= nil then
-		real_buf = buffer.buffer
-	else
-		real_buf = buffer
-	end
-	local data_ptr, data_len = real_buf:serialize_to_bytes()
-	local req_id = self:_next_file_op_id()
-	self._pending_ops_count = (self._pending_ops_count or 0) + 1
-	local ss = shared.SharedState.from_global()
-
-	local req_size = ffi.sizeof("struct FileWriteReq") + data_len + #filepath
-	local req = ffi.C.malloc(req_size)
-	if req == nil then
-		ffi.C.free(data_ptr)
-		-- Emit a synthetic error so the awaiting coroutine doesn't hang.
-		self.event_system:emit("file_op:" .. req_id, { err = "malloc failed" })
-		return async.token(self.event_system, "file_op:" .. req_id, function()
-			self._pending_ops_count = (self._pending_ops_count or 1) - 1
-		end)
-	end
-	local hdr = ffi.cast("struct FileWriteReq *", req)
-	hdr.src_len = data_len
-	hdr.filepath_len = #filepath
-	local payload = ffi.cast("uint8_t *", req) + ffi.sizeof("struct FileWriteReq")
-	ffi.copy(payload, ffi.cast("uint8_t *", data_ptr), data_len)
-	ffi.copy(payload + data_len, filepath, #filepath)
-	ffi.C.free(data_ptr)
-
-	self:track_pending_op(shared.LANE_IDX_IO, req_id)
-	ss:push(ss._ptr.outboxes[shared.LANE_IDX_IO], {
-		type = shared.MSG_FILE_WRITE,
-		arg = req_id,
-		ptr = req,
-	})
-	return async.token(self.event_system, "file_op:" .. req_id, function()
-		self._pending_ops_count = (self._pending_ops_count or 1) - 1
-		self:clear_pending_op(shared.LANE_IDX_IO, req_id)
-	end)
-end
-
---- Write a string to a file via MSG_FILE_WRITE.
----
---- Convenience wrapper around save_buffer_to_file. Builds a heap-
---- owned Buffer.from_string, hands it off, the lane writes and the
---- GC frees the Buffer's bytes.
----@param str string contents to write
----@param filepath string absolute path (already expanded)
----@param on_done fun(success: boolean, err: string?)? optional callback
-function Editor:write_string_to_file(str, filepath, on_done)
-	local buf = Buffer.from_string(str or "")
-	self:save_buffer_to_file(buf, filepath, on_done)
-end
-
---- Write a string to a file (coroutine variant). Returns a token for async.await().
----@param str string
----@param filepath string
----@return AsyncToken
-function Editor:write_string_async(str, filepath)
-	local buf = Buffer.from_string(str or "")
-	return self:save_buffer_async(buf, filepath)
-end
-
---- Short y/n prompt helper for destructive operations.
----
 --- Activates the minibuffer with a y/n prompt. Empty input (just
 --- hitting Enter) is treated as "yes" to match user-set value when
 --- caller supplies one; otherwise the caller must provide on_no for

@@ -188,7 +188,7 @@ local function fetch_dir(view)
 	rebuild(view)
 
 	local dir = view._fm_dir
-	local payload = async.await(editor:dirlist_async(dir))
+	local payload = async.await(require("cursed.io_client").send_dirlist(dir))
 
 	if payload.err then
 		view._fm_loading = false

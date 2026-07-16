@@ -113,7 +113,8 @@ function SpellClient:_ensure_proc(buf, lang)
         argv[3] = "-l"
         argv[4] = lang
     end
-    local pid = proc.spawn(argv, { buffer_bytes = 0 })
+    local token = proc.spawn(argv, { buffer_bytes = 0 })
+    local pid = token.id
     self._procs[k] = pid
     self._langs[k] = lang
     -- Register an output + lifecycle listener. The event bus calls

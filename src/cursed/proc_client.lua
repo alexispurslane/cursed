@@ -138,11 +138,12 @@ end
 --- Wire the facade against the SharedState + editor (called once from
 --- main.lua after the inbox wake is registered). The editor is needed
 --- so spawn can register per-procid `process_in:<id>` listeners.
----@param editor table
 ---@param shared_state SharedState
-function M.setup(editor, shared_state)
+---@param es table
+function M.setup(shared_state, es)
     M._ss = shared_state
-    M._editor = editor
+    M._es = es
+    M._pending = {}
     M._next_procid = 1
 end
 
@@ -152,28 +153,32 @@ end
 --- how much stdout/stderr the lane accumulates before flushing a
 --- single chunk to main (default 8192; 0 = flush every read, i.e. no
 --- buffering). Larger values protect main from chatty programs at the
---- cost of output latency. Returns the assigned procid immediately
---- (monotonic); spawn failure is reported later via the
---- `process_out:<procid>` event with kind=failed.
+--- cost of output latency.
+---
+--- Returns an AsyncToken whose `.id` field contains the assigned procid
+--- (monotonic, available immediately). The token resolves on the
+--- `process_start:<procid>` event: on success the payload is
+--- `{ procid = procid }`; on failure it is `{ err = "spawn failed" }`.
+--- Callers that don't need spawn confirmation can ignore the token and
+--- use `token.id` for immediate procid access.
 ---@param argv string[]|table  argv[0] is the program
 ---@param opts table|nil  { env?: table<string,string>, cwd?: string, buffer_bytes?: integer }
----@return integer procid
+---@return AsyncToken token  token.id is the procid
 function M.spawn(argv, opts)
     opts = opts or {}
     local procid = M._next_procid
     M._next_procid = procid + 1
-    M._editor:track_pending_op(constants.LANE_IDX_PROC, procid)
+    M._pending[procid] = true
 
     -- Register the process_in:<procid> listener that forwards STDIN.
     -- bytes (string) → write; nil/false → EOF.
-    local editor = M._editor
     local name = "process_in:" .. procid
     local fn = function(_editor, bytes)
         push_stdin(procid, bytes)
     end
     _in_handlers[procid] = fn
-    if editor then
-        editor.event_system:on(name, fn)
+    if M._es then
+        M._es:on(name, fn)
     end
 
     local spec = {
@@ -185,11 +190,18 @@ function M.spawn(argv, opts)
     local spec_json, err = json.encode(spec)
     if spec_json == nil then
         log.warn("proc", "spawn spec encode failed", { procid = procid, error = err })
-        return procid
+        M._pending[procid] = nil
+        local token = setmetatable({ id = procid, _resolved = true, _payload = { err = "spec encode failed" } }, {})
+        return token
     end
     push_spawn(procid, spec_json)
     log.info("proc", "spawn requested", { procid = procid, argv0 = argv[1] })
-    return procid
+    local async = require("cursed.async")
+    local token = async.token(M._es, "process_start:" .. procid, function()
+        M._pending[procid] = nil
+    end)
+    token.id = procid
+    return token
 end
 
 --- Send bytes to a process's STDIN. nil/false closes stdin (EOF).
@@ -214,33 +226,62 @@ end
 ---@param procid integer
 function M.on_proc_exit(procid)
     local fn = _in_handlers[procid]
-    if fn ~= nil and M._editor then
-        M._editor.event_system:off("process_in:" .. procid, fn)
+    if fn ~= nil and M._es then
+        M._es:off("process_in:" .. procid, fn)
     end
     _in_handlers[procid] = nil
+end
+
+--- Clear a pending operation (called by main.lua on EXIT/TERM).
+---@param procid integer
+function M.clear(procid)
+    M._pending[procid] = nil
 end
 
 --- Shutdown: best-effort SIGTERM of every live proc + listener detach.
 --- Normally the lane handles process teardown on MSG_SHUTDOWN; this
 --- only clears the main-side listener registry.
 function M.shutdown()
-    if M._editor then
+    if M._es then
         for procid, fn in pairs(_in_handlers) do
-            M._editor.event_system:off("process_in:" .. procid, fn)
+            M._es:off("process_in:" .. procid, fn)
         end
     end
     _in_handlers = {}
 end
 
+--- Emit synthetic resolution events for every still-pending spawn when
+--- the proc lane dies, so awaiting coroutines resume. Emits both
+--- process_start (for spawn tokens) and process_out (for backwards
+--- compat with lifecycle listeners).
+function M.flush_pending()
+    for procid in pairs(M._pending) do
+        M._es:emit("process_start:" .. tostring(procid), { err = "lane restarted" })
+        M._es:emit("process_out:" .. tostring(procid), "failed", 0)
+    end
+    M._pending = {}
+end
+
+---@return integer
+function M.pending_count()
+    local n = 0
+    for _ in pairs(M._pending) do
+        n = n + 1
+    end
+    return n
+end
+
 --- Reinitialize after a lane restart. All child processes died with the
 --- lane; clean up main-side listener state.
----@param editor table
----@param ss SharedState
-function M.reinitialize(editor, ss)
-    M._ss = ss
-    M._editor = editor
+---@param shared_state SharedState
+---@param _editor table
+---@param es table
+function M.reinitialize(shared_state, _editor, es)
+    M._ss = shared_state
+    M._es = es
     M.shutdown()
     -- _next_procid stays monotonic; don't reset it.
 end
 
+require("cursed.lane_registry").register(constants.LANE_IDX_PROC, M)
 return M

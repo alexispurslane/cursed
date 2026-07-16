@@ -24,12 +24,18 @@ local function ss()
 	return M._ss
 end
 
---- Wire the facade against the SharedState + editor.
----@param editor table
+--- Returns true once setup() has been called (task lane is available).
+function M.is_setup()
+	return M._ss ~= nil
+end
+
+--- Wire the facade against SharedState + EventSystem.
 ---@param shared_state SharedState
-function M.setup(editor, shared_state)
+---@param es table
+function M.setup(shared_state, es)
 	M._ss = shared_state
-	M._editor = editor
+	M._es = es
+	M._pending = {}
 	M._next_task_id = 1
 end
 
@@ -60,7 +66,7 @@ function M.send_task(fn, args, opts)
 
 	local task_id = M._next_task_id
 	M._next_task_id = task_id + 1
-	M._editor:track_pending_op(constants.LANE_IDX_TASK, task_id)
+	M._pending[task_id] = true
 
 	local bc = string.dump(fn, true)
 	local requires = (opts and opts.requires) or {}
@@ -87,17 +93,43 @@ function M.send_task(fn, args, opts)
 
 	log.info("task", "submitted", { task_id = task_id, bc_len = #bc, args_len = #args_json })
 
-	return async.token(M._editor.event_system, "task_result:" .. tostring(task_id))
+	return async.token(M._es, "task_result:" .. tostring(task_id))
+end
+
+--- Remove a task from the pending set (called by main.lua on result).
+---@param task_id integer
+function M.clear(task_id)
+	M._pending[task_id] = nil
+end
+
+--- Emit synthetic error events for all still-pending tasks after
+--- a task lane restart, so awaiting coroutines resume.
+function M.flush_pending()
+	for task_id in pairs(M._pending) do
+		M._es:emit("task_result:" .. tostring(task_id), { success = false, error = "task lane restarted" })
+	end
+	M._pending = {}
+end
+
+---@return integer
+function M.pending_count()
+	local n = 0
+	for _ in pairs(M._pending) do
+		n = n + 1
+	end
+	return n
 end
 
 --- Reinitialize after a lane restart. The task lane is stateless
 --- (fire-and-forget bytecode). Just restore the shared state reference.
----@param editor table
----@param ss SharedState
-function M.reinitialize(editor, ss)
-	M._ss = ss
-	M._editor = editor
+---@param shared_state SharedState
+---@param _editor table
+---@param _es table
+function M.reinitialize(shared_state, _editor, _es)
+	M._ss = shared_state
+	M._es = _es
 	-- next_task_id stays monotonic; don't reset.
 end
 
+require("cursed.lane_registry").register(constants.LANE_IDX_TASK, M)
 return M

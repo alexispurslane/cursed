@@ -115,6 +115,7 @@
 #define MSG_PROC_KILL     20 /* main → proc: ptr = struct ProcKillReq*  */
 #define MSG_PROC_OUTPUT   21 /* proc → main: ptr = struct ProcOutput* */
 #define MSG_PROC_EXIT     22 /* proc → main: ptr = struct ProcExit*   */
+#define MSG_PROC_SPAWNED  35 /* proc → main: ptr = struct ProcSpawned* */
 
 /* ── Task lane payloads ───────────────────────────────────────────── */
 
@@ -596,6 +597,16 @@ struct ProcExit {
     uint8_t  kind;      /* 0=exited 1=signaled 2=failed */
     uint8_t  _pad[3];
     uint32_t code;      /* exit status (exited) | signal number (signaled) | errno (failed) */
+};
+
+/* MSG_PROC_SPAWNED (proc → main): a spawn attempt completed. Carries
+ * the procid + an ok flag (1 = fork/exec succeeded, 0 = failure).
+ * Lane allocates; main frees after emitting the process_start event.
+ * This replaces MSG_PROC_EXIT with kind=FAILED for spawn failures. */
+struct ProcSpawned {
+    uint32_t procid;
+    uint8_t  ok;        /* 1 = spawned successfully, 0 = failed */
+    uint8_t  _pad[3];
 };
 
 #endif /* SHARED_STATE_H */

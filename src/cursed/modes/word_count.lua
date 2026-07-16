@@ -19,6 +19,7 @@ local IH = require("cursed.input_hook")
 ---@diagnostic disable: inject-field
 
 local wc = require("cursed.word_count")
+local task_client = require("cursed.task_client")
 local async = require("cursed.async")
 
 --- The counting function, defined at module level so string.dump can
@@ -40,7 +41,7 @@ local function dispatch(ctx)
 	local view = ctx.view
 	local editor = ctx.editor
 
-	if not editor.task then
+	if not task_client.is_setup() then
 		-- No task lane (headless / minimal setup). Fall back to sync.
 		local stats = wc.compute(view)
 		view._wc_stats = stats
@@ -48,7 +49,7 @@ local function dispatch(ctx)
 		return true
 	end
 
-	local token = editor.task.send_task(_count_fn, { lines = ctx.lines }, { requires = { "cursed.word_count" } })
+	local token = task_client.send_task(_count_fn, { lines = ctx.lines }, { requires = { "cursed.word_count" } })
 	local result = async.await(token)
 
 	-- Stale result: a newer recache happened while we were in flight.

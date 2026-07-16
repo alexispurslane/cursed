@@ -411,6 +411,7 @@ return {
     MSG_PROC_KILL = shared_ffi.MSG_PROC_KILL,
     MSG_PROC_OUTPUT = shared_ffi.MSG_PROC_OUTPUT,
     MSG_PROC_EXIT = shared_ffi.MSG_PROC_EXIT,
+    MSG_PROC_SPAWNED = shared_ffi.MSG_PROC_SPAWNED,
     MSG_TASK_SUBMIT = shared_ffi.MSG_TASK_SUBMIT,
     MSG_TASK_RESULT = shared_ffi.MSG_TASK_RESULT,
     MSG_FILE_DELETE = shared_ffi.MSG_FILE_DELETE,

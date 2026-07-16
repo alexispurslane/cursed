@@ -272,6 +272,13 @@ struct ProcExit {
     uint32_t code;
 };
 
+/* MSG_PROC_SPAWNED (proc → main): spawn attempt result. */
+struct ProcSpawned {
+    uint32_t procid;
+    uint8_t  ok;
+    uint8_t  _pad[3];
+};
+
 /* ── File-op payloads (mirror shared_state.h) ──────────────────── */
 
 /* MSG_FILE_RENAME (main → IO): struct followed by two path byte
@@ -368,6 +375,7 @@ local MSG_PROC_STDIN = 19 -- main → proc: ptr = struct ProcStdinReq*
 local MSG_PROC_KILL = 20 -- main → proc: ptr = struct ProcKillReq*
 local MSG_PROC_OUTPUT = 21 -- proc → main: ptr = struct ProcOutput*
 local MSG_PROC_EXIT = 22 -- proc → main: ptr = struct ProcExit*
+local MSG_PROC_SPAWNED = 35 -- proc → main: ptr = struct ProcSpawned*
 
 local MSG_TASK_SUBMIT = 33 -- main → task: ptr = struct TaskSubmit*
 local MSG_TASK_RESULT = 34 -- task → main: ptr = struct TaskResult*
@@ -435,6 +443,7 @@ return {
 	MSG_PROC_KILL = MSG_PROC_KILL,
 	MSG_PROC_OUTPUT = MSG_PROC_OUTPUT,
 	MSG_PROC_EXIT = MSG_PROC_EXIT,
+	MSG_PROC_SPAWNED = MSG_PROC_SPAWNED,
 	MSG_TASK_SUBMIT = MSG_TASK_SUBMIT,
 	MSG_TASK_RESULT = MSG_TASK_RESULT,
 	MSG_FILE_DELETE = MSG_FILE_DELETE,

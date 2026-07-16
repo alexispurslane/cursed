@@ -132,4 +132,56 @@ function async.token(es, ev, on_complete)
     return { _es = es, _ev = ev, _on_complete = on_complete }
 end
 
+--- Consume an AsyncToken without awaiting it.
+---
+--- Registers a one-shot event handler that cleans up the token's
+--- state (runs on_complete, e.g. clearing pending ops) and optionally
+--- calls `callback` with the event payload. Use this in non-coroutine
+--- contexts (minibuffer callbacks, startup code) where async.await
+--- is not available.
+---
+--- When no callback is given, the token is consumed as fire-and-forget:
+--- the one-shot still fires, on_complete still runs, but the payload
+--- is discarded. This lets callers keep using the standard send_*
+--- pattern across all contexts without worrying about pending cleanup.
+---
+--- For resolved tokens (async.resolved), callback is invoked
+--- immediately with the already-known payload.
+---
+---@param token AsyncToken
+---@param callback? fun(...:any)  called with the event payload args
+function async.unwrap(token, callback)
+    -- Resolved token: fire-and-forget immediately.
+    if token._resolved then
+        if token._on_complete then
+            token._on_complete()
+        end
+        if callback then
+            callback(token._payload)
+        end
+        return
+    end
+
+    local es = token._es
+    local ev = token._ev
+    if not es or not ev then
+        -- No event system or event name: just run the cleanup.
+        if token._on_complete then
+            token._on_complete()
+        end
+        return
+    end
+
+    local handler
+    handler = es:on(ev, function(_, ...)
+        es:off(ev, handler)
+        if token._on_complete then
+            token._on_complete()
+        end
+        if callback then
+            callback(...)
+        end
+    end)
+end
+
 return async
