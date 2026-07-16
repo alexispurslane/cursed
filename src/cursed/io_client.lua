@@ -378,6 +378,9 @@ end
 --- replies to the editor event bus.
 ---@param editor table
 function M.drain_inbox(editor)
+	if M._ss == nil then
+		return
+	end
 	drain_generic(M._ss, M._ss._ptr.inboxes[LANE], editor, {
 		[constants.MSG_FILE_LOADED_V2] = function(msg)
 			if msg.ptr == nil then

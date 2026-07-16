@@ -31,31 +31,20 @@ local io_client = require("cursed.io_client")
 
 local Config = require("cursed.config")
 
---- Prime the editor's base keybindings from the defaults table.
---- Separates the __printable handler and stores the base bindings,
---- then rebuilds the base trie. Called BEFORE Config.load() so that
---- init.lua (and any `editor:global_set_key` it issues) operates on a
---- fully-initialized editor and is applied for real rather than
+--- Prime the editor's base keymap from the defaults table.
+--- Stores the full nested keymap table directly as _base_keymap,
+--- extracting __printable separately. Called BEFORE Config.load() so
+--- that init.lua (and any `editor:global_set_key` it issues) operates
+--- on a fully-initialized editor and is applied for real rather than
 --- clobbered by a later trie build. The returned `config.keybindings`
 --- table is applied on top via `editor:global_set_key` after load.
 ---@param editor Editor the editor to prime
 local function prime_default_keybindings(editor)
 	local defaults = require("cursed.default_keybindings")
-	local bindings = {}
-	local printable_fn ---@type function?
-	for chord, func in pairs(defaults) do
-		if chord == "__printable" then
-			---@cast func function
-			printable_fn = func
-		else
-			bindings[chord] = func
-		end
-	end
-	editor._base_keybindings = bindings
-	editor._printable_fn = printable_fn
-	editor:rebuild_base_trie()
-	editor._active_trie = editor._base_trie
-	editor._chord_for_command = keybind.build_chord_for_command(bindings)
+	editor._base_keymap = keybind.Keymap.shallow_copy(defaults)
+	editor._printable_fn = editor._base_keymap.__printable
+	editor._keymap_chain = { editor._base_keymap }
+	editor._chord_for_command = keybind.Keymap.build_chord_for_command(editor._base_keymap)
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -226,144 +215,196 @@ local function _handle_universal_arg(editor, token)
 	return "commit"
 end
 
---- Phase 5: Trie dispatch (the ::feed_trie:: section).
---- Handles which-key paging, chord lookup, command dispatch,
---- and prefix accumulation.
+--- Schedule a background task that resets the current prefix after ms milliseconds.
 ---@param editor Editor
----@param view View|nil
----@param trie table
----@param key_state table
----@param key_node table
----@param token string|nil
----@param in_chord boolean
----@return table key_state
----@return table key_node
----@return string|nil quit
-local function _dispatch_trie(editor, view, trie, key_state, key_node, token, in_chord)
-	-- Which-key paging while a prefix is held
-	if in_chord and token ~= nil and WhichKey.try_page(editor, token) then
-		return key_state, key_node, nil
-	end
-
-	local child = key_node.children[token]
-	if child == nil then
-		key_state = {}
-		key_node = trie
-		editor.universal_args = nil
-		if in_chord then
-			editor.status_message = "undefined chord"
-		end
-	elseif child.action ~= nil then
-		-- Full match: dispatch the command
-		local act = child.action
-		local cmd_name
-		if type(act) == "string" then
-			cmd_name = act
-			act = commands[cmd_name]
-			if not act then
-				log.error("main", "unknown command", { name = cmd_name })
-				editor.status_message = "unknown command: " .. cmd_name
-				key_state = {}
-				key_node = trie
-			end
-		end
-
-		editor._kill_called = false
-
-		if act then
-			editor.event_system:emit("pre_command_hook", cmd_name, view)
-			local mb_was_active_before = editor.minibuffer and editor.minibuffer.active
-			local info = commands.get_cmd_info(act)
-			local ok, result, is_async
-			if info and info.isvararg and editor.universal_args then
-				local gap = math.max(0, info.nparams - 2)
-				---@type table
-				local args = editor.universal_args
-				local co
-				if gap == 0 then
-					co = coroutine.create(function()
-						return act(view, editor, unpack(args))
-					end)
-				else
-					local call_args = { view, editor }
-					for _ = 1, gap do
-						call_args[#call_args + 1] = nil
-					end
-					for i = 1, #args do
-						---@cast args table
-						call_args[#call_args + 1] = args[i]
-					end
-					co = coroutine.create(function()
-						return act(unpack(call_args))
-					end)
-				end
-				ok, result = coroutine.resume(co)
-				is_async = coroutine.status(co) == "suspended"
-			else
-				local co = coroutine.create(function()
-					return act(view, editor)
-				end)
-				ok, result = coroutine.resume(co)
-				is_async = coroutine.status(co) == "suspended"
-			end
-			if is_async then
-				-- Handler called async.await() — coroutine will resume
-				-- when the event fires (inside drain_inbox). Treat as
-				-- successful dispatch.
-				ok, result = true, nil
-			end
-			if not ok then
-				log.error("main", "keybinding error", { error = tostring(result) })
-				editor.status_message = "error: " .. tostring(result)
-			end
-			editor._last_was_kill = editor._kill_called
-			editor._kill_called = false
-			if
-				editor._recording
-				and cmd_name
-				and cmd_name ~= "start_kmacro"
-				and cmd_name ~= "end_kmacro"
-				and cmd_name ~= "run_kmacro"
-				and not mb_was_active_before
-			then
-				editor._recorded_commands[#editor._recorded_commands + 1] =
-					{ name = cmd_name, universal_args = editor.universal_args }
-			end
-			editor.event_system:emit("post_command_hook", cmd_name, view)
-			key_state = {}
-			key_node = trie
-			if result == "quit" then
-				return key_state, key_node, "quit"
-			end
-		end
-	elseif next(child.children) ~= nil then
-		-- Prefix match: accumulate
-		key_state[#key_state + 1] = token
-		key_node = child
-	else
-		-- Leaf with no action: reset
-		key_state = {}
-		key_node = trie
-	end
-
-	return key_state, key_node, nil
+---@param ms number timeout in milliseconds
+local function start_prefix_timeout(editor, ms)
+	local us = ms * 1000
+	editor._prefix_timeout_task = editor:schedule_after(us, function()
+		editor._current_keymap = nil
+		editor._prefix_tokens = {}
+		editor._prefix_timeout_task = nil
+	end)
 end
 
---- Process a key event token through the chord trie and editing logic.
+--- Cancel a running prefix timeout, if any.
+---@param editor Editor
+local function clear_prefix_timeout(editor)
+	if editor._prefix_timeout_task then
+		editor:cancel_task(editor._prefix_timeout_task)
+		editor._prefix_timeout_task = nil
+	end
+end
+
+--- Phase 5: Keymap dispatch via chain/prefix search.
+--- Replaces the old trie-based _dispatch_keymap.
 ---@param editor Editor
 ---@param view View|nil
----@param trie table root trie node
----@param key_state table accumulated key tokens
----@param key_node table current trie position
+---@param token string key token to look up
+---@param ch string|nil printable character (when is_printable)
+---@param is_printable boolean whether the event is a printable character
+---@return string|nil "quit" to exit, nil to continue
+local function dispatch_key(editor, view, token, ch, is_printable)
+	-- Which-key paging while a prefix is held
+	if editor._current_keymap ~= nil and token ~= nil and WhichKey.try_page(editor, token) then
+		return nil
+	end
+
+	local binding = nil
+
+	if editor._current_keymap ~= nil then
+		-- In prefix mode: search ONLY the current keymap
+		binding = rawget(editor._current_keymap, token)
+		if binding == nil then
+			binding = rawget(editor._current_keymap, "__printable")
+		end
+		if binding == nil then
+			binding = rawget(editor._current_keymap, "__default")
+		end
+	else
+		-- Top level: search _keymap_chain in order
+		local chain = editor._keymap_chain or {}
+		-- First pass: rawget token from each keymap
+		for _, km in ipairs(chain) do
+			binding = rawget(km, token)
+			if binding ~= nil then break end
+		end
+		-- Second pass: rawget __printable from each
+		if binding == nil then
+			for _, km in ipairs(chain) do
+				binding = rawget(km, "__printable")
+				if binding ~= nil then break end
+			end
+		end
+		-- Third pass: rawget __default from each
+		if binding == nil then
+			for _, km in ipairs(chain) do
+				binding = rawget(km, "__default")
+				if binding ~= nil then break end
+			end
+		end
+	end
+
+	-- No binding found
+	if binding == nil then
+		local was_in_chord = editor._current_keymap ~= nil
+		clear_prefix_timeout(editor)
+		editor._current_keymap = nil
+		editor._prefix_tokens = {}
+		editor.universal_args = nil
+		if was_in_chord then
+			editor.status_message = "undefined chord"
+		end
+		return nil
+	end
+
+	-- Prefix match (sub-keymap): descend
+	if type(binding) == "table" then
+		clear_prefix_timeout(editor)
+		editor._prefix_tokens[#editor._prefix_tokens + 1] = token
+		editor._current_keymap = binding
+		if type(binding.__timeout) == "number" then
+			start_prefix_timeout(editor, binding.__timeout)
+		end
+		return nil
+	end
+
+	-- Leaf: dispatch the command
+	clear_prefix_timeout(editor)
+	editor._current_keymap = nil
+	editor._prefix_tokens = {}
+
+	local act = binding
+	local cmd_name
+	if type(act) == "string" then
+		cmd_name = act
+		act = commands[cmd_name]
+		if not act then
+			log.error("main", "unknown command", { name = cmd_name })
+			editor.status_message = "unknown command: " .. cmd_name
+			return nil
+		end
+	end
+
+	editor._kill_called = false
+
+	if act then
+		editor.event_system:emit("pre_command_hook", cmd_name, view)
+		local mb_was_active_before = editor.minibuffer and editor.minibuffer.active
+		local info = commands.get_cmd_info(act)
+		local ok, result, is_async
+		if info and info.isvararg and editor.universal_args then
+			local gap = math.max(0, info.nparams - 2)
+			---@type table
+			local args = editor.universal_args
+			local co
+			if gap == 0 then
+				co = coroutine.create(function()
+					return act(view, editor, unpack(args))
+				end)
+			else
+				local call_args = { view, editor }
+				for _ = 1, gap do
+					call_args[#call_args + 1] = nil
+				end
+				for i = 1, #args do
+					---@cast args table
+					call_args[#call_args + 1] = args[i]
+				end
+				co = coroutine.create(function()
+					return act(unpack(call_args))
+				end)
+			end
+			ok, result = coroutine.resume(co)
+			is_async = coroutine.status(co) == "suspended"
+		else
+			local co = coroutine.create(function()
+				return act(view, editor)
+			end)
+			ok, result = coroutine.resume(co)
+			is_async = coroutine.status(co) == "suspended"
+		end
+		if is_async then
+			-- Handler called async.await() — coroutine will resume
+			-- when the event fires (inside drain_inbox). Treat as
+			-- successful dispatch.
+			ok, result = true, nil
+		end
+		if not ok then
+			log.error("main", "keybinding error", { error = tostring(result) })
+			editor.status_message = "error: " .. tostring(result)
+		end
+		editor._last_was_kill = editor._kill_called
+		editor._kill_called = false
+		if
+			editor._recording
+			and cmd_name
+			and cmd_name ~= "start_kmacro"
+			and cmd_name ~= "end_kmacro"
+			and cmd_name ~= "run_kmacro"
+			and not mb_was_active_before
+		then
+			editor._recorded_commands[#editor._recorded_commands + 1] =
+				{ name = cmd_name, universal_args = editor.universal_args }
+		end
+		editor.event_system:emit("post_command_hook", cmd_name, view)
+		if result == "quit" then
+			return "quit"
+		end
+	end
+
+	return nil
+end
+
+--- Process a key event token through the chord keymap and editing logic.
+---@param editor Editor
+---@param view View|nil
 ---@param token string key token from event_to_token
 ---@param ev any struct tb_event cdata
----@param printable_fn function|nil
----@return table key_state
----@return table key_node
 ---@return string|nil "quit" to exit
-local function process_key(editor, view, trie, key_state, key_node, token, ev, printable_fn)
+local function process_key(editor, view, token, ev)
 	local modified = keybind.is_modified(ev)
-	local in_chord = #key_state > 0
+	local in_chord = editor._current_keymap ~= nil
 	-- `_extend` is set true by a `*_select` command before it runs its
 	-- motion, so the motion's transient-anchor drop is suppressed for
 	-- that one gesture. Reset every keypress so it can't leak into a
@@ -374,43 +415,43 @@ local function process_key(editor, view, trie, key_state, key_node, token, ev, p
 
 	-- Phase 1: Special key intercepts (read-char, completion, query-replace, replace-regexp)
 	if _intercept_special_keys(editor, token, ch, is_printable) then
-		return key_state, key_node, nil
+		return nil
 	end
 
 	-- Phase 2: M-digit / M-- prefix argument accumulation
 	local sig = _handle_digit_arg(editor, token)
 	if sig == "done" then
-		return key_state, key_node, nil
+		return nil
 	elseif sig == "cancel" then
-		key_state = {}
-		key_node = trie
-		return key_state, key_node, nil
+		editor._current_keymap = nil
+		editor._prefix_tokens = {}
+		return nil
 	elseif sig == "commit" then
-		goto feed_trie
+		goto feed_keymap
 	end
 
 	-- Phase 3: Unmodified printable character handling
-	sig = _handle_printable(editor, view, ch, modified, in_chord, is_printable, printable_fn)
+	sig = _handle_printable(editor, view, ch, modified, in_chord, is_printable, editor._printable_fn)
 	if sig == "done" then
-		return key_state, key_node, nil
+		return nil
 	elseif sig == "trie" then
-		goto feed_trie
+		goto feed_keymap
 	end
 
 	-- Phase 4: Universal argument state machine
 	sig = _handle_universal_arg(editor, token)
 	if sig == "done" then
-		return key_state, key_node, nil
+		return nil
 	elseif sig == "cancel" then
-		key_state = {}
-		key_node = trie
-		return key_state, key_node, nil
+		editor._current_keymap = nil
+		editor._prefix_tokens = {}
+		return nil
 	elseif sig == "commit" then
-		goto feed_trie
+		goto feed_keymap
 	end
 
-	::feed_trie::
-	return _dispatch_trie(editor, view, trie, key_state, key_node, token, in_chord)
+	::feed_keymap::
+	return dispatch_key(editor, view, token, ch, is_printable)
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -727,6 +768,8 @@ local function main()
 	for chord, action in pairs(config.keybindings) do
 		editor:global_set_key(chord, action)
 	end
+	-- Sync _printable_fn after config overrides
+	editor._printable_fn = editor._base_keymap and editor._base_keymap.__printable
 	-- Mirror prefix: clone the ctrl-x subtree under an alternative
 	-- prefix (e.g. alt-q) for terminals that swallow bare C-x (Ghostty).
 	if config.mirror_prefix then
@@ -1113,30 +1156,26 @@ local function main()
 		end
 	end
 
-	-- Key chord state machine
-	local key_state = {} -- accumulated key tokens for current chord
-	local key_node = editor._active_trie -- current position in the trie
-
 	--- Sync the which-key hint state from the authoritative chord state.
 	--- Called after every process_key so the render_overlay listener
 	--- redraws (or hides) the popup. The popup shows while a prefix has
 	--- matched but the chord is unresolved.
 	local function sync_whichkey()
-		if #key_state > 0 and next(key_node.children) ~= nil then
+		if editor._current_keymap ~= nil and next(editor._current_keymap) ~= nil then
 			-- Reset the page index whenever the prefix node changes
 			-- (i.e. the chord advanced or branched) so paging never
 			-- points at a stale page.
-			if editor._whichkey_node ~= key_node then
+			if editor._whichkey_keymap ~= editor._current_keymap then
 				editor._whichkey_page = 0
 			end
-			editor._whichkey_node = key_node
+			editor._whichkey_keymap = editor._current_keymap
 			local parts = {}
-			for i = 1, #key_state do
-				parts[#parts + 1] = keybind.format_token(key_state[i])
+			for i = 1, #(editor._prefix_tokens or {}) do
+				parts[#parts + 1] = keybind.format_token(editor._prefix_tokens[i])
 			end
 			editor._whichkey_prefix = table.concat(parts, " ")
 		else
-			editor._whichkey_node = nil
+			editor._whichkey_keymap = nil
 			editor._whichkey_prefix = nil
 			editor._whichkey_page = 0
 		end
@@ -1388,11 +1427,11 @@ local function main()
 				editor.status_message = nil -- clear transient status
 				editor._eval_result = nil -- clear eval result
 
-				-- If the active trie was rebuilt (mode change), reset chord state
-				if editor._trie_changed then
-					key_state = {}
-					key_node = editor._active_trie
-					editor._trie_changed = nil
+				-- If the keymap chain was rebuilt (mode change), reset chord state
+				if editor._keymap_chain_changed then
+					editor._current_keymap = nil
+					editor._prefix_tokens = {}
+					editor._keymap_chain_changed = nil
 				end
 
 				-- ESC/Alt disambiguation
@@ -1403,18 +1442,7 @@ local function main()
 						follow.mod = bit.bor(tonumber(follow.mod), tb.mod_alt)
 						local token = keybind.event_to_token(follow)
 						if token ~= nil then
-							local new_state, new_node, quit = process_key(
-								editor,
-								focused_view,
-								editor._active_trie,
-								key_state,
-								key_node,
-								token,
-								follow,
-								editor._printable_fn
-							)
-							key_state = new_state
-							key_node = new_node
+							local quit = process_key(editor, focused_view, token, follow)
 							sync_whichkey()
 							if quit then
 								editor:request_quit()
@@ -1423,18 +1451,7 @@ local function main()
 						end
 					else
 						-- Standalone Escape
-						local new_state, new_node, quit = process_key(
-							editor,
-							focused_view,
-							editor._active_trie,
-							key_state,
-							key_node,
-							"escape",
-							ev,
-							editor._printable_fn
-						)
-						key_state = new_state
-						key_node = new_node
+						local quit = process_key(editor, focused_view, "escape", ev)
 						sync_whichkey()
 						if quit then
 							editor:request_quit()
@@ -1444,18 +1461,7 @@ local function main()
 				else
 					local token = keybind.event_to_token(ev)
 					if token ~= nil then
-						local new_state, new_node, quit = process_key(
-							editor,
-							focused_view,
-							editor._active_trie,
-							key_state,
-							key_node,
-							token,
-							ev,
-							editor._printable_fn
-						)
-						key_state = new_state
-						key_node = new_node
+						local quit = process_key(editor, focused_view, token, ev)
 						sync_whichkey()
 						if quit then
 							editor:request_quit()
@@ -1553,7 +1559,7 @@ local function main()
 			end
 			::continue_drain::
 			profile.span("main", "process_key_one", key_t0, { had_input = had_input })
-		until editor._quit_requested or #key_state == 0
+		until editor._quit_requested or editor._current_keymap == nil
 		profile.span("main", "process_keys", keys_t0, { count = key_count })
 		-- When in a chord (prefix matched), stop draining — we need
 		-- select() to block for the next key. When quit was requested

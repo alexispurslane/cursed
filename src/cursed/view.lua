@@ -72,6 +72,7 @@ local shared = require("cursed.shared")
 ---@field _pending_apply_uri string|nil the uri whose edits are parked in _pending_apply_edits (for the done continuation)
 ---@field _pending_apply_done fun(ok:boolean)|nil continuation run by _drain_pending_apply_edits to record touched/skipped + fire apply_workspace_edit's on_complete
 ---@field _major_modes ModeInstance[] active mode instances (ordered; minor modes appended, later overrides earlier)
+---@field _keymap_chain table[]|nil ordered keymap chain for this view (mode_kms prepended before base_km)
 ---@field tab_width integer visual width of a tab stop
 ---@field expand_tab boolean if true, Tab inserts spaces instead of \t
 ---@field indent_width integer number of columns for auto-indent
@@ -169,6 +170,7 @@ function View.new(buffer)
 		_scroll_guard_col = nil,
 		file_loaded = false,
 		_major_modes = {},
+		_keymap_chain = nil,
 		tab_width = 8,
 		expand_tab = false,
 		indent_width = 8,
@@ -943,6 +945,34 @@ function View:_emit_mode_event(name, instance)
 	end
 end
 
+--- Rebuild the keymap chain from this view's mode stack and the given
+--- base keymap. Builds _keymap_chain as an ordered array with mode
+--- keymaps prepended before the base keymap (mode[#modes] first,
+--- mode[1] last, base_km last). Calls ensure_keymap on each mode if
+--- its keymap hasn't been built yet. Sets editor._keymap_chain_changed
+--- so the main loop can reset chord state on the next keypress.
+---@param base_km table the base (non-mode) keymap
+function View:rebuild_keymap_chain(base_km)
+	local chain = { base_km }
+	if #self._major_modes > 0 then
+		-- Prepend each mode's keymap: mode[#modes] first, mode[1] last
+		for i = #self._major_modes, 1, -1 do
+			local mode = self._major_modes[i]
+			mode:ensure_keymap(base_km)
+			table.insert(chain, 1, mode.keymap)
+		end
+	end
+	self._keymap_chain = chain
+	-- Notify the editor the chain changed (so main loop resets chord state).
+	-- If this view is the active one, also update the editor's chain pointer.
+	if self.editor then
+		self.editor._keymap_chain_changed = true
+		if self.editor:current_view() == self then
+			self.editor._keymap_chain = chain
+		end
+	end
+end
+
 --- Set the major mode instances for this view, applying indent settings.
 --- Later modes override earlier ones. Pass an empty table to clear.
 --- Does NOT emit mode_enter/mode_exit (use activate_major_mode /
@@ -1005,9 +1035,9 @@ function View:set_major_modes(modes)
 	-- Rebuild the syntax highlighter from the highest-precedence mode
 	-- that declares a tree-sitter language.
 	self:_rebuild_highlighter()
-	-- Rebuild the active trie if this view is currently focused
-	if self.editor then
-		self.editor:rebuild_active_trie()
+	-- Rebuild the keymap chain if this view is currently focused
+	if self.editor and self.editor._base_keymap then
+		self:rebuild_keymap_chain(self.editor._base_keymap)
 	end
 	self._cached_textobjects = nil -- invalidated on mode change
 end

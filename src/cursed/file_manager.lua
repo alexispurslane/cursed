@@ -494,7 +494,7 @@ local FileManager = Mode.new({
 		-- Fetch entries async; rebuild will show "Loading…" until the reply.
 		fetch_dir(view)
 	end,
-	keybindings = {
+	keymap = {
 		["up"] = handle_up,
 		["ctrl-p"] = handle_up,
 		["down"] = handle_down,

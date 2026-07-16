@@ -406,7 +406,7 @@ local function hover_suppressed(ed)
 	if ed.minibuffer and ed.minibuffer.active then
 		return true
 	end
-	if ed._whichkey_node ~= nil then
+	if ed._whichkey_keymap ~= nil then
 		return true
 	end
 	if ed.completion_menu and ed.completion_menu.active then
@@ -1089,7 +1089,7 @@ local function on_render_diagnostic_hover(ed)
 	if visible and ed.minibuffer and ed.minibuffer.active then
 		visible = false
 	end
-	if visible and ed._whichkey_node ~= nil then
+	if visible and ed._whichkey_keymap ~= nil then
 		visible = false
 	end
 	ed._diag_hover_active_sig = active_sig

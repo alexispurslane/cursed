@@ -1,17 +1,18 @@
---- Keybind engine: chord parsing, event-to-token mapping, and trie-based key binding.
+--- Keybind engine: chord parsing, event-to-token mapping, and nested-keymap key binding.
 ---
 --- Usage:
 ---   local keybind = require("cursed.keybind")
 ---
 ---   local tokens = keybind.parse_chord("ctrl-x alt-y z")
----   local trie = keybind.Trie.build({
----     ["ctrl-x ctrl-s"] = function() save() end,
----     ["ctrl-q"]        = function() quit() end,
+---   local km = keybind.Keymap.shallow_copy({
+---     ["ctrl-x"] = { ["ctrl-s"] = "save_file", ["ctrl-c"] = "quit" },
+---     ["ctrl-q"] = "quit",
 ---   })
----   local result = trie:lookup(tokens)
+---   local action = km["ctrl-x"]["ctrl-s"]
 
 local bit = require("bit")
 local tonumber = tonumber
+local log = require("cursed.log")
 
 ----------------------------------------------------------------------------------------------------
 -- Constants (matching termbox2.h)
@@ -305,102 +306,198 @@ local function is_modified(ev)
 end
 
 ----------------------------------------------------------------------------------------------------
--- Trie class
+-- Keymap API (Emacs-style nested keymap tables)
 ----------------------------------------------------------------------------------------------------
 
----@class keybind.Trie
----@field action string|function|nil command name (string) or function to call if this node is a complete chord
----@field children table<string, keybind.Trie> child nodes keyed by token
-local Trie = {}
-Trie.__index = Trie
+---@section keybind.Keymap
 
---- Create an empty trie node.
----@return keybind.Trie
-function Trie:new()
-    return setmetatable({ action = nil, children = {} }, self)
+-- Forward declaration for format_chord (defined after the Keymap section
+-- but used by Keymap_build_chord_for_command via closure upvalues).
+local format_chord
+
+--- Create an empty keymap table.
+---@return table
+local function Keymap_new()
+    return {}
 end
 
---- Add a chord (sequence of tokens) with its action to the trie.
+--- Add a key binding (sequence of tokens) with its action to a keymap.
+--- Walks or creates nested sub-keymaps for each token in the sequence,
+--- then sets the final token to the given action. If an intermediate
+--- node is currently a command (string/function), it is replaced with
+--- an empty table (logged via log.warn).
+---@param km table keymap table
 ---@param tokens string[] array of key token strings (from parse_chord)
----@param act string|function command name or function to call when the full chord is matched
-function Trie:add(tokens, act)
-    local node = self
+---@param action string|function command name or function
+local function Keymap_add(km, tokens, action)
+    local node = km
     for i = 1, #tokens do
         local tok = tokens[i]
-        if not node.children[tok] then
-            node.children[tok] = Trie:new()
+        if i == #tokens then
+            node[tok] = action
+        else
+            if node[tok] == nil then
+                node[tok] = {}
+            elseif type(node[tok]) ~= "table" then
+                log.warn("keybind", "overwriting command with prefix", { token = tok })
+                node[tok] = {}
+            end
+            node = node[tok]
         end
-        node = node.children[tok]
     end
-    node.action = act
 end
 
---- Walk the trie with a sequence of tokens.
---- Walk the trie with a sequence of tokens or a single token string.
----@param tokens string|string[] key token string or array of key token strings
----@return function|nil action
----@return boolean continued true if a longer chord might match
-function Trie:lookup(tokens)
-    local node = self
+--- Add a key binding with base-keymap inheritance.
+--- Like Keymap.add, but when a prefix exists in both `mode_km` and
+--- `base_km`, the intermediate sub-keymap is wrapped with
+--- `setmetatable({}, {__index = base_sub})` so lookups fall through
+--- to the base when the mode prefix has no explicit binding.
+---@param mode_km table mode-specific keymap
+---@param base_km table base keymap
+---@param tokens string[] array of key token strings
+---@param action string|function command name or function
+local function Keymap_add_with_base(mode_km, base_km, tokens, action)
+    local node = mode_km
+    ---@type table|nil
+    local base_node = base_km
     for i = 1, #tokens do
         local tok = tokens[i]
-        local child = node.children[tok]
-        if not child then
-            return nil, false
+        if i == #tokens then
+            node[tok] = action
+        else
+            if node[tok] == nil then
+                node[tok] = {}
+            elseif type(node[tok]) ~= "table" then
+                log.warn("keybind", "overwriting command with prefix", { token = tok })
+                node[tok] = {}
+            end
+            -- Wrap newly created sub-keymap with __index inheritance
+            if base_node and type(base_node[tok]) == "table" then
+                local sub = node[tok]
+                if type(sub) == "table" and getmetatable(sub) == nil then
+                    setmetatable(sub, { __index = base_node[tok] })
+                end
+            end
+            node = node[tok]
+            local next_base = base_node and base_node[tok]
+            base_node = (type(next_base) == "table") and next_base or nil
         end
-        node = child
     end
-    if node.action then
-        return node.action, next(node.children) ~= nil
-    end
-    return nil, next(node.children) ~= nil
 end
 
---- Reset the trie (no-op: the trie is stateless).
-function Trie:reset() end
-
---- Walk the trie and return the action and whether more keys could extend.
----@param tokens string|string[]
----@return function|nil action
----@return boolean continued
-function Trie:lookup_with_continuation(tokens)
-    local node = self
-    for i = 1, #tokens do
-        local tok = tokens[i]
-        local child = node.children[tok]
-        if not child then
-            return nil, false
-        end
-        node = child
+--- Shallow-copy a keymap spec table. Top-level keys are copied; sub-keymaps
+--- are shared by reference (intentional — modes need __index to point at live
+--- base subtrees, not stale snapshots).
+---@param spec table nested keymap spec
+---@return table runtime keymap
+local function Keymap_shallow_copy(spec)
+    local km = {}
+    for k, v in pairs(spec) do
+        km[k] = v
     end
-    if node.action then
-        return node.action, next(node.children) ~= nil
-    end
-    return nil, next(node.children) ~= nil
+    return km
 end
 
---- Build a trie from a bindings table.
----@param bindings table<string, string|function> chord_string → command name or function
----@return keybind.Trie
-function Trie.build(bindings)
-    local root = Trie:new()
-    for chord_str, func in pairs(bindings) do
-        local tokens, err = parse_chord(chord_str)
-        if not tokens then
-            io.stderr:write(("keybind: skipping bad chord %q: %s\n"):format(chord_str, err))
-            goto continue
+--- Recursively walk a nested keymap and build a command_name → formatted
+--- chord map (shortest chord per command, ties broken lexicographically).
+--- The optional `prefix` is a token array prepended to every chord found
+--- (used internally for recursion; external callers may pass nil).
+---@param km table nested keymap
+---@param prefix string[]|nil optional token prefix for recursive calls
+---@return table<string, string> command_name → formatted_chord
+local function Keymap_build_chord_for_command(km, prefix)
+    local best = {}
+    local parts = {}
+    if prefix then
+        for _, p in ipairs(prefix) do
+            parts[#parts + 1] = p
         end
-        root:add(tokens, func)
-        ::continue::
     end
-    return root
+
+    local function walk(node)
+        for tok, val in pairs(node) do
+            if type(tok) == "string" then
+                if type(val) == "string" then
+                    parts[#parts + 1] = tok
+                    local chord_str = table.concat(parts, " ")
+                    local formatted = format_chord(chord_str)
+                    local existing = best[val]
+                    if existing == nil
+                        or #formatted < #existing
+                        or (#formatted == #existing and formatted < existing)
+                    then
+                        best[val] = formatted
+                    end
+                    parts[#parts] = nil
+                elseif type(val) == "table" then
+                    parts[#parts + 1] = tok
+                    walk(val)
+                    parts[#parts] = nil
+                end
+                -- Skip functions (no command name)
+            end
+        end
+        -- Walk inherited keys (from __index metatable chain)
+        local mt = getmetatable(node)
+        local inherited = mt and type(mt.__index) == "table" and mt.__index or nil
+        if inherited then
+            for tok, val in pairs(inherited) do
+                if type(tok) == "string" and rawget(node, tok) == nil then
+                    if type(val) == "string" then
+                        parts[#parts + 1] = tok
+                        local chord_str = table.concat(parts, " ")
+                        local formatted = format_chord(chord_str)
+                        local existing = best[val]
+                        if existing == nil
+                            or #formatted < #existing
+                            or (#formatted == #existing and formatted < existing)
+                        then
+                            best[val] = formatted
+                        end
+                        parts[#parts] = nil
+                    elseif type(val) == "table" then
+                        parts[#parts + 1] = tok
+                        walk(val)
+                        parts[#parts] = nil
+                    end
+                end
+            end
+        end
+    end
+
+    walk(km)
+    return best
 end
+
+----------------------------------------------------------------------------------------------------
+-- deep_copy (deep-copy a keymap table)
+----------------------------------------------------------------------------------------------------
+
+--- Deep-copy a keymap table, recursively copying nested sub-keymaps
+--- (preserving metatables for __index inheritance).
+---@param t table
+---@return table
+local function deep_copy(t)
+    local copy = {}
+    for k, v in pairs(t) do
+        if type(v) == "table" then
+            copy[k] = deep_copy(v)
+        else
+            copy[k] = v
+        end
+    end
+    return setmetatable(copy, getmetatable(t))
+end
+
+----------------------------------------------------------------------------------------------------
+-- build_handler (transient key handler from a flat bindings table)
+----------------------------------------------------------------------------------------------------
 
 --- Build a transient key handler from a keybinding map.
 --- Returns a function `(editor, token, ch, is_printable) → boolean`
 --- suitable for `Editor:push_transient_handler`. The handler uses
---- `Trie.build` + `Trie:lookup` internally, so chords (e.g.
---- "ctrl-g", "C-x C-s") are parsed the same way as editor keybindings.
+--- Keymap internally, so chords (e.g. "ctrl-g", "C-x C-s") are
+--- parsed the same way as editor keybindings.
 ---
 --- Usage:
 ---   editor:push_transient_handler(keybind.handler({
@@ -412,9 +509,21 @@ end
 ---@param bindings table<string, function> chord_string → handler(editor): boolean
 ---@return function handler(editor, token, ch, is_printable): boolean
 local function build_handler(bindings)
-    local trie = Trie.build(bindings)
+    local km = Keymap_new()
+    for chord_str, func in pairs(bindings) do
+        local tokens, err = parse_chord(chord_str)
+        if tokens then
+            if #tokens == 1 then
+                km[tokens[1]] = func
+            else
+                Keymap_add(km, tokens, func)
+            end
+        else
+            io.stderr:write(("keybind: skipping bad chord %q: %s\n"):format(chord_str, err or "?"))
+        end
+    end
     return function(editor, token, _, _)
-        local action = trie:lookup({ token })
+        local action = km[token]
         if action then
             return action(editor)
         end
@@ -452,7 +561,7 @@ end
 --- e.g. "ctrl-x ctrl-s" → "C-x C-s", "ctrl-x (" → "C-x (".
 ---@param chord_str string
 ---@return string
-local function format_chord(chord_str)
+function format_chord(chord_str)
     local parts = {}
     for component in chord_str:gmatch("%S+") do
         parts[#parts + 1] = format_token(component)
@@ -522,6 +631,13 @@ return {
     format_chord = format_chord,
     build_chord_for_command = build_chord_for_command,
     mirror_chord = mirror_chord,
-    Trie = Trie,
+    Keymap = {
+        new = Keymap_new,
+        add = Keymap_add,
+        add_with_base = Keymap_add_with_base,
+        shallow_copy = Keymap_shallow_copy,
+        build_chord_for_command = Keymap_build_chord_for_command,
+    },
+    deep_copy = deep_copy,
     handler = build_handler,
 }

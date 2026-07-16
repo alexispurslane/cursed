@@ -2,7 +2,7 @@
 ---
 --- While the user is partway through a key chord (a prefix has matched
 --- but no command has dispatched yet), the editor sets
---- `editor._whichkey_node` to the current trie node and
+--- `editor._whichkey_keymap` to the current sub-keymap and
 --- `editor._whichkey_prefix` to the chord-so-far. This module paints
 --- the available next keys as a bottom-aligned floating overlay
 --- (registered via the `render_overlay` event) just above the modeline.
@@ -16,11 +16,12 @@
 --- block sits flush against the bottom of the buffer region.
 ---
 --- Paging: when the available keys overflow the popup's capacity,
---- Page Up / Page Down page the hint instead of feeding the trie
---- (those keys are otherwise undefined mid-prefix). The page index
---- lives on `editor._whichkey_page`, reset to 0 whenever the prefix
---- node changes. Pure rendering otherwise — it only reads editor state
---- the key machinery sets and never mutates it (except try_page).
+--- Page Up / Page Down page the hint instead of feeding the prefix
+--- keymap (those keys are otherwise undefined mid-prefix). The page
+--- index lives on `editor._whichkey_page`, reset to 0 whenever the
+--- prefix keymap changes. Pure rendering otherwise — it only reads
+--- editor state the key machinery sets and never mutates it (except
+--- try_page).
 
 local bit = require("bit")
 local ColorScheme = require("cursed.colorscheme")
@@ -110,9 +111,9 @@ local function describe_command(cmd)
     return table.concat(t, " ")
 end
 
---- Describe the action bound at a trie child node for the hint label.
---- Interior nodes (no action) get "more commands"; strings get the
---- humanized command name; functions get "(command)".
+--- Describe the action bound at a keymap entry for the hint label.
+--- Sub-keymap entries (no action) get "more commands"; strings get
+--- the humanized command name; functions get "(command)".
 ---@param action string|function|nil
 ---@return string
 local function describe_action(action)
@@ -127,15 +128,24 @@ end
 
 --- Collect advisory child-key labels for the hint popup, sorted by
 --- display key for a stable left→right / top→bottom order.
----@param node keybind.Trie current trie position
+--- Internal metafields (keys starting with "__") are skipped.
+---@param node table current sub-keymap
 ---@return table[] entries {key = display, label = string}
 local function collect_entries(node)
     local entries = {}
-    for tok, child in pairs(node.children) do
-        entries[#entries + 1] = {
-            key = keybind.format_token(tok),
-            label = describe_action(child.action),
-        }
+    for tok, child in pairs(node) do
+        if tok:sub(1, 2) ~= "__" then
+            local action
+            if type(child) == "table" then
+                action = nil -- prefix: "more commands"
+            else
+                action = child -- string (command name) or function
+            end
+            entries[#entries + 1] = {
+                key = keybind.format_token(tok),
+                label = describe_action(action),
+            }
+        end
     end
     table.sort(entries, function(a, b)
         return a.key < b.key
@@ -193,8 +203,8 @@ end
 ---@param editor Editor
 ---@return whichkey.Layout|nil
 local function compute_layout(editor)
-    local node = editor._whichkey_node
-    if node == nil or next(node.children) == nil then
+    local node = editor._whichkey_keymap
+    if node == nil or next(node) == nil then
         return nil
     end
     local term = editor.term
@@ -412,7 +422,7 @@ end
 local WhichKey = {}
 
 --- Register the which-key render listener on the editor's event hub.
---- Paints nothing when `editor._whichkey_node` is nil (no active prefix).
+--- Paints nothing when `editor._whichkey_keymap` is nil (no active prefix).
 ---@param editor Editor
 function WhichKey.setup(editor)
     local es = editor.event_system
@@ -431,9 +441,10 @@ function WhichKey.setup(editor)
 end
 
 --- Input hook: while a prefix is held and the hint popup overflows,
---- Page Up / Page Down page the popup instead of feeding the trie
---- (those keys are otherwise undefined mid-prefix). Returns true when
---- the key was consumed (caller skips trie dispatch); false otherwise.
+--- Page Up / Page Down page the popup instead of feeding the prefix
+--- keymap (those keys are otherwise undefined mid-prefix). Returns
+--- true when the key was consumed (caller skips key dispatch); false
+--- otherwise.
 ---@param editor Editor
 ---@param token string key token from event_to_token
 ---@return boolean handled

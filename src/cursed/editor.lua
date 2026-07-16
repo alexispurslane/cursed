@@ -399,11 +399,13 @@ end
 ---@field _kmacros table<string, { commands: table[], mb_inputs: string[] }> saved keyboard macros
 ---@field _mb_input_stack string[] minibuffer inputs popped during kmacro replay
 ---@field _mb_just_closed integer? count of stale Enter/Tab events to suppress after minibuffer closes
----@field _base_trie table the base keybind trie (no mode overlays)
----@field _base_keybindings table<string, string|function> flat chord→action map (base only)
----@field _active_trie table the current keybind trie (base + active mode overlay)
+---@field _base_keymap table|nil nested base keymap (no mode overlays)
+---@field _keymap_chain table[]|nil ordered keymap chain [{mode_km, ...}, base_km] for the active view
+---@field _current_keymap table|nil the resolved keymap for the current chain (walked by key dispatch); nil at top level, set to a sub-keymap in prefix mode
+---@field _prefix_tokens string[] accumulated token path for the current prefix chord (for which-key display)
+---@field _keymap_chain_changed boolean? set when _keymap_chain was rebuilt (main loop resets chord state)
+---@field _prefix_timeout_task table|nil scheduled task handle for prefix timeout
 ---@field _chord_for_command table<string, string>|nil reverse map command_name→formatted chord
----@field _trie_changed boolean? set when active_trie was rebuilt (main loop resets chord state)
 ---@field _digit_active boolean true when M-digit/M-- argument accumulation is in progress
 ---@field _digit_value integer accumulated digit value (starts at 0)
 ---@field _digit_negative boolean true when M-- was pressed (negate the arg)
@@ -426,8 +428,7 @@ end
 ---@field _last_complex_command { name: string, universal_args: table }|nil most recent command invoked with universal args (for repeat-complex-command)
 ---@field _command_frecency table per-command frecency data { uses = integer[] } for frecency-sorted M-x
 ---@field _exit_code integer exit code surfaced by async tasks
----@field _whichkey_node keybind.Trie|nil current trie node while a chord prefix is active (drives the which-key hint)
----@field _whichkey_prefix string|nil formatted chord-so-far (e.g. "C-x") while a chord prefix is active
+---@field _whichkey_keymap table|nil the keymap to show in which-key
 ---@field _whichkey_page integer which-key hint popup page index (0-based; reset when the prefix node changes)
 ---@field gutter_sign_fns fun(editor: Editor, view: View, li: integer): {fg: integer, bg: integer?, char: string}?[] per-line gutter sign callbacks; each returns a glyph spec or nil (blank). One fixed column per callback, painted on every sub-row of the line; evaluated once per visible logical line.
 ---@field _code_action_lines_by_uri table<string, {lines: table<integer, boolean>, version: integer?}> per-URI cache of line-number sets with available code actions, keyed by URI; each entry carries the buffer version at snapshot time for staleness detection.
@@ -476,10 +477,13 @@ function Editor.new(term)
 		_recorded_mb_inputs = {},
 		_kmacros = {},
 		_mb_input_stack = {},
-		_base_trie = nil,
-		_base_keybindings = {},
-		_active_trie = nil,
 		_chord_for_command = {},
+		_base_keymap = nil,
+		_keymap_chain = nil,
+		_current_keymap = nil,
+		_prefix_tokens = {},
+		_keymap_chain_changed = nil,
+		_prefix_timeout_task = nil,
 		overlays = nil, -- OverlayManager singleton (set below)
 		modeline_segments = nil, -- segment spec list (seeded from DEFAULT_MODELINE_SEGMENTS below)
 		_digit_active = false,
@@ -499,8 +503,7 @@ function Editor.new(term)
 		_extend = false, -- true while a `*_select` command runs (suppressed transient-anchor drop)
 		_command_before_this = nil, -- command before the most recent
 		_last_complex_command = nil, -- most recent command-with-args, for repeat-complex-command
-		_whichkey_node = nil,
-		_whichkey_prefix = nil,
+		_whichkey_keymap = nil,
 		_whichkey_page = 0,
 		_command_frecency = {}, -- { [cmd_name] = { uses = {timestamp, ...} } }
 		gutter_sign_fns = {}, -- overrideable per-line gutter-sign callbacks (see Editor.gutter_sign_fns)
@@ -682,70 +685,28 @@ function Editor:start_heartbeat_checker()
 	self:schedule_after(1000000, check)
 end
 
---- Rebuild the active keybind trie by merging the active view's mode
---- keybindings on top of the base trie. Called when the mode changes.
-function Editor:rebuild_active_trie()
-	local view = self:focused_view()
-	if view and #view._major_modes > 0 then
-		-- Merge: start from a copy of base keybindings, then overlay each mode in order
-		local merged = {}
-		for k, v in pairs(self._base_keybindings) do
-			merged[k] = v
-		end
-		for _, mode in ipairs(view._major_modes) do
-			if next(mode.keybindings) then
-				for k, v in pairs(mode.keybindings) do
-					merged[k] = v
-				end
-			end
-		end
-		self._active_trie = keybind.Trie.build(merged)
-		-- Shortcuts shown in M-x reflect the active major mode's overrides.
-		self._chord_for_command = keybind.build_chord_for_command(merged)
-	else
-		self._active_trie = self._base_trie
-		-- Rebuild from base bindings so the map is fresh even with no modes.
-		self._chord_for_command = keybind.build_chord_for_command(self._base_keybindings)
-	end
-	self._trie_changed = true
-end
-
 ----------------------------------------------------------------------------------------------------
 -- Keybinding convenience API (#5).
 --
--- Emacs-style ergonomic wrappers over the trie-rebuild path. A keymap
--- is already just a Lua table (chord → command-name|function); these
--- methods make binding LIVE — they mutate the base/mode keybinding
--- tables and rebuild the tries immediately, so they work from M-:,
--- `editor.event_system` listeners, extension packages, AND init.lua
--- (the default keybindings are primed on the editor BEFORE init.lua
--- runs, so `editor:global_set_key` in init.lua is applied for real,
--- not clobbered by a later trie build).
+-- Emacs-style ergonomic wrappers over the keymap chain. A keymap is a
+-- nested table (token → token → command). These methods make binding
+-- LIVE by mutating the base keymap or mode keymap tables directly;
+-- the keymap chain picks up changes lazily (no trie rebuild needed).
 ----------------------------------------------------------------------------------------------------
-
---- Rebuild the base keybind trie (no mode overlays) from
---- `_base_keybindings`. Called after `global_set_key` mutates the base
---- bindings. (`rebuild_active_trie` rebuilds `_active_trie` from base +
---- active modes; in the no-mode branch it aliases `_base_trie`, so this
---- must stay fresh.)
-function Editor:rebuild_base_trie()
-	self._base_trie = keybind.Trie.build(self._base_keybindings)
-end
 
 --- Bind a key chord globally (Emacs `global-set-key`). `action` is either
 --- a command name (string, resolved from the commands table at dispatch
 --- time) or a `function(view, editor, ...)`. The chord is validated
---- eagerly so a typo surfaces now, not on first press. Rebuilds the
---- base + active tries immediately.
+--- eagerly so a typo surfaces now, not on first press.
 ---@param chord string chord specifier ("ctrl-x ctrl-s", "alt-:", "f5", …)
 ---@param action string|function command name or function
 function Editor:global_set_key(chord, action)
-	if self._base_keybindings == nil then
-		error("editor:global_set_key: keybindings not yet initialized (call after startup prime)", 2)
+	if self._base_keymap == nil then
+		error("editor:global_set_key: keymap not yet initialized (call after startup prime)", 2)
 	end
 	if chord == "__printable" then
 		if type(action) == "function" then
-			self._printable_fn = action
+			self._base_keymap.__printable = action
 		end
 		return
 	end
@@ -753,51 +714,35 @@ function Editor:global_set_key(chord, action)
 	if not tokens then
 		error(("editor:global_set_key: bad chord %q: %s"):format(chord, err or "?"), 2)
 	end
-	self._base_keybindings[chord] = action
-	self:rebuild_base_trie()
-	self:rebuild_active_trie()
+	keybind.Keymap.add(self._base_keymap, tokens, action)
 end
 
---- Mirror every base keybinding whose chord begins with `from_token`
---- under `to_token` instead (e.g. "ctrl-x" → "alt-q"), cloning the
---- entire prefix subtree. Useful when a terminal eats a prefix key
---- (Ghostty swallows bare C-x) so the family is reachable via an
---- alternative the terminal passes through. Clears any existing leaf
---- on the bare `to_token` so it acts as a pure prefix. Rebuilds both
---- tries immediately.
+--- Mirror every base keybinding subtree rooted at `from_token`
+--- under `to_token` instead (e.g. "ctrl-x" → "alt-q"), deep-copying
+--- the full subtree. Useful when a terminal eats a prefix key (Ghostty
+--- swallows bare C-x) so the family is reachable via an alternative the
+--- terminal passes through. Clears any existing leaf on the bare
+--- `to_token` so it acts as a pure prefix.
 ---@param from_token string first component to clone (e.g. "ctrl-x")
 ---@param to_token string    new first component (e.g. "alt-q")
 function Editor:mirror_prefix(from_token, to_token)
-	if self._base_keybindings == nil then
-		error("editor:mirror_prefix: keybindings not yet initialized", 2)
+	if self._base_keymap == nil then
+		error("editor:mirror_prefix: keymap not yet initialized", 2)
 	end
-	local mirrored = {}
-	for chord, action in pairs(self._base_keybindings) do
-		local m = keybind.mirror_chord(chord, from_token, to_token)
-		if m ~= nil then
-			mirrored[m] = action
-		end
+	local from_sub = self._base_keymap[from_token]
+	if from_sub == nil then
+		return false
 	end
-	-- If the bare to_token is bound as a leaf, clear it so the prefix
-	-- shows which-key continuations instead of dispatching immediately.
-	if self._base_keybindings[to_token] ~= nil then
-		self._base_keybindings[to_token] = nil
-	end
-	for chord, action in pairs(mirrored) do
-		self._base_keybindings[chord] = action
-	end
-	self:rebuild_base_trie()
-	self:rebuild_active_trie()
-	return next(mirrored) ~= nil
+	-- Deep-copy the subtree so mutations don't alias
+	self._base_keymap[to_token] = keybind.deep_copy(from_sub)
+	return true
 end
 
 --- Bind a key chord in a specific major mode (Emacs `define-key`).
---- `mode` is either a MajorMode object (e.g. `modes.lua`) or a mode name
---- string (resolved against `config.modes`). Mutates the mode template's
---- `keybindings` (instances delegate via `__index` so active views pick
---- it up), invalidates the mode's cached trie, and rebuilds the active
---- trie. No-op effect on views whose active mode stack doesn't include
---- `mode` until the mode is next activated.
+--- `mode` is either a Mode object (e.g. `modes.lua`) or a mode name
+--- string (resolved against `config.modes`). Uses Keymap.add_with_base
+--- so the mode prefix inherits from the base keymap via __index
+--- metatables where the mode hasn't set an explicit binding.
 ---@param mode Mode|string the mode whose keymap to extend
 ---@param chord string chord specifier
 ---@param action string|function command name or function
@@ -813,10 +758,8 @@ function Editor:define_key(mode, chord, action)
 	if not tokens then
 		error(("editor:define_key: bad chord %q: %s"):format(chord, err or "?"), 2)
 	end
-	mode_obj.keybindings = mode_obj.keybindings or {}
-	mode_obj.keybindings[chord] = action
-	mode_obj._trie = nil -- invalidate cached trie; rebuilt on next :trie()
-	self:rebuild_active_trie()
+	mode_obj:ensure_keymap(self._base_keymap)
+	keybind.Keymap.add_with_base(mode_obj.keymap, self._base_keymap, tokens, action)
 end
 
 --- Register a named command (Emacs `defun`-equivalent for the command
@@ -1133,17 +1076,29 @@ function Editor:_emit_focus_change(old_view, new_view)
 	end
 end
 
---- Set the active view index and rebuild the keybind trie
---- if the new view has a different mode. Also fires view_blur /
---- buffer_blur (for the previously-active view) and view_focus /
---- buffer_focus (for the newly-active view) when the focused view
---- object actually changes.
+--- Set the active view index and copy the keymap chain from the
+--- new active view. Also fires view_blur / buffer_blur (for the
+--- previously-active view) and view_focus / buffer_focus (for the
+--- newly-active view) when the focused view object actually changes.
 ---@param idx integer 1-based index into self.views
 function Editor:set_active_view(idx)
 	local old_view = self:current_view()
 	self.active_view = idx
-	self:rebuild_active_trie()
-	self:_emit_focus_change(old_view, self:current_view())
+	local view = self:current_view()
+	if view and view._keymap_chain then
+		self._keymap_chain = view._keymap_chain
+	elseif view and self._base_keymap then
+		-- View has no chain yet (e.g. startup before any modes): build it
+		view:rebuild_keymap_chain(self._base_keymap)
+		self._keymap_chain = view._keymap_chain
+	else
+		-- No views at all: fall back to base only
+		self._keymap_chain = { self._base_keymap }
+	end
+	self._keymap_chain_changed = true
+	-- Rebuild chord_for_command from the base keymap
+	self._chord_for_command = keybind.Keymap.build_chord_for_command(self._base_keymap or {})
+	self:_emit_focus_change(old_view, view)
 end
 
 --- Get the active view.

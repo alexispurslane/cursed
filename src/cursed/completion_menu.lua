@@ -416,10 +416,10 @@ function CompletionMenu:force_open()
     log.info("completion_menu", "force_open")
     -- Counter: suppress the NEXT N _on_post_command closes.
     -- Defaults to 1 (direct keybinding dispatch — one post_command
-    -- from _dispatch_trie). Callers dispatched through M-x may need
+    -- from dispatch_key). Callers dispatched through M-x may need
     -- a higher count and can bump it after force_open returns (M-x's
     -- on_submit emits its own post_command_hook AND the wrapping
-    -- _dispatch_trie emits another for the keybinding).
+    -- dispatch_key emits another for the keybinding).
     self._force_keep_open = 1
     self:_tick(true)
 end
@@ -669,7 +669,7 @@ function CompletionMenu:_on_post_command(editor, cmd_name, view)
     -- counter (2) to suppress the first N post_command closes after
     -- forcing the menu open. M-x's on_submit emits post_command_hook
     -- for the dispatched command (flyspell_correct) AND the wrapping
-    -- _dispatch_trie emits post_command_hook for the keybinding
+    -- dispatch_key emits post_command_hook for the keybinding
     -- (enter_key) — we need to survive both before settling.
     if self._force_keep_open and self._force_keep_open > 0 then
         self._force_keep_open = self._force_keep_open - 1

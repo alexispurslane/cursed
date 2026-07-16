@@ -144,7 +144,7 @@ function M.flyspell_correct(view, editor)
         -- Bump the keep-open counter: flyspell_correct is always
         -- dispatched through M-x, which emits TWO post_command_hook
         -- events — one from M-x's on_submit for this command, and
-        -- one from _dispatch_trie for the wrapping enter_key binding.
+        -- one from dispatch_key for the wrapping enter_key binding.
         cm._force_keep_open = 2
     end
 

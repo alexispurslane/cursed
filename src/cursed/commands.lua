@@ -1268,7 +1268,7 @@ commands.execute_command = function(view, editor)
 
 			-- Emit post_command_hook so listeners (doc sync, completion
 			-- menu dismiss, last-command history, etc.) fire, matching
-			-- what _dispatch_trie does in main.lua for keybindings.
+			-- what dispatch_key does in main.lua for keybindings.
 			editor.event_system:emit("post_command_hook", name, view)
 
 			editor.universal_args = nil

@@ -64,12 +64,11 @@
 ---   {word?})` directly. Hooks run their own `batch_edit`; the View's
 --- `_run_input_hooks(trigger)` does the suffix-scan dispatch.
 
-local keybind = require("cursed.keybind")
-
 ---@class Mode
 ---@field name string human-readable name (e.g. "lua", "python")
 ---@field is_minor boolean when true, this mode is a minor mode (skipped for modeline naming, display-only flags, etc.)
----@field keybindings table<string, string|function> chord → command name or function
+---@field keymap table<string, any> nested keymap table (chord tokens → sub-keymaps or commands)
+---@field keymap_spec? fun(base_km: table): table optional deferred keymap constructor; called with base keymap to produce {name, keymap, ...}
 ---@field textobjects table<string, string> object name → boundary pattern
 ---@field tab_width integer visual width of a tab stop (default 8)
 ---@field expand_tab boolean if true, Tab key inserts spaces instead of \t (default true)
@@ -93,7 +92,6 @@ local keybind = require("cursed.keybind")
 ---@field no_line_numbers boolean|nil keep the gutter frame but blank the line numbers. `no_gutter` implies this.
 ---@field wrap boolean|nil default true; when false, wrap at window width only (skip margin narrowing). Display toggle only.
 ---@field whole_line_cursor boolean|nil the cursor paints the entire sub-row width in `cursor_bg` instead of a single cell — the "selected row" highlight for list apps. Display toggle only.
----@field _trie table? lazily-built keybind trie for this mode's keybindings
 ---@field _listener_editors table|nil set of editors this template has already registered on_enter/on_exit listeners against (idempotent per-editor auto-wiring)
 local Mode = {}
 Mode.__index = Mode
@@ -101,7 +99,9 @@ Mode.__index = Mode
 ---@class ModeSpec
 ---@field name string
 ---@field is_minor? boolean true → minor mode (skipped for modeline naming, display flags, etc.)
----@field keybindings? table<string, string|function>
+---@field keymap? table<string, any> nested keymap table (chord tokens → sub-keymaps or commands)
+---@field keymap_spec? fun(base_km: table): table deferred keymap constructor; called with base keymap to produce {name, keymap, ...}
+---@field keybindings? table<string, string|function> legacy flat keybindings (backward compat; takes precedence over keymap if both are absent, but keymap is preferred)
 ---@field textobjects? table<string, string>
 ---@field tab_width? integer
 ---@field expand_tab? boolean
@@ -134,7 +134,8 @@ function Mode.new(spec)
 	local tw = spec.tab_width or 8
 	return setmetatable({
 		name = spec.name,
-		keybindings = spec.keybindings or {},
+		keymap = spec.keymap or (spec.keybindings and spec.keybindings) or {},
+		keymap_spec = spec.keymap_spec,
 		textobjects = spec.textobjects or {},
 		tab_width = tw,
 		is_minor = spec.is_minor == true,
@@ -159,7 +160,6 @@ function Mode.new(spec)
 		no_line_numbers = spec.no_line_numbers,
 		wrap = spec.wrap ~= false, -- default true
 		whole_line_cursor = spec.whole_line_cursor,
-		_trie = nil,
 		_listener_editors = nil,
 	}, Mode)
 end
@@ -171,7 +171,8 @@ end
 ---@field _base Mode reference to the template mode
 ---@field name string (inherited)
 ---@field is_minor boolean (inherited)
----@field keybindings table<string, string|function> (inherited)
+---@field keymap table<string, any> (inherited)
+---@field keymap_spec? fun(base_km: table): table (inherited)
 ---@field textobjects table<string, string> (inherited)
 ---@field tab_width integer (inherited)
 ---@field expand_tab boolean (inherited)
@@ -236,14 +237,26 @@ function Mode:_ensure_listeners(editor)
 	end
 end
 
---- Get (or lazily build) the keybind trie for this mode's keybindings.
---- Only includes the mode-specific bindings (no defaults merged).
----@return table
-function Mode:trie()
-	if self._trie == nil then
-		self._trie = keybind.Trie.build(self.keybindings)
+--- Ensure the mode's keymap is built.
+--- If keymap is already populated (non-empty), returns it as-is.
+--- If keymap_spec exists, calls it with base_km to produce a result
+--- table {name, keymap, ...} and merges returned fields into self.
+--- With neither populated, keymap remains empty (caller handles it).
+---@param base_km table|nil base keymap (nested) for inheritance reference
+---@return table the mode's keymap
+function Mode:ensure_keymap(base_km)
+	if next(self.keymap) then
+		return self.keymap
 	end
-	return self._trie
+	if self.keymap_spec then
+		local result = self.keymap_spec(base_km or {})
+		if result and type(result) == "table" then
+			for k, v in pairs(result) do
+				self[k] = v
+			end
+		end
+	end
+	return self.keymap
 end
 
 --- MajorMode alias: same as Mode.new.

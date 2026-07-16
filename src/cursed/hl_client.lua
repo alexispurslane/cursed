@@ -29,6 +29,9 @@ end
 --- highlight lane into the appropriate view.
 ---@param editor table
 function M.drain_inbox(editor)
+	if M._ss == nil then
+		return
+	end
 	drain_generic(M._ss, M._ss._ptr.inboxes[constants.LANE_IDX_HL], editor, {
 		[constants.MSG_HL_SPANS] = function(msg)
 			if msg.ptr ~= nil then

@@ -1536,6 +1536,9 @@ end
 --- Drain the LSP lane inbox: pop handshake, response, and
 --- notification messages and emit them on the editor's event bus.
 function M.drain_inbox(editor)
+	if M._ss == nil then
+		return
+	end
 	drain_generic(M._ss, M._ss._ptr.inboxes[constants.LANE_IDX_LSP], editor, {
 		[constants.MSG_LSP_HANDSHAKE] = function(msg)
 			local info = M.apply_handshake(msg.ptr)

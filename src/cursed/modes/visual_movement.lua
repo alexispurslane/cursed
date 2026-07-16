@@ -21,13 +21,17 @@ local template = {
 	name = "visual-movement",
 	is_minor = true,
 
-	keybindings = {
-		["ctrl-n"] = "forward_visual_line",
-		["ctrl-p"] = "backward_visual_line",
-		["ctrl-a"] = "move_beginning_of_visual_line",
-		["ctrl-e"] = "move_end_of_visual_line",
-		["ctrl-k"] = "kill_visual_line",
-	},
+	keymap_spec = function(_base_km)
+		return {
+			keymap = {
+				["ctrl-n"] = "forward_visual_line",
+				["ctrl-p"] = "backward_visual_line",
+				["ctrl-a"] = "move_beginning_of_visual_line",
+				["ctrl-e"] = "move_end_of_visual_line",
+				["ctrl-k"] = "kill_visual_line",
+			},
+		}
+	end,
 
 	--- Save the effective margin before set_major_modes nukes it,
 	--- then restore it on the next tick so the vertical column
