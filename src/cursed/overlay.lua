@@ -1,13 +1,21 @@
 --- Overlay manager: the screen-coordinate-space drawing layer above highlighting.
 ---
+--- Internally represents overlays as anchor spans (buffer-anchored) and
+--- layer spans (screen-space floating), stored in `_ephemeral_spans` for
+--- this frame. Anchor spans are also inserted directly into the view's
+--- `_spans` list (bypassing add_span's overlap rejection since ephemeral
+--- overlays use later-wins z-order). Both types carry a `draw` function
+--- that the flush method calls with resolved coordinates.
+---
 --- Two overlay kinds:
----   • file-anchored — attached to a buffer (line, byte-col); rendered at the
+---   • anchor — attached to a buffer (line, byte-col); rendered at the
 ---     screen cell that position maps to THIS FRAME, and skipped when the
 ---     anchor is scrolled out of view. Use for diagnostics (flymake),
 ---     spell-check squiggles (flyspell), match-hints: they follow the text
----     as you scroll, freed from priority-resolution-vs-tree-sitter tangles.
----   • floating — absolute screen (sx, sy); painted regardless of scroll.
+---     as you scroll. Corresponds to put_file / put_underline.
+---   • layer — absolute screen (sx, sy); painted regardless of scroll.
 ---     Use for popups, tooltips, the modeline, the minibuffer.
+---     Corresponds to put_float.
 ---
 --- Coordinate maps (the reusable substrate, callable any time):
 ---   file_to_screen(line, col) -> sx, sy | nil   (nil = scrolled out)
@@ -17,19 +25,21 @@
 --- extension can round-trip a click → buffer edit → anchored overlay.
 ---
 --- Lifecycle (driven by Editor:render):
----   1. begin_frame(view) — snapshot the view, clear the queues.
+---   1. begin_frame(view) — remove previous frame's anchor spans from view,
+---      clear _ephemeral_spans, snapshot the view.
 ---   2. core chrome + extensions register overlays (put_file / put_float).
 ---   3. emit_render() — fires the `render_overlay` event so extensions
 ---      register overlays for this frame (the extension hook).
----   4. flush() — paints file-anchored (resolved via file_to_screen, skips
----      off-screen) then floats in registration order, before term:present().
+---   4. flush() — paints anchor spans first (resolved via file_to_screen,
+---      skips off-screen), then layer spans in registration order, before
+---      term:present().
 ---
 --- The `render_overlay` event is THE extension hook: a listener does
 --- `editor.overlays:put_file(...)` / `:put_float(...)` for the current frame.
 --- Overlays never persist across frames (begin_frame clears the queues).
 ---
---- Z-order within a frame: file-anchored paint over the buffer text; floats
---- paint over file-anchored, in registration order (later overdraws earlier).
+--- Z-order within a frame: anchors paint over the buffer text; layers
+--- paint over anchors, in registration order (later overdraws earlier).
 --- Core chrome (modeline/minibuffer) registers before emit_render, so an
 --- extension's floating popup paints above the modeline — the expected
 --- "extension UI on top" layering.
@@ -38,9 +48,10 @@
 ---@field _editor Editor owning editor
 ---@field _term Term backing terminal surface
 ---@field _view table|nil frame snapshot, set by begin_frame
----@field _file table[] file-anchored queue: {line, col, text, fg, bg}
----@field _float table[] floating queue: {sx, sy, text, fg, bg}
----@field _underline table[] file-anchored squiggle queue: {line, s_col, e_col, rgb}
+---@field _ephemeral_spans table[] spans added this frame (cleared in begin_frame)
+---@field _file table[] file-anchored queue: {line, col, text, fg, bg} (kept for backward compat, cleared in begin_frame)
+---@field _float table[] floating queue: {sx, sy, text, fg, bg} (kept for backward compat, cleared in begin_frame)
+---@field _underline table[] file-anchored squiggle queue: {line, s_col, e_col, rgb} (kept for backward compat, cleared in begin_frame)
 local OverlayManager = {}
 OverlayManager.__index = OverlayManager
 
@@ -55,9 +66,10 @@ local function new(editor)
         _editor = editor,
         _term = editor.term,
         _view = nil, -- frame snapshot, set by begin_frame
-        _file = {}, -- file-anchored queue: {line, col, text, fg, bg}
-        _float = {}, -- floating queue: {sx, sy, text, fg, bg}
-        _underline = {}, -- file-anchored squiggles: {line, s_col, e_col, rgb}
+        _ephemeral_spans = {}, -- spans added this frame
+        _file = {}, -- file-anchored queue (kept for backward compat)
+        _float = {}, -- floating queue (kept for backward compat)
+        _underline = {}, -- file-anchored squiggles (kept for backward compat)
     }, OverlayManager)
 end
 
@@ -155,46 +167,96 @@ function OverlayManager:screen_to_file(sx, sy)
     return line, col
 end
 
---- Begin a render frame: snapshot the view + clear the queues.
---- Called by Editor:render before any painting. `view` may be nil
---- (e.g. the initial "Loading…" frame) — file-anchored overlays then
---- resolve to nil and float overlays still paint.
+--- Begin a render frame: remove previous frame's ephemeral spans from the
+--- old view, clear the queues, and snapshot the new view. Called by
+--- Editor:render before any painting. `view` may be nil (e.g. the initial
+--- "Loading…" frame) — anchor overlays then resolve to nil and layer
+--- overlays still paint.
 ---@param view table|nil the view being rendered this frame
 function OverlayManager:begin_frame(view)
+    -- Remove previous frame's anchor spans from the old view so they don't
+    -- accumulate in the view's _spans list across frames.
+    if self._view then
+        for _, s in ipairs(self._ephemeral_spans) do
+            if s.type == "anchor" then
+                self._view:remove_span(s)
+            end
+        end
+    end
     self._view = view
+    self._ephemeral_spans = {}
     self._file = {}
     self._float = {}
     self._underline = {}
 end
 
---- Register a file-anchored overlay. Resolved to screen at flush; if the
---- anchor is scrolled off-screen this frame, nothing is painted.
+--- Register a file-anchored overlay. Creates an anchor span that is
+--- resolved to screen at flush; if the anchor is scrolled off-screen
+--- this frame, nothing is painted.
 ---@param line integer 0-based logical line
 ---@param col integer 0-based byte offset within the line
 ---@param text string
 ---@param fg integer
 ---@param bg integer
 function OverlayManager:put_file(line, col, text, fg, bg)
-    self._file[#self._file + 1] = { line = line, col = col, text = text, fg = fg, bg = bg }
+    local span = {
+        type = "anchor",
+        row_s = line,
+        col_s = col,
+        row_e = line,
+        col_e = col + 1,
+        text = text,
+        fg = fg,
+        bg = bg,
+        draw = function(self, term, sx, sy)
+            if sx ~= nil and sy ~= nil then
+                term:print(sx, sy, self.text, self.fg, self.bg)
+            end
+        end,
+    }
+    -- Insert directly into view._spans (bypassing add_span's overlap
+    -- rejection) since ephemeral anchor spans may overlap; later-wins
+    -- z-order is the intended behavior.
+    local view = self._view
+    if view then
+        if not view._spans then
+            view._spans = {}
+        end
+        local idx = view:_span_insertion_index(span.row_s, span.col_s)
+        table.insert(view._spans, idx, span)
+        view._span_gen = (view._span_gen or 0) + 1
+        view._span_cursor = nil
+    end
+    table.insert(self._ephemeral_spans, span)
 end
 
 --- Register a floating overlay at absolute screen (sx, sy).
+--- Creates a layer span that paints at the given screen coordinates.
 ---@param sx integer screen column (0-based)
 ---@param sy integer screen row (0-based)
 ---@param text string
 ---@param fg integer
 ---@param bg integer
 function OverlayManager:put_float(sx, sy, text, fg, bg)
-    self._float[#self._float + 1] = { sx = sx, sy = sy, text = text, fg = fg, bg = bg }
+    local span = {
+        type = "layer",
+        sx = sx,
+        sy = sy,
+        text = text,
+        fg = fg,
+        bg = bg,
+        draw = function(self, term)
+            term:print(self.sx, self.sy, self.text, self.fg, self.bg)
+        end,
+    }
+    table.insert(self._ephemeral_spans, span)
 end
 
 --- Register a file-anchored squiggly underline spanning the byte range
---- [s_col, e_col) on `line`. `s_col`/`e_col` are 0-based byte offsets
---- within the line (the buffer's native addressing, matching what LSP
---- diagnostics report). Painted in `flush` by OR-ing a curly-underline
---- attribute into each screen cell the range resolves to, leaving the
---- underlying glyphs + colors intact. Ranges that span wrap sub-rows are
---- segmented per sub-row; off-screen anchors are skipped.
+--- [s_col, e_col) on `line`. Creates an anchor span whose draw function
+--- receives resolved per-sub-row screen-cell ranges from `_resolve_underline`.
+--- Ranges that span wrap sub-rows are segmented per sub-row; off-screen
+--- anchors are skipped.
 ---
 --- `rgb` is a 0xRRGGBB truecolor int for the squiggle (use a resolved
 --- `diagnostic_error`/`_warn`/`_info`/`_hint` color).
@@ -206,7 +268,34 @@ function OverlayManager:put_underline(line, s_col, e_col, rgb)
     if e_col <= s_col then
         return
     end
-    self._underline[#self._underline + 1] = { line = line, s_col = s_col, e_col = e_col, rgb = rgb }
+    local span = {
+        type = "anchor",
+        row_s = line,
+        col_s = s_col,
+        row_e = line,
+        col_e = e_col,
+        rgb = rgb,
+        draw = function(self, term, ranges)
+            for _, r in ipairs(ranges) do
+                local sx_start, sx_end, sy = r[1], r[2], r[3]
+                for col = sx_start, sx_end - 1 do
+                    term:squiggle_cell(col, sy, self.rgb)
+                end
+            end
+        end,
+    }
+    -- Insert directly into view._spans (same rationale as put_file).
+    local view = self._view
+    if view then
+        if not view._spans then
+            view._spans = {}
+        end
+        local idx = view:_span_insertion_index(span.row_s, span.col_s)
+        table.insert(view._spans, idx, span)
+        view._span_gen = (view._span_gen or 0) + 1
+        view._span_cursor = nil
+    end
+    table.insert(self._ephemeral_spans, span)
 end
 
 --- Fire the `render_overlay` event so extensions register overlays for
@@ -230,140 +319,112 @@ function OverlayManager:emit_render()
     end
 end
 
---- Paint all registered overlays: file-anchored squiggles first (OR'd
---- into the just-painted text cells), then file-anchored text overlays,
---- then floats in registration order so later registrations overdraw
---- earlier ones. Clears the queues.
+--- Paint all registered overlays for this frame.
+---
+--- Phase 1: anchor spans (buffer-space, file-anchored). These paint over
+---   the buffer text but under floating overlays. Each anchor span is either:
+---   • a text overlay — resolved to screen via file_to_screen, then drawn
+---   • an underline — resolved via _resolve_underline to per-sub-row ranges,
+---     then squiggled cell-by-cell
+---   Off-screen anchors are skipped (file_to_screen returns nil).
+---
+--- Phase 2: layer spans (screen-space, floating). These paint over
+---   everything at their absolute screen coordinates, in registration
+---   order (later overdraws earlier).
+---
+--- Clears _ephemeral_spans (begin_frame removes old anchors from view._spans).
+--- Old queue fields (_file, _float, _underline) are also cleared for
+--- backward compatibility but are no longer used for painting.
 function OverlayManager:flush()
     local term = self._term
-    local n_un = #self._underline
-    local n_file = #self._file
-    local n_float = #self._float
-    local flush_t0 = profile.now_us()
-    -- Underline stats are only accumulated when profiling; the production
-    -- hot path (_paint_underline) is untouched.
-    self._un_stats = profile.enabled
-            and { t_wrap = 0, t_vp = 0, t_sq = 0, cells = 0, entries = 0, skipped = 0 }
-        or nil
-    local t_un = profile.now_us()
-    for _, u in ipairs(self._underline) do
-        self:_paint_underline(u)
-    end
-    local uns = self._un_stats
-    if uns ~= nil then
-        profile.span("overlay", "flush_underline", t_un, {
-            count = n_un,
-            entries = uns.entries,
-            skipped = uns.skipped,
-            cells = uns.cells,
-            wrap_us = uns.t_wrap,
-            viewport_us = uns.t_vp,
-            squiggle_us = uns.t_sq,
-        })
-    else
-        profile.span("overlay", "flush_underline", t_un, { count = n_un })
-    end
-    self._un_stats = nil
-    local t_file = profile.now_us()
-    for _, o in ipairs(self._file) do
-        local sx, sy = self:file_to_screen(o.line, o.col)
-        if sx ~= nil and sy ~= nil then
-            term:print(sx, sy, o.text, o.fg, o.bg)
+    local n_all = #self._ephemeral_spans
+    local n_anchor = 0
+    local n_underline = 0
+    local n_layer = 0
+    for _, s in ipairs(self._ephemeral_spans) do
+        if s.type == "anchor" then
+            n_anchor = n_anchor + 1
+            if s.rgb ~= nil then
+                n_underline = n_underline + 1
+            end
+        elseif s.type == "layer" then
+            n_layer = n_layer + 1
         end
     end
-    profile.span("overlay", "flush_file", t_file, { count = n_file })
-    local t_float = profile.now_us()
-    for _, o in ipairs(self._float) do
-        term:print(o.sx, o.sy, o.text, o.fg, o.bg)
+    local flush_t0 = profile.now_us()
+
+    -- Phase 1: anchor spans (file-anchored, buffer-space).
+    local t_anchor = profile.now_us()
+    for _, s in ipairs(self._ephemeral_spans) do
+        if s.type == "anchor" then
+            if s.rgb ~= nil then
+                -- Underline: resolve to per-sub-row screen ranges and draw.
+                local ranges = self:_resolve_underline(s)
+                s:draw(term, ranges)
+            else
+                -- Text overlay: resolve buffer→screen.
+                local sx, sy = self:file_to_screen(s.row_s, s.col_s)
+                s:draw(term, sx, sy)
+            end
+        end
     end
-    profile.span("overlay", "flush_float", t_float, { count = n_float })
+    profile.span("overlay", "flush_anchor", t_anchor, {
+        count = n_anchor,
+        underline = n_underline,
+    })
+
+    -- Phase 2: layer spans (floating, screen-space).
+    local t_layer = profile.now_us()
+    for _, s in ipairs(self._ephemeral_spans) do
+        if s.type == "layer" then
+            s:draw(term)
+        end
+    end
+    profile.span("overlay", "flush_layer", t_layer, { count = n_layer })
+
+    self._ephemeral_spans = {}
     self._file = {}
     self._float = {}
     self._underline = {}
-    profile.span("overlay", "flush", flush_t0, { underline = n_un, file = n_file, float = n_float })
+    profile.span("overlay", "flush", flush_t0, {
+        anchor = n_anchor,
+        underline = n_underline,
+        layer = n_layer,
+        total = n_all,
+    })
 end
 
---- Resolve a single `put_underline` entry to screen cells and OR the
---- squiggle attribute into each, segmenting across wrap sub-rows. Skips
---- anchors scrolled out of view, lines past the document, and cells
---- outside the buffer area. Reads view geometry exactly as the renderer,
---- so the squiggle tracks the glyph it sits under as you scroll.
----
---- Two paths: a fast path (production) with zero instrumentation, and a
---- Paint one underline entry. When profiling is enabled (self._un_stats ~= nil),
---- accumulates per-phase timing and cell-count stats.
----@param u table {line, s_col, e_col, rgb}
-function OverlayManager:_paint_underline(u)
-    local stats = self._un_stats
-    if stats then
-        stats.entries = stats.entries + 1
-    end
-    local view = self:_v()
-    if not view then
-        if stats then
-            stats.skipped = stats.skipped + 1
-        end
-        return
-    end
+--- Resolve an underline anchor span to per-sub-row screen-cell ranges.
+--- Segments the underline across wrap sub-rows, skips lines past the
+--- document and cells outside the buffer area. Uses the frame's snapshot
+--- view and geometry so the squiggle tracks the glyph it sits under.
+---@param u table anchor span with row_s, col_s, col_e, rgb
+---@return {integer, integer, integer}[] {sx_start, sx_end, sy} entries
+function OverlayManager:_resolve_underline(u)
+    local view = self._view
     local g = self:_geom()
-    if not g then
-        if stats then
-            stats.skipped = stats.skipped + 1
-        end
-        return
+    if not view or not g then
+        return {}
     end
-    local line = u.line
+    local line = u.row_s
     if line < 0 or line >= view:line_count() then
-        if stats then
-            stats.skipped = stats.skipped + 1
-        end
-        return
+        return {}
     end
-    local tw
-    if stats then
-        tw = profile.now_us()
-    end
-    local s_sub, s_scol = view:wrap_sub_position(line, u.s_col)
-    local e_sub, e_scol = view:wrap_sub_position(line, u.e_col)
-    if stats then
-        stats.t_wrap = stats.t_wrap + (profile.now_us() - tw)
-    end
-    -- Wrap width per sub-row; in no-wrap mode the whole line is one sub-row
-    -- so any value works as the upper column bound.
+    local s_sub, s_scol = view:wrap_sub_position(line, u.col_s)
+    local e_sub, e_scol = view:wrap_sub_position(line, u.col_e)
     local row_w = view.wrap_width or g.w
-    local term = self._term
+    local results = {}
     for sub = s_sub, e_sub do
         local col_lo = (sub == s_sub) and s_scol or 0
         local col_hi = (sub == e_sub) and e_scol or row_w
         if col_hi > col_lo then
-            local tvp
-            if stats then
-                tvp = profile.now_us()
-            end
             local sy = view:viewport_row_for_line(line, sub)
-            if stats then
-                stats.t_vp = stats.t_vp + (profile.now_us() - tvp)
-            end
             if sy >= 0 and sy <= g.max_y then
-                local tsq
-                if stats then
-                    tsq = profile.now_us()
-                end
-                for col = col_lo, col_hi - 1 do
-                    local sx = g.text_x + col
-                    if sx >= 0 and sx < g.w then
-                        term:squiggle_cell(sx, sy, u.rgb)
-                        if stats then
-                            stats.cells = stats.cells + 1
-                        end
-                    end
-                end
-                if stats then
-                    stats.t_sq = stats.t_sq + (profile.now_us() - tsq)
-                end
+                table.insert(results, { g.text_x + col_lo, g.text_x + col_hi, sy })
             end
         end
     end
+    return results
 end
 
 OverlayManager.new = new
