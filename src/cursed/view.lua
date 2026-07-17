@@ -10,6 +10,7 @@ local utf8 = require("cursed.utf8")
 local profile = require("cursed.profile")
 local log = require("cursed.log")
 local IH = require("cursed.input_hook")
+local SpanManager = require("cursed.span_manager")
 local shared = require("cursed.shared")
 local DrawContext = require("cursed.draw_context")
 
@@ -288,9 +289,7 @@ function View.new(buffer)
         _screen_row_counts = nil,
         _screen_rows_gen = nil,
         _screen_rows_width = nil,
-        _spans = nil,
-        _span_gen = nil,
-        _span_cursor = nil,
+        _span_manager = nil,
         _vp_row_cache = nil,
         _vp_row_sig = nil,
         _vp_row_filled_to = nil,
@@ -7338,398 +7337,51 @@ end
 ---@param row_s integer
 ---@param col_s integer
 ---@return integer 1-based insertion index
-function View:_span_insertion_index(row_s, col_s)
-    local spans = self._spans
-    if not spans or #spans == 0 then
-        return 1
+--- Ensure the SpanManager exists (lazy init).
+---@param editor Editor|nil optional editor reference for lifecycle ops
+---@return SpanManager
+function View:span_manager(editor)
+    if not self._span_manager then
+        self._span_manager = SpanManager.new(editor or self.editor, self)
+    elseif editor and not self._span_manager._editor then
+        self._span_manager._editor = editor
     end
-    local lo, hi = 1, #spans
-    while lo <= hi do
-        local mid = math.floor((lo + hi) / 2)
-        local s = spans[mid]
-        if s.row_s == nil then
-            -- Layer/anchor span with no buffer coords; search left.
-            hi = mid - 1
-        elseif s.row_s < row_s or (s.row_s == row_s and s.col_s <= col_s) then
-            lo = mid + 1
-        else
-            hi = mid - 1
-        end
-    end
-    return lo
+    return self._span_manager
 end
 
---- Check whether two spans overlap.
----@param a table
----@param b table
----@return boolean true if the spans' (row, col) ranges intersect
-local function spans_overlap(a, b)
-    -- Non-overlapping in row space
-    if a.row_e < b.row_s or b.row_e < a.row_s then
-        return false
-    end
-    -- On the same row: check column overlap
-    if a.row_s == b.row_e and a.row_s == a.row_e then
-        return a.col_s < b.col_e and b.col_s < a.col_e
-    end
-    if a.row_s == b.row_s and a.row_s == a.row_e then
-        return a.col_s < b.col_e and b.col_s < a.col_e
-    end
-    -- Multi-row spans overlap in row space; columns on the shared row may
-    -- still not overlap. When the overlap is only at a single-row boundary,
-    -- check columns. Otherwise they definitely overlap.
-    if a.row_e == b.row_s and a.row_e ~= a.row_s then
-        -- a ends where b starts, single-row boundary
-        return false
-    end
-    if b.row_e == a.row_s and b.row_e ~= b.row_s then
-        -- b ends where a starts, single-row boundary
-        return false
-    end
-    return true
-end
-
---- Add a span to this view. Overlap rules by span type:
----   - "layer": no overlap checking (screen-space overlays, no buffer coords).
----   - "properties": properties-properties overlap allowed (merged by later-wins
----     semantics).
----   - "replace": no overlaps except properties-properties.
----   - "layer" / "anchor": no overlap checking (post-pass overlays, don't
----      conflict with inline spans).
----   - Any other non-properties overlap on replace spans is rejected.
---- Layer spans carry `draw` or `fn` (screen-space coords) and no buffer coords.
---- Anchor spans carry `draw` (resolved screen coords) and row_s/col_s for buffer
---- position.
---- Lodges a 0ms background task to force re-render when an editor is attached.
----@param span PropertiesSpan|ReplaceSpan|LayerSpan|AnchorSpan
+--- Delegate: add a span. Lodges a 0ms background task for re-render.
+---@param span table
 function View:add_span(span)
-    if not self._spans then
-        self._spans = {}
-    end
-
-    -- Layer and anchor spans: post-pass overlays rendered in a separate
-    -- phase on top of buffer content. No overlap checking — they don't
-    -- participate in properties lookup or inline rendering. Just append.
-    -- Layer spans have no buffer coordinates. Anchor spans carry row_s/col_s
-    -- for buffer→screen resolution but don't conflict with inline spans.
-    if span.type == "layer" or span.type == "anchor" then
-        table.insert(self._spans, span)
-        self._span_gen = (self._span_gen or 0) + 1
-        self._span_cursor = nil
-        if self.editor then
-            self.editor:push_background_task(function()
-                return true
-            end)
-        end
-        return
-    end
-
-    local idx = self:_span_insertion_index(span.row_s, span.col_s)
-
-    -- Check for overlaps with adjacent spans (skip properties-properties)
-    -- Check span at idx-1 (predecessor)
-    if idx > 1 then
-        local prev = self._spans[idx - 1]
-        if spans_overlap(prev, span) then
-            if prev.type == "properties" and span.type == "properties" then
-                -- allowed: later-wins merge
-            else
-                log.warn(
-                    "view",
-                    "span overlap rejected: " .. span.type .. " overlaps " .. prev.type,
-                    {
-                        prev_row_s = prev.row_s,
-                        prev_col_s = prev.col_s,
-                        span_row_s = span.row_s,
-                        span_col_s = span.col_s,
-                    }
-                )
-                return
-            end
-        end
-    end
-
-    -- Check span at idx (successor)
-    if idx <= #self._spans then
-        local next = self._spans[idx]
-        if spans_overlap(next, span) then
-            if next.type == "properties" and span.type == "properties" then
-                -- allowed
-            else
-                log.warn(
-                    "view",
-                    "span overlap rejected: " .. span.type .. " overlaps " .. next.type,
-                    {
-                        next_row_s = next.row_s,
-                        next_col_s = next.col_s,
-                        span_row_s = span.row_s,
-                        span_col_s = span.col_s,
-                    }
-                )
-                return
-            end
-        end
-    end
-
-    -- Insert at the found position
-    table.insert(self._spans, idx, span)
-    self._span_gen = (self._span_gen or 0) + 1
-    self._span_cursor = nil
-
-    -- Schedule a re-render
+    local sm = self:span_manager()
+    sm:add(span)
     if self.editor then
-        self.editor:push_background_task(function()
-            return true
-        end)
+        self.editor:push_background_task(function() return true end)
     end
 end
 
---- Remove a span by table reference equality.
---- Lodges a 0ms background task to force re-render.
----@param span table the exact span table to remove
+--- Delegate: remove a span by reference equality.
+---@param span table
 function View:remove_span(span)
-    if not self._spans or #self._spans == 0 then
-        return
-    end
-    for i = 1, #self._spans do
-        if self._spans[i] == span then
-            table.remove(self._spans, i)
-            if #self._spans == 0 then
-                self._spans = nil
-            end
-            self._span_gen = (self._span_gen or 0) + 1
-            self._span_cursor = nil
-            if self.editor then
-                self.editor:push_background_task(function()
-                    return true
-                end)
-            end
-            return
-        end
+    local sm = self:span_manager()
+    sm:remove(span)
+    if self.editor then
+        self.editor:push_background_task(function() return true end)
     end
 end
 
---- Collect spans of a given type for the current frame.
---- Used by the overlay manager during flush.
----@param span_type string '"layer"'|'"anchor"'
----@return table[] spans of that type (order matches insertion)
-function View:_collect_spans(span_type)
-    if not self._spans then
-        return {}
-    end
-    local result = {}
-    for _, s in ipairs(self._spans) do
-        if s.type == span_type then
-            result[#result + 1] = s
-        end
-    end
-    return result
-end
-
---- Query merged properties at a buffer position.
---- Merges all properties spans covering (line, col), later spans win.
----@param line integer 0-based line index
----@param col integer 0-based byte offset
----@return table|nil merged properties, or nil if no properties span covers this position
+--- Delegate: query merged properties at a buffer position.
 function View:query_at(line, col)
-    if not self._spans then
-        return nil
-    end
-    local result = nil
-    for _, s in ipairs(self._spans) do
-        if s.type ~= "properties" then
-            goto continue
-        end
-        -- Check if (line, col) falls inside this span
-        if line >= s.row_s and line <= s.row_e then
-            local col_inside = true
-            if line == s.row_s and col < s.col_s then
-                col_inside = false
-            end
-            if line == s.row_e and col >= s.col_e then
-                col_inside = false
-            end
-            if col_inside then
-                if not result then
-                    result = {}
-                end
-                -- Later-wins merge: copy properties from this span
-                for k, v in pairs(s) do
-                    if
-                        k ~= "type"
-                        and k ~= "col_s"
-                        and k ~= "row_s"
-                        and k ~= "col_e"
-                        and k ~= "row_e"
-                    then
-                        result[k] = v
-                    end
-                end
-            end
-        end
-        ::continue::
-    end
-    return result
+    return self:span_manager():query_at(line, col)
 end
 
---- Return replace spans intersecting a given logical line.
---- Returns them sorted by col_s, guaranteed non-overlapping (invariant).
----@param li integer 0-based line index
----@return table[] replace spans on this line
+--- Delegate: get replace spans for a line.
 function View:_replace_spans_for_line(li)
-    if not self._spans then
-        return {}
-    end
-    local result = {}
-    for _, s in ipairs(self._spans) do
-        if s.type == "replace" and li >= s.row_s and li <= s.row_e then
-            result[#result + 1] = s
-        end
-    end
-    return result
+    return self:span_manager():replace_spans_for_line(li)
 end
 
---- Adjust span positions after buffer edits.
---- Edits are the same {sl, sc, rl, rc, kind, el?, ec?} records that
---- hl_edits carries from batch_edit.
---- Handles:
----   - Same-line insert (kind "insert"): shift spans starting after edit point
----   - Same-line delete (kind or region): shift spans after deletion
----   - Multi-line insert (newline split): shift rows down, insert new row
----   - Multi-line delete (join): shift rows up, remove deleted rows
----   - Collapsed spans (col_s >= col_e or row_s > row_e): delete
----@param edits table[] from batch_edit's hl_edits
+--- Delegate: adjust span positions on edit.
 function View:_adjust_spans_on_edit(edits)
-    if not self._spans or #self._spans == 0 then
-        return
-    end
-
-    for _, e in ipairs(edits) do
-        local sl, sc = e.sl, e.sc
-        local rl, rc = e.rl, e.rc
-        local kind = e.kind
-        local el, ec = e.el, e.ec
-
-        -- Detect the edit type: insert vs delete vs replace (kind is
-        -- "insert" for inserts, a table {el, ec} for replaces/deletes)
-        local is_insert = kind == "insert"
-        local is_replace = type(kind) == "table"
-        local is_delete = is_replace or kind == nil
-
-        -- Compute the byte/line delta
-        local delta_lines = rl - sl
-        local delta_cols -- only meaningful when delta_lines == 0
-        if delta_lines == 0 then
-            delta_cols = rc - sc
-        end
-
-        -- If el/ec is the region end (for deletions/replaces), compute
-        -- the deleted byte and line count
-        local del_lines = 0
-        local del_cols = 0
-        if el then
-            del_lines = el - sl
-            del_cols = ec - sc
-        end
-        if is_insert then
-            del_lines = 0
-            del_cols = 0
-        end
-
-        -- Adjust each span
-        local new_spans = {}
-        local i = 1
-        while i <= #self._spans do
-            local s = self._spans[i]
-
-            -- Layer spans have no buffer coordinates; skip them entirely.
-            if s.type == "layer" then
-                table.insert(new_spans, s)
-                i = i + 1
-                goto continue_edit
-            end
-
-            -- Ephemeral spans (spellcheck underlines, per-frame overlays)
-            -- are rebuilt fresh each frame by the overlay manager. Skip
-            -- position adjustment to avoid drift from partial edits.
-            if s.ephemeral then
-                table.insert(new_spans, s)
-                i = i + 1
-                goto continue_edit
-            end
-
-            -- Determine if the edit affects this span's position
-            -- Line insertion before this span: shift down
-            if is_insert and delta_lines > 0 and sl <= s.row_s then
-                s.row_s = s.row_s + delta_lines
-                s.row_e = s.row_e + delta_lines
-                i = i + 1
-            -- Line insertion before this span's start, same line: shift cols
-            elseif is_insert and delta_lines == 0 and sl == s.row_s and sc <= s.col_s then
-                s.col_s = s.col_s + delta_cols
-                if sl == s.row_e then
-                    s.col_e = s.col_e + delta_cols
-                end
-                i = i + 1
-            -- Lines deleted before/overlapping this span
-            elseif del_lines > 0 and sl <= s.row_s then
-                if s.row_s <= el then
-                    -- This span is fully or partially within the deleted region
-                    -- Mark for removal by not copying it
-                    i = i + 1
-                    goto continue_edit
-                else
-                    s.row_s = s.row_s - del_lines
-                    s.row_e = s.row_e - del_lines
-                    i = i + 1
-                end
-            -- Same-line delete before this span
-            elseif del_lines == 0 and del_cols > 0 then
-                if sl == s.row_s and sc <= s.col_s then
-                    if sl == s.row_e then
-                        -- Both start and end on the same line as the edit
-                        s.col_s = math.max(s.col_s - del_cols, 0)
-                        s.col_e = math.max(s.col_e - del_cols, 0)
-                    elseif sl == s.row_s then
-                        -- Span starts on the edit line but ends later
-                        s.col_s = math.max(s.col_s - del_cols, 0)
-                    end
-                    -- If the span ends on the same line as the edit
-                    if sl == s.row_e and sl ~= s.row_s then
-                        s.col_e = math.max(s.col_e - del_cols, 0)
-                    end
-                end
-                i = i + 1
-            -- Insert into the same line, after the edit point but before span start
-            elseif is_insert and delta_lines == 0 and sl == s.row_s and sc > s.col_s then
-                -- Edit happened inside or after this span on the same line
-                -- Insert before or within the span → expand col_e
-                if s.col_s <= sc and sl == s.row_e then
-                    s.col_e = s.col_e + delta_cols
-                end
-                i = i + 1
-            else
-                -- Span before the edit point or unaffected
-                i = i + 1
-            end
-
-            -- Check for collapsed spans (deleted)
-            if s.row_s > s.row_e or (s.row_s == s.row_e and s.col_s >= s.col_e) then
-                -- Span collapsed; drop it (don't copy to new_spans)
-            else
-                new_spans[#new_spans + 1] = s
-            end
-
-            ::continue_edit::
-        end
-
-        self._spans = new_spans
-        if #self._spans == 0 then
-            self._spans = nil
-        end
-        self._span_gen = (self._span_gen or 0) + 1
-        self._span_cursor = nil
-    end
+    self:span_manager():adjust_on_edit(edits)
 end
 
 ----------------------------------------------------------------------------------------------------

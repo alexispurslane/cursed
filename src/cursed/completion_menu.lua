@@ -762,7 +762,8 @@ function CompletionMenu:_render(editor)
             word_start_col = ctx.word_start_col,
         })
     end
-    local ov = editor.overlays
+    local view = editor:current_view()
+    local sm = view and view:span_manager(editor)
     local term = editor.term
     local w = term:width()
     local h = term:height()
@@ -842,7 +843,7 @@ function CompletionMenu:_render(editor)
     local dim_fg = ui("completion_dim")
 
     local function fp(x, y, text, fg, b)
-        ov:put_float(x, y, text, fg, b)
+        sm:add_layer_span(x, y, text, fg, b)
     end
 
     -- Clear the box interior with default_bg so it floats cleanly.

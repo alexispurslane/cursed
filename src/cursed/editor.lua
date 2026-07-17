@@ -18,7 +18,6 @@ local find_file = require("cursed.find_file")
 local kill_ring = require("cursed.kill_ring")
 local completers = require("cursed.completers")
 local keybind = require("cursed.keybind")
-local OverlayManager = require("cursed.overlay")
 local CompletionMenu = require("cursed.completion_menu")
 local log = require("cursed.log")
 local profile = require("cursed.profile")
@@ -420,7 +419,6 @@ end
 ---@field _blink_on boolean caret visible (drawn) this blink phase
 ---@field _blink_task table|nil handle of the scheduled blink toggle task
 ---@field event_system EventSystem central event hub (pre/post-command, mode_enter/exit, ring-buffer, ...)
----@field overlays OverlayManager screen-space overlay layer (file-anchored + floating)
 ---@field modeline_segments table[] ordered modeline segment specs (bg/format/fill/fg)
 ---@field _last_command string|nil name of the most recently dispatched command (Emacs `last-command`)
 ---@field _extend boolean true while a `*_select` command is running its motion, so the motion's transient-anchor drop (close_edit_for_motion) is suppressed and the shift-selection extends instead of being cleared
@@ -484,8 +482,6 @@ function Editor.new(term)
         _prefix_tokens = {},
         _keymap_chain_changed = nil,
         _prefix_timeout_task = nil,
-        overlays = nil, -- OverlayManager singleton (set below)
-        modeline_segments = nil, -- segment spec list (seeded from DEFAULT_MODELINE_SEGMENTS below)
         _digit_active = false,
         _digit_value = 0,
         _digit_negative = false,
@@ -510,7 +506,6 @@ function Editor.new(term)
         _code_action_lines_by_uri = {}, -- per-URI set of line numbers with available code actions
     }, Editor)
     editor.event_system = EventSystem.new(editor)
-    editor.overlays = OverlayManager.new(editor)
     editor.modeline_segments = {}
     for _, seg in ipairs(DEFAULT_MODELINE_SEGMENTS) do
         editor.modeline_segments[#editor.modeline_segments + 1] = seg
@@ -3637,15 +3632,14 @@ end
 
 --- Render the "Loading..." placeholder.
 ---@param term table
----@param ov OverlayManager
+---@param sm SpanManager|nil
 ---@param fp function
-function Editor:_render_loading(term, ov, fp)
+function Editor:_render_loading(term, sm, fp)
     local msg = "Loading..."
     local x = math.floor(term:width() / 2) - math.floor(#msg / 2)
     local y = math.floor(term:height() / 2)
     fp(x, y, msg, ui("default_fg"), ui("default_bg"))
-    ov:emit_render()
-    ov:flush()
+    if sm then sm:finish_frame(term) end
     term:present()
 end
 
@@ -3675,9 +3669,8 @@ end
 ---@param geo table from _render_geometry
 ---@param term table
 ---@param fp function
----@param ov OverlayManager
 ---@return table layout {max_y, footer_tail, reflowed, vstart_li, vend_li}
-function Editor:_render_layout(mb, view, geo, term, fp, ov)
+function Editor:_render_layout(mb, view, geo, term, fp)
     local w, h = term:width(), term:height()
     local text_w = geo.text_w
     local avail_text = w - geo.gutter_w -- window width minus gutter (no margin narrowing)
@@ -3754,7 +3747,7 @@ end
 ---@param row_bg integer
 ---@param seg_segs table[]|nil sorted syntax highlight spans {cs,ce,fg}
 ---@param focus_dim function(fg,bg) -> fg,bg
----@param span_ctx table|nil {cur,n} monotonic cursor into view._spans for this logical line
+---@param sm SpanManager|nil span manager for properties lookup
 local function _paint_text_segment(
     term,
     view,
@@ -3765,7 +3758,7 @@ local function _paint_text_segment(
     row_bg,
     seg_segs,
     focus_dim,
-    span_ctx
+    sm
 )
     local dfg, dbg = focus_dim(ui("default_fg"), row_bg or ui("default_bg"))
     local x = text_x + seg.col
@@ -3796,67 +3789,12 @@ local function _paint_text_segment(
             end
             -- Resolve properties spans covering this grapheme
             local line_byte = seg.buf_start + bo[gi]
-            local props_fg, props_bg, props_underline = nil, nil, nil
-            local props_bold, props_italic = false, false
-
-            if span_ctx and span_ctx.n > 0 and view._spans then
-                -- Advance cursor past spans that end before this byte
-                while span_ctx.cur <= span_ctx.n do
-                    local s = view._spans[span_ctx.cur]
-                    if s.type ~= "properties" then
-                        span_ctx.cur = span_ctx.cur + 1
-                    elseif s.row_e < li or (s.row_e == li and s.col_e <= line_byte) then
-                        span_ctx.cur = span_ctx.cur + 1
-                    else
-                        break
-                    end
-                end
-
-                -- Collect all overlapping properties spans (later wins)
-                local i = span_ctx.cur
-                while i <= span_ctx.n do
-                    local s = view._spans[i]
-                    if s.type ~= "properties" then
-                        i = i + 1
-                    else
-                        -- Check coverage
-                        local covers = false
-                        if s.row_s < li and s.row_e > li then
-                            covers = true
-                        elseif s.row_s == li and s.row_e > li then
-                            covers = line_byte >= s.col_s
-                        elseif s.row_s < li and s.row_e == li then
-                            covers = line_byte < s.col_e
-                        elseif s.row_s == li and s.row_e == li then
-                            covers = line_byte >= s.col_s and line_byte < s.col_e
-                        end
-
-                        if not covers then
-                            if s.row_s > li or (s.row_s == li and s.col_s > line_byte) then
-                                break
-                            end
-                            i = i + 1
-                        else
-                            if s.fg then
-                                props_fg = s.fg
-                            end
-                            if s.bg then
-                                props_bg = s.bg
-                            end
-                            if s.underline_color then
-                                props_underline = s.underline_color
-                            end
-                            if s.bold then
-                                props_bold = s.bold
-                            end
-                            if s.italic then
-                                props_italic = s.italic
-                            end
-                            i = i + 1
-                        end
-                    end
-                end
-            end
+            local props = sm and sm:properties_at(li, line_byte) or nil
+            local props_fg = props and props.fg
+            local props_bg = props and props.bg
+            local props_underline = props and props.underline_color
+            local props_bold = props and props.bold
+            local props_italic = props and props.italic
 
             local final_fg = props_fg or dfg
             local final_bg = props_bg or dbg
@@ -4035,11 +3973,11 @@ end
 ---@param view View
 ---@param term table
 ---@param mb Minibuffer
----@param ov OverlayManager
+---@param sm SpanManager|nil
 ---@param focus_dim function
 ---@param geo table from _render_geometry
 ---@param layout table from _render_layout
-function Editor:_render_content(view, term, mb, ov, focus_dim, geo, layout)
+function Editor:_render_content(view, term, mb, sm, focus_dim, geo, layout)
     local w = term:width()
     local max_y = layout.max_y
     local line_count = view.buffer:line_count()
@@ -4091,20 +4029,9 @@ function Editor:_render_content(view, term, mb, ov, focus_dim, geo, layout)
             end
         end
 
-        -- Properties span cursor for this logical line
-        local span_ctx = { cur = 1, n = 0 }
-        if view._spans then
-            span_ctx.n = #view._spans
-            -- Fast-forward cursor to the first span that intersects this line
-            while span_ctx.cur <= span_ctx.n do
-                local s = view._spans[span_ctx.cur]
-                if s.type ~= "properties" or s.row_e < li then
-                    span_ctx.cur = span_ctx.cur + 1
-                else
-                    break
-                end
-            end
-        end
+        -- Position the span manager cursor at this logical line.
+        -- The monotonic cursor handles ephemeral cleanup as it advances.
+        if sm then sm:position_cursor(li) end
 
         -- Sub-rows for this logical line
         while sub_row < total_sub and row <= max_y do
@@ -4152,7 +4079,7 @@ function Editor:_render_content(view, term, mb, ov, focus_dim, geo, layout)
                             row_bg,
                             seg_segs,
                             focus_dim,
-                            span_ctx
+                            sm
                         )
 
                         -- Per-segment selection overlay
@@ -4259,7 +4186,7 @@ function Editor:_render_content(view, term, mb, ov, focus_dim, geo, layout)
                                                     ch = string.rep(" ", tw - (col_in_row % tw))
                                                 end
                                             end
-                                            ov:put_float(
+                                            sm:add_layer_span(
                                                 geo.text_x + seg.col + acc_w,
                                                 row,
                                                 ch,
@@ -4315,7 +4242,7 @@ function Editor:_render_content(view, term, mb, ov, focus_dim, geo, layout)
                     local guide_fg = ui("indent_guide")
                     for _, g in ipairs(guide_cols) do
                         if g < row_w then
-                            ov:put_float(geo.text_x + g, row, "│", guide_fg, row_bg)
+                            sm:add_layer_span(geo.text_x + g, row, "│", guide_fg, row_bg)
                         end
                     end
                 end
@@ -4324,7 +4251,7 @@ function Editor:_render_content(view, term, mb, ov, focus_dim, geo, layout)
                 if not view.wrap and view.margin and view.margin > 0 then
                     local indicator_x = geo.text_x + view.margin
                     if indicator_x < w then
-                        ov:put_float(indicator_x, row, "│", ui("indent_guide"), row_bg)
+                        sm:add_layer_span(indicator_x, row, "│", ui("indent_guide"), row_bg)
                     end
                 end
             end)
@@ -4357,7 +4284,7 @@ function Editor:_render_content(view, term, mb, ov, focus_dim, geo, layout)
                 if view.whole_line_cursor then
                     local cfg = ui("cursor_fg")
                     local cbg = ui("cursor_bg")
-                    ov:put_float(geo.text_x, sy, spaces(row_w), cfg, cbg)
+                    sm:add_layer_span(geo.text_x, sy, spaces(row_w), cfg, cbg)
                     -- Re-paint all TEXT segment graphemes in cursor fg/bg.
                     for _, seg in ipairs(segments) do
                         if seg.type == "text" then
@@ -4374,7 +4301,7 @@ function Editor:_render_content(view, term, mb, ov, focus_dim, geo, layout)
                                     ch = string.rep(" ", tw - (col_in_row % tw))
                                 end
                                 if #ch > 0 then
-                                    ov:put_float(geo.text_x + seg.col + acc_w, sy, ch, cfg, cbg)
+                                    sm:add_layer_span(geo.text_x + seg.col + acc_w, sy, ch, cfg, cbg)
                                 end
                                 acc_w = acc_w + gw
                             end
@@ -4393,7 +4320,7 @@ function Editor:_render_content(view, term, mb, ov, focus_dim, geo, layout)
                             break
                         end
                     end
-                    ov:put_float(geo.text_x + ccol, sy, ch, ui("cursor_fg"), ui("cursor_bg"))
+                    sm:add_layer_span(geo.text_x + ccol, sy, ch, ui("cursor_fg"), ui("cursor_bg"))
                 end
             end
         end
@@ -4428,20 +4355,20 @@ function Editor:_render_content(view, term, mb, ov, focus_dim, geo, layout)
                     break
                 end
             end
-            ov:put_float(geo.text_x + ccol, sy, ch, ui("cursor_fg"), ui("drop_bg"))
+            sm:add_layer_span(geo.text_x + ccol, sy, ch, ui("cursor_fg"), ui("drop_bg"))
         end
         ::continue_drop_post::
     end
 end
 
---- Render modeline, eval result, overlay flush, and present.
+--- Render modeline, eval result, and present.
 ---@param view View
 ---@param term table
 ---@param mb Minibuffer
----@param ov OverlayManager
+---@param sm SpanManager|nil
 ---@param fp function
 ---@param layout table from _render_layout
-function Editor:_render_finalize(view, term, mb, ov, fp, layout)
+function Editor:_render_finalize(view, term, mb, sm, fp, layout)
     local h = term:height()
     local w = term:width()
 
@@ -4455,8 +4382,7 @@ function Editor:_render_finalize(view, term, mb, ov, fp, layout)
         fp(0, modeline_y + 1, "=> " .. self._eval_result, ui("status_message"), ui("default_bg"))
     end
 
-    ov:emit_render()
-    ov:flush()
+    if sm then sm:finish_frame(term) end
     term:present()
 end
 
@@ -4468,11 +4394,11 @@ function Editor:render()
     -- Phase 1: Clamp cursors + setup
     self:_render_clamp_views()
     local mb = self.minibuffer
-    local ov = self.overlays
     local view = self:current_view()
-    ov:begin_frame(view)
+    local sm = view and view:span_manager(self)
+    if sm then sm:begin_frame() end
     local fp = function(x, y, text, fg, bg)
-        ov:put_float(x, y, text, fg, bg)
+        if sm then sm:add_layer_span(x, y, text, fg, bg) end
     end
     local BLACK = 0x000000
     local function focus_dim(fg, bg)
@@ -4487,7 +4413,7 @@ function Editor:render()
 
     -- Phase 3: Loading state
     if not view or not view.file_loaded then
-        self:_render_loading(term, ov, fp)
+        self:_render_loading(term, sm, fp)
         profile.span("editor", "render_total", render_t0)
         return
     end
@@ -4501,13 +4427,13 @@ function Editor:render()
     end
 
     -- Phase 5: Layout
-    local layout = self:_render_layout(mb, view, geo, term, fp, ov)
+    local layout = self:_render_layout(mb, view, geo, term, fp)
 
     -- Phase 6: Content
-    self:_render_content(view, term, mb, ov, focus_dim, geo, layout)
+    self:_render_content(view, term, mb, sm, focus_dim, geo, layout)
 
     -- Phase 7: Finalize
-    self:_render_finalize(view, term, mb, ov, fp, layout)
+    self:_render_finalize(view, term, mb, sm, fp, layout)
 
     profile.span("editor", "render_total", render_t0)
 end

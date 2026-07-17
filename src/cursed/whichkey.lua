@@ -348,17 +348,17 @@ local function paint_cell(ov, x, y, e, key_col, label_col, bg, key_fg, label_fg)
     else
         label = truncate_cells(label, label_col)
     end
-    ov:put_float(x, y, " ", key_fg, bg) -- leading pad
+    sm:add_layer_span(x, y, " ", key_fg, bg) -- leading pad
     local kx = x + 1
-    ov:put_float(kx, y, key .. string.rep(" ", key_col - cell_len(key)), key_fg, bg)
+    sm:add_layer_span(kx, y, key .. string.rep(" ", key_col - cell_len(key)), key_fg, bg)
     local gx = kx + key_col
-    ov:put_float(gx, y, "  ", label_fg, bg) -- key→label gap
+    sm:add_layer_span(gx, y, "  ", label_fg, bg) -- key→label gap
     local lx = gx + 2
     if label_col > 0 then
-        ov:put_float(lx, y, label .. string.rep(" ", label_col - cell_len(label)), label_fg, bg)
+        sm:add_layer_span(lx, y, label .. string.rep(" ", label_col - cell_len(label)), label_fg, bg)
     end
     local tx = lx + label_col
-    ov:put_float(tx, y, "  ", label_fg, bg) -- trailing pad
+    sm:add_layer_span(tx, y, "  ", label_fg, bg) -- trailing pad
 end
 
 --- Paint the popup from a computed layout: rounded top/bottom borders
@@ -382,13 +382,13 @@ local function paint_popup(ov, lay)
     -- Fill the whole box (borders + content + footer) with modeline_bg
     -- so it paints over the buffer cleanly as a solid chrome strip.
     for r = lay.box_y_top, lay.box_y_bot do
-        ov:put_float(0, r, string.rep(" ", lay.w), label_fg, bg)
+        sm:add_layer_span(0, r, string.rep(" ", lay.w), label_fg, bg)
     end
 
     -- Top border: ╭─...─╮
-    ov:put_float(0, lay.box_y_top, "╭" .. string.rep("─", lay.w - 2) .. "╮", border_fg, bg)
+    sm:add_layer_span(0, lay.box_y_top, "╭" .. string.rep("─", lay.w - 2) .. "╮", border_fg, bg)
     -- Bottom border: ╰─...─╯
-    ov:put_float(0, lay.box_y_bot, "╰" .. string.rep("─", lay.w - 2) .. "╯", border_fg, bg)
+    sm:add_layer_span(0, lay.box_y_bot, "╰" .. string.rep("─", lay.w - 2) .. "╯", border_fg, bg)
 
     -- Content rows: inset by 1 (inside the borders).
     for r = 1, n_rows do
@@ -408,10 +408,10 @@ local function paint_popup(ov, lay)
         local scheme = ColorScheme.active
         local yellow = scheme and scheme:slot_color(0x0A) or ui("minibuffer_metadata")
         local hint = "PgUp / PgDn  scroll pages"
-        ov:put_float(1, lay.footer_y, hint, yellow, bg)
+        sm:add_layer_span(1, lay.footer_y, hint, yellow, bg)
         local ind = string.format("(%d/%d)", lay.page + 1, lay.page_count)
         local ix = lay.w - 1 - cell_len(ind)
-        ov:put_float(ix, lay.footer_y, ind, label_fg, bg)
+        sm:add_layer_span(ix, lay.footer_y, ind, label_fg, bg)
     end
 end
 
@@ -427,7 +427,8 @@ local WhichKey = {}
 function WhichKey.setup(editor)
     local es = editor.event_system
     es:on("render_overlay", function(ed)
-        local ov = ed.overlays
+        local view = ed:current_view()
+    local sm = view and view:span_manager(ed)
         if ov == nil then
             return
         end

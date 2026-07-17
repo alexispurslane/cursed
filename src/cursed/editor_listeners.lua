@@ -353,7 +353,7 @@ function draw_float_box(ov, ed, c, lines, border_fg)
 	end
 	local box_h = #lines + 2 -- borders + content
 
-	local csx, csy = ov:file_to_screen(c.line, c.col)
+	local csx, csy = sm:file_to_screen(c.line, c.col)
 	if csx == nil or csy == nil then
 		return -- cursor off-screen: nothing to anchor to
 	end
@@ -385,15 +385,15 @@ function draw_float_box(ov, ed, c, lines, border_fg)
 
 	-- Solid fill (so it paints over buffer text cleanly).
 	for r = box_y_top, box_y_top + box_h - 1 do
-		ov:put_float(x, r, string.rep(" ", box_w), text_fg, bg)
+		sm:add_layer_span(x, r, string.rep(" ", box_w), text_fg, bg)
 	end
 	-- Borders.
-	ov:put_float(x, box_y_top, "╭" .. string.rep("─", box_w - 2) .. "╮", border_fg, bg)
-	ov:put_float(x, box_y_top + box_h - 1, "╰" .. string.rep("─", box_w - 2) .. "╯", border_fg, bg)
+	sm:add_layer_span(x, box_y_top, "╭" .. string.rep("─", box_w - 2) .. "╮", border_fg, bg)
+	sm:add_layer_span(x, box_y_top + box_h - 1, "╰" .. string.rep("─", box_w - 2) .. "╯", border_fg, bg)
 	-- Content rows (inset by 1).
 	for i, l in ipairs(lines) do
 		local y = box_y_top + i
-		ov:put_float(x + 1, y, l, text_fg, bg)
+		sm:add_layer_span(x + 1, y, l, text_fg, bg)
 	end
 end
 
@@ -796,8 +796,9 @@ local function on_render_squiggle_demo(ed)
 	if not ed._squiggle_demo then
 		return
 	end
-	local ov = ed.overlays
-	if ov == nil then
+	local view = ed:current_view()
+    local sm = view and view:span_manager(ed)
+	if sm == nil then
 		return
 	end
 	local view = ed:current_view()
@@ -838,14 +839,15 @@ local function on_render_squiggle_demo(ed)
 	end
 	local scheme = ColorScheme.active
 	local rgb = scheme and scheme:color("diagnostic_error") or 0xFF5353
-	ov:put_underline(line, lo - 1, hi, rgb)
+	sm:add_properties_span(line, lo - 1, hi, { underline_color = rgb })
 end
 
 --- LSP diagnostic squiggles overlay.
 ---@param ed Editor
 local function on_render_diagnostic_squiggles(ed)
-	local ov = ed.overlays
-	if ov == nil then
+	local view = ed:current_view()
+    local sm = view and view:span_manager(ed)
+	if sm == nil then
 		return
 	end
 	local view = ed:current_view()
@@ -919,7 +921,7 @@ local function on_render_diagnostic_squiggles(ed)
 				b_e = clen
 			end
 			if b_e > b_s then
-				ov:put_underline(line, b_s, b_e, rgb)
+				sm:add_properties_span(line, b_s, b_e, { underline_color = rgb })
 			end
 		end
 		::continue::
@@ -1004,8 +1006,9 @@ end
 --- falling back to `diagnostic_warn` when unset.
 ---@param ed Editor
 local function on_render_spell_squiggles(ed)
-	local ov = ed.overlays
-	if ov == nil then
+	local view = ed:current_view()
+    local sm = view and view:span_manager(ed)
+	if sm == nil then
 		return
 	end
 	if ed._spell == nil then
@@ -1054,14 +1057,15 @@ local function on_render_spell_squiggles(ed)
 				b_e = clen
 			end
 			if b_e > b_s then
-				ov:put_underline(it.line, b_s, b_e, rgb)
+				sm:add_properties_span(it.line, b_s, b_e, { underline_color = rgb })
 			end
 		end
 	end
 end
 
 local function on_render_diagnostic_hover(ed)
-	local ov = ed.overlays
+	local view = ed:current_view()
+    local sm = view and view:span_manager(ed)
 	local dismissed = ed._diag_hover_dismissed_sig
 	local view = ed:current_view()
 	local buf = view and view.buffer
@@ -1094,7 +1098,7 @@ local function on_render_diagnostic_hover(ed)
 	end
 	ed._diag_hover_active_sig = active_sig
 	ed._diag_hover_visible = visible
-	if not visible or active == nil or c == nil or ov == nil then
+	if not visible or active == nil or c == nil or sm == nil then
 		return
 	end
 
@@ -1115,8 +1119,9 @@ end
 --- LSP hover popup overlay (cursor-idle, debounced).
 ---@param ed Editor
 local function on_render_lsp_hover(ed)
-	local ov = ed.overlays
-	if ov == nil then
+	local view = ed:current_view()
+    local sm = view and view:span_manager(ed)
+	if sm == nil then
 		return
 	end
 	local view = ed:current_view()
@@ -1226,7 +1231,7 @@ local function on_render_lsp_hover(ed)
 	local box_w = content_w + 2
 	local box_h = content_h + 2
 
-	local csx, csy = ov:file_to_screen(c.line, c.col)
+	local csx, csy = sm:file_to_screen(c.line, c.col)
 	if csx == nil or csy == nil then
 		return
 	end
@@ -1258,11 +1263,11 @@ local function on_render_lsp_hover(ed)
 	mdview.render(term, x + 1, box_y_top + 1, content_w, md, text_fg, bg, content_h)
 	local top = "╭" .. string.rep("─", box_w - 2) .. "╮"
 	local bot = "╰" .. string.rep("─", box_w - 2) .. "╯"
-	ov:put_float(x, box_y_top, top, border_fg, bg)
-	ov:put_float(x, box_y_top + box_h - 1, bot, border_fg, bg)
+	sm:add_layer_span(x, box_y_top, top, border_fg, bg)
+	sm:add_layer_span(x, box_y_top + box_h - 1, bot, border_fg, bg)
 	for r = 1, box_h - 2 do
-		ov:put_float(x, box_y_top + r, "│", border_fg, bg)
-		ov:put_float(x + box_w - 1, box_y_top + r, "│", border_fg, bg)
+		sm:add_layer_span(x, box_y_top + r, "│", border_fg, bg)
+		sm:add_layer_span(x + box_w - 1, box_y_top + r, "│", border_fg, bg)
 	end
 end
 

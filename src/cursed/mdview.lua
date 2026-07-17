@@ -779,15 +779,16 @@ function M.setup(editor)
         -- Border rim (queued as floats so it paints during ov:flush(),
         -- AFTER mdview.render's direct term:print, landing on the rim
         -- over any content that bled to the edge).
-        local ov = ed.overlays
+        local view = ed:current_view()
+    local sm = view and view:span_manager(ed)
         if ov ~= nil then
             local top = "╭" .. string.rep("─", box_w - 2) .. "╮"
             local bot = "╰" .. string.rep("─", box_w - 2) .. "╯"
-            ov:put_float(x, y, top, border_fg, bg)
-            ov:put_float(x, y + box_h - 1, bot, border_fg, bg)
+            sm:add_layer_span(x, y, top, border_fg, bg)
+            sm:add_layer_span(x, y + box_h - 1, bot, border_fg, bg)
             for r = 1, box_h - 2 do
-                ov:put_float(x, y + r, "│", border_fg, bg)
-                ov:put_float(x + box_w - 1, y + r, "│", border_fg, bg)
+                sm:add_layer_span(x, y + r, "│", border_fg, bg)
+                sm:add_layer_span(x + box_w - 1, y + r, "│", border_fg, bg)
             end
         end
     end)
