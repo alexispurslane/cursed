@@ -3754,7 +3754,19 @@ end
 ---@param row_bg integer
 ---@param seg_segs table[]|nil sorted syntax highlight spans {cs,ce,fg}
 ---@param focus_dim function(fg,bg) -> fg,bg
-local function _paint_text_segment(term, view, li, row, text_x, seg, row_bg, seg_segs, focus_dim)
+---@param span_ctx table|nil {cur,n} monotonic cursor into view._spans for this logical line
+local function _paint_text_segment(
+    term,
+    view,
+    li,
+    row,
+    text_x,
+    seg,
+    row_bg,
+    seg_segs,
+    focus_dim,
+    span_ctx
+)
     local dfg, dbg = focus_dim(ui("default_fg"), row_bg or ui("default_bg"))
     local x = text_x + seg.col
     local text = seg.text
@@ -3782,7 +3794,85 @@ local function _paint_text_segment(term, view, li, row, text_x, seg, row_bg, seg
                     ch = string.rep(" ", tw - (col % tw))
                 end
             end
-            term:print(x, row, ch, dfg, dbg)
+            -- Resolve properties spans covering this grapheme
+            local line_byte = seg.buf_start + bo[gi]
+            local props_fg, props_bg, props_underline = nil, nil, nil
+            local props_bold, props_italic = false, false
+
+            if span_ctx and span_ctx.n > 0 and view._spans then
+                -- Advance cursor past spans that end before this byte
+                while span_ctx.cur <= span_ctx.n do
+                    local s = view._spans[span_ctx.cur]
+                    if s.type ~= "properties" then
+                        span_ctx.cur = span_ctx.cur + 1
+                    elseif s.row_e < li or (s.row_e == li and s.col_e <= line_byte) then
+                        span_ctx.cur = span_ctx.cur + 1
+                    else
+                        break
+                    end
+                end
+
+                -- Collect all overlapping properties spans (later wins)
+                local i = span_ctx.cur
+                while i <= span_ctx.n do
+                    local s = view._spans[i]
+                    if s.type ~= "properties" then
+                        i = i + 1
+                    else
+                        -- Check coverage
+                        local covers = false
+                        if s.row_s < li and s.row_e > li then
+                            covers = true
+                        elseif s.row_s == li and s.row_e > li then
+                            covers = line_byte >= s.col_s
+                        elseif s.row_s < li and s.row_e == li then
+                            covers = line_byte < s.col_e
+                        elseif s.row_s == li and s.row_e == li then
+                            covers = line_byte >= s.col_s and line_byte < s.col_e
+                        end
+
+                        if not covers then
+                            if s.row_s > li or (s.row_s == li and s.col_s > line_byte) then
+                                break
+                            end
+                            i = i + 1
+                        else
+                            if s.fg then
+                                props_fg = s.fg
+                            end
+                            if s.bg then
+                                props_bg = s.bg
+                            end
+                            if s.underline_color then
+                                props_underline = s.underline_color
+                            end
+                            if s.bold then
+                                props_bold = s.bold
+                            end
+                            if s.italic then
+                                props_italic = s.italic
+                            end
+                            i = i + 1
+                        end
+                    end
+                end
+            end
+
+            local final_fg = props_fg or dfg
+            local final_bg = props_bg or dbg
+            if props_bold then
+                final_fg = bit.bor(final_fg, tb.bold)
+            end
+            if props_italic then
+                final_fg = bit.bor(final_fg, tb.italic)
+            end
+
+            term:print(x, row, ch, final_fg, final_bg)
+            if props_underline then
+                for col = 0, gw - 1 do
+                    term:squiggle_cell(x + col, row, props_underline)
+                end
+            end
             x = x + gw
             total_w = total_w + gw
         end
@@ -3823,7 +3913,85 @@ local function _paint_text_segment(term, view, li, row, text_x, seg, row_bg, seg
             end
         end
 
-        term:print(x, row, ch, use_fg, dbg)
+        -- Resolve properties spans covering this grapheme
+        local line_byte = seg.buf_start + gs_0
+        local props_fg, props_bg, props_underline = nil, nil, nil
+        local props_bold, props_italic = false, false
+
+        if span_ctx and span_ctx.n > 0 and view._spans then
+            -- Advance cursor past spans that end before this byte
+            while span_ctx.cur <= span_ctx.n do
+                local s = view._spans[span_ctx.cur]
+                if s.type ~= "properties" then
+                    span_ctx.cur = span_ctx.cur + 1
+                elseif s.row_e < li or (s.row_e == li and s.col_e <= line_byte) then
+                    span_ctx.cur = span_ctx.cur + 1
+                else
+                    break
+                end
+            end
+
+            -- Collect all overlapping properties spans (later wins)
+            local i = span_ctx.cur
+            while i <= span_ctx.n do
+                local s = view._spans[i]
+                if s.type ~= "properties" then
+                    i = i + 1
+                else
+                    -- Check coverage
+                    local covers = false
+                    if s.row_s < li and s.row_e > li then
+                        covers = true
+                    elseif s.row_s == li and s.row_e > li then
+                        covers = line_byte >= s.col_s
+                    elseif s.row_s < li and s.row_e == li then
+                        covers = line_byte < s.col_e
+                    elseif s.row_s == li and s.row_e == li then
+                        covers = line_byte >= s.col_s and line_byte < s.col_e
+                    end
+
+                    if not covers then
+                        if s.row_s > li or (s.row_s == li and s.col_s > line_byte) then
+                            break
+                        end
+                        i = i + 1
+                    else
+                        if s.fg then
+                            props_fg = s.fg
+                        end
+                        if s.bg then
+                            props_bg = s.bg
+                        end
+                        if s.underline_color then
+                            props_underline = s.underline_color
+                        end
+                        if s.bold then
+                            props_bold = s.bold
+                        end
+                        if s.italic then
+                            props_italic = s.italic
+                        end
+                        i = i + 1
+                    end
+                end
+            end
+        end
+
+        local final_fg = props_fg or use_fg or dfg
+        local final_bg = props_bg or dbg
+        if props_bold then
+            final_fg = bit.bor(final_fg, tb.bold)
+        end
+        if props_italic then
+            final_fg = bit.bor(final_fg, tb.italic)
+        end
+
+        term:print(x, row, ch, final_fg, final_bg)
+        if props_underline then
+            for col = 0, gw - 1 do
+                term:squiggle_cell(x + col, row, props_underline)
+            end
+        end
         x = x + gw
         total_w = total_w + gw
     end
@@ -3923,6 +4091,21 @@ function Editor:_render_content(view, term, mb, ov, focus_dim, geo, layout)
             end
         end
 
+        -- Properties span cursor for this logical line
+        local span_ctx = { cur = 1, n = 0 }
+        if view._spans then
+            span_ctx.n = #view._spans
+            -- Fast-forward cursor to the first span that intersects this line
+            while span_ctx.cur <= span_ctx.n do
+                local s = view._spans[span_ctx.cur]
+                if s.type ~= "properties" or s.row_e < li then
+                    span_ctx.cur = span_ctx.cur + 1
+                else
+                    break
+                end
+            end
+        end
+
         -- Sub-rows for this logical line
         while sub_row < total_sub and row <= max_y do
             content_end_row = row + 1
@@ -3968,7 +4151,8 @@ function Editor:_render_content(view, term, mb, ov, focus_dim, geo, layout)
                             seg,
                             row_bg,
                             seg_segs,
-                            focus_dim
+                            focus_dim,
+                            span_ctx
                         )
 
                         -- Per-segment selection overlay

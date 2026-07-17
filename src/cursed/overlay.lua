@@ -174,17 +174,31 @@ end
 --- overlays still paint.
 ---@param view table|nil the view being rendered this frame
 function OverlayManager:begin_frame(view)
-    -- Remove previous frame's anchor spans from the old view so they don't
-    -- accumulate in the view's _spans list across frames.
-    if self._view then
-        for _, s in ipairs(self._ephemeral_spans) do
-            if s.type == "anchor" then
-                self._view:remove_span(s)
+    -- If switching views, clean up ephemeral spans from the old view's
+    -- _spans. We scan _spans directly for ephemeral=true rather than
+    -- relying on _ephemeral_spans, which was cleared by flush() at the
+    -- end of the last frame.
+    -- Otherwise, ephemeral spans are kept until emit_render so that
+    -- properties spans are visible during _render_content (inline
+    -- rendering). emit_render removes old ones before adding new ones.
+    if view ~= self._view and self._view then
+        if self._view._spans then
+            local kept = {}
+            for _, s in ipairs(self._view._spans) do
+                if not s.ephemeral then
+                    kept[#kept + 1] = s
+                end
             end
+            self._view._spans = kept
+            if #self._view._spans == 0 then
+                self._view._spans = nil
+            end
+            self._view._span_gen = (self._view._span_gen or 0) + 1
+            self._view._span_cursor = nil
         end
+        self._ephemeral_spans = {}
     end
     self._view = view
-    self._ephemeral_spans = {}
     self._file = {}
     self._float = {}
     self._underline = {}
@@ -208,6 +222,7 @@ function OverlayManager:put_file(line, col, text, fg, bg)
         text = text,
         fg = fg,
         bg = bg,
+        ephemeral = true,
         draw = function(self, term, sx, sy)
             if sx ~= nil and sy ~= nil then
                 term:print(sx, sy, self.text, self.fg, self.bg)
@@ -253,10 +268,9 @@ function OverlayManager:put_float(sx, sy, text, fg, bg)
 end
 
 --- Register a file-anchored squiggly underline spanning the byte range
---- [s_col, e_col) on `line`. Creates an anchor span whose draw function
---- receives resolved per-sub-row screen-cell ranges from `_resolve_underline`.
---- Ranges that span wrap sub-rows are segmented per sub-row; off-screen
---- anchors are skipped.
+--- [s_col, e_col) on `line`. Creates a properties span with
+--- `underline_color` that the inline renderer resolves during painting
+--- via the properties span cursor — no flush-phase work is needed.
 ---
 --- `rgb` is a 0xRRGGBB truecolor int for the squiggle (use a resolved
 --- `diagnostic_error`/`_warn`/`_info`/`_hint` color).
@@ -269,38 +283,47 @@ function OverlayManager:put_underline(line, s_col, e_col, rgb)
         return
     end
     local span = {
-        type = "anchor",
+        type = "properties",
         row_s = line,
         col_s = s_col,
         row_e = line,
         col_e = e_col,
-        rgb = rgb,
-        draw = function(self, term, ranges)
-            for _, r in ipairs(ranges) do
-                local sx_start, sx_end, sy = r[1], r[2], r[3]
-                for col = sx_start, sx_end - 1 do
-                    term:squiggle_cell(col, sy, self.rgb)
-                end
-            end
-        end,
+        underline_color = rgb,
+        ephemeral = true,
     }
-    -- Insert directly into view._spans (same rationale as put_file).
-    local view = self._view
+    self._ephemeral_spans[#self._ephemeral_spans + 1] = span
+    local view = self:_v()
     if view then
-        if not view._spans then
-            view._spans = {}
-        end
-        local idx = view:_span_insertion_index(span.row_s, span.col_s)
-        table.insert(view._spans, idx, span)
-        view._span_gen = (view._span_gen or 0) + 1
-        view._span_cursor = nil
+        view:add_span(span)
     end
-    table.insert(self._ephemeral_spans, span)
 end
 
 --- Fire the `render_overlay` event so extensions register overlays for
 --- this frame. The editor hub delivers the editor to each listener.
 function OverlayManager:emit_render()
+    -- Remove previous frame's ephemeral spans from _spans before listeners
+    -- add new ones. We scan _spans directly for ephemeral=true rather than
+    -- relying on _ephemeral_spans tracking, which was cleared by flush() at
+    -- the end of the last frame.
+    -- This runs AFTER _render_content, so the old spans were visible during
+    -- inline rendering; now we swap them out for the next frame.
+    -- Layer spans in _ephemeral_spans (cursor, modeline, etc.) are preserved
+    -- for flush() to paint — we do NOT clear _ephemeral_spans here.
+    if self._view and self._view._spans then
+        local kept = {}
+        for _, s in ipairs(self._view._spans) do
+            if not s.ephemeral then
+                kept[#kept + 1] = s
+            end
+        end
+        self._view._spans = kept
+        if #self._view._spans == 0 then
+            self._view._spans = nil
+        end
+        self._view._span_gen = (self._view._span_gen or 0) + 1
+        self._view._span_cursor = nil
+    end
+
     local es = self._editor.event_system
     if es then
         local n = 0
@@ -321,32 +344,26 @@ end
 
 --- Paint all registered overlays for this frame.
 ---
---- Phase 1: anchor spans (buffer-space, file-anchored). These paint over
----   the buffer text but under floating overlays. Each anchor span is either:
----   • a text overlay — resolved to screen via file_to_screen, then drawn
----   • an underline — resolved via _resolve_underline to per-sub-row ranges,
----     then squiggled cell-by-cell
----   Off-screen anchors are skipped (file_to_screen returns nil).
+--- Phase 1: anchor spans (buffer-space, file-anchored). Each anchor span is
+---   resolved to screen via file_to_screen, then drawn. Off-screen anchors
+---   are skipped (file_to_screen returns nil). Properties spans from
+---   put_underline are handled inline by the renderer — no flush work needed.
 ---
 --- Phase 2: layer spans (screen-space, floating). These paint over
 ---   everything at their absolute screen coordinates, in registration
 ---   order (later overdraws earlier).
 ---
---- Clears _ephemeral_spans (begin_frame removes old anchors from view._spans).
---- Old queue fields (_file, _float, _underline) are also cleared for
---- backward compatibility but are no longer used for painting.
+--- Clears _ephemeral_spans (begin_frame removes old anchors/properties from
+--- view._spans). Old queue fields (_file, _float, _underline) are also
+--- cleared for backward compatibility but are no longer used for painting.
 function OverlayManager:flush()
     local term = self._term
     local n_all = #self._ephemeral_spans
     local n_anchor = 0
-    local n_underline = 0
     local n_layer = 0
     for _, s in ipairs(self._ephemeral_spans) do
         if s.type == "anchor" then
             n_anchor = n_anchor + 1
-            if s.rgb ~= nil then
-                n_underline = n_underline + 1
-            end
         elseif s.type == "layer" then
             n_layer = n_layer + 1
         end
@@ -357,20 +374,13 @@ function OverlayManager:flush()
     local t_anchor = profile.now_us()
     for _, s in ipairs(self._ephemeral_spans) do
         if s.type == "anchor" then
-            if s.rgb ~= nil then
-                -- Underline: resolve to per-sub-row screen ranges and draw.
-                local ranges = self:_resolve_underline(s)
-                s:draw(term, ranges)
-            else
-                -- Text overlay: resolve buffer→screen.
-                local sx, sy = self:file_to_screen(s.row_s, s.col_s)
-                s:draw(term, sx, sy)
-            end
+            -- Text overlay: resolve buffer→screen.
+            local sx, sy = self:file_to_screen(s.row_s, s.col_s)
+            s:draw(term, sx, sy)
         end
     end
     profile.span("overlay", "flush_anchor", t_anchor, {
         count = n_anchor,
-        underline = n_underline,
     })
 
     -- Phase 2: layer spans (floating, screen-space).
@@ -388,43 +398,9 @@ function OverlayManager:flush()
     self._underline = {}
     profile.span("overlay", "flush", flush_t0, {
         anchor = n_anchor,
-        underline = n_underline,
         layer = n_layer,
         total = n_all,
     })
-end
-
---- Resolve an underline anchor span to per-sub-row screen-cell ranges.
---- Segments the underline across wrap sub-rows, skips lines past the
---- document and cells outside the buffer area. Uses the frame's snapshot
---- view and geometry so the squiggle tracks the glyph it sits under.
----@param u table anchor span with row_s, col_s, col_e, rgb
----@return {integer, integer, integer}[] {sx_start, sx_end, sy} entries
-function OverlayManager:_resolve_underline(u)
-    local view = self._view
-    local g = self:_geom()
-    if not view or not g then
-        return {}
-    end
-    local line = u.row_s
-    if line < 0 or line >= view:line_count() then
-        return {}
-    end
-    local s_sub, s_scol = view:wrap_sub_position(line, u.col_s)
-    local e_sub, e_scol = view:wrap_sub_position(line, u.col_e)
-    local row_w = view.wrap_width or g.w
-    local results = {}
-    for sub = s_sub, e_sub do
-        local col_lo = (sub == s_sub) and s_scol or 0
-        local col_hi = (sub == e_sub) and e_scol or row_w
-        if col_hi > col_lo then
-            local sy = view:viewport_row_for_line(line, sub)
-            if sy >= 0 and sy <= g.max_y then
-                table.insert(results, { g.text_x + col_lo, g.text_x + col_hi, sy })
-            end
-        end
-    end
-    return results
 end
 
 OverlayManager.new = new

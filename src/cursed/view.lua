@@ -7347,7 +7347,10 @@ function View:_span_insertion_index(row_s, col_s)
     while lo <= hi do
         local mid = math.floor((lo + hi) / 2)
         local s = spans[mid]
-        if s.row_s < row_s or (s.row_s == row_s and s.col_s <= col_s) then
+        if s.row_s == nil then
+            -- Layer/anchor span with no buffer coords; search left.
+            hi = mid - 1
+        elseif s.row_s < row_s or (s.row_s == row_s and s.col_s <= col_s) then
             lo = mid + 1
         else
             hi = mid - 1
@@ -7641,6 +7644,15 @@ function View:_adjust_spans_on_edit(edits)
 
             -- Layer spans have no buffer coordinates; skip them entirely.
             if s.type == "layer" then
+                table.insert(new_spans, s)
+                i = i + 1
+                goto continue_edit
+            end
+
+            -- Ephemeral spans (spellcheck underlines, per-frame overlays)
+            -- are rebuilt fresh each frame by the overlay manager. Skip
+            -- position adjustment to avoid drift from partial edits.
+            if s.ephemeral then
                 table.insert(new_spans, s)
                 i = i + 1
                 goto continue_edit
