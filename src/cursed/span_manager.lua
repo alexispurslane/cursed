@@ -1,14 +1,14 @@
 --- Span manager: owns the span lifecycle for a View.
 ---
 --- Combines the former View span methods (add_span, remove_span, query_at,
---- replace_spans_for_line, adjust_on_edit) with the overlay manager's
---- frame lifecycle and coordinate mapping — one class for all span types.
+--- adjust_on_edit) with the overlay manager's frame lifecycle and
+--- coordinate mapping — one class for all span types.
 ---
 --- Span types:
 ---   • properties — inline-rendered attributes (fg, bg, underline, bold,
 ---     italic); can be ephemeral (spellcheck squiggles, diagnostic underlines).
----   • replace — headless DrawContext replacements for visual tokens
----     (whitespace elision, soft-wrap markers, etc.).
+---     When carrying a `text` field, renders as virtual text (replacement
+---     text overlay) instead of the underlying buffer content.
 ---   • anchor — file-anchored text overlay, painted in flush() after
 ---     buffer-to-screen resolution. Ephemeral (re-registered each frame).
 ---   • layer — absolute screen-space overlay (cursor, modeline, popups),
@@ -36,9 +36,11 @@ function SpanManager.new(editor, view)
     return setmetatable({
         _editor = editor,
         _view = view,
-        _spans = nil,        -- sorted array of all spans (properties, replace, anchor)
+        _spans = nil,        -- sorted array of all spans (properties, anchor)
         _gen = 0,            -- bumped on every mutation
         _cursor = nil,       -- monotonic cursor for inline frame traversal
+        _vcursor = nil,      -- cursor for query_virtual_span_at
+        _vcursor_line = nil, -- current line for _vcursor
         _staging = {},       -- per-frame list of layer + anchor spans for flush painting
     }, SpanManager)
 end
@@ -67,6 +69,8 @@ end
 function SpanManager:begin_frame()
     self._staging = {}
     self._cursor = nil
+    self._vcursor = nil
+    self._vcursor_line = nil
 end
 
 --- Finish a render frame: clean off-screen ephemeral properties spans,
@@ -416,9 +420,7 @@ end
 --- Add a span to this manager. Overlap rules by type:
 ---   - "layer": no checking (appended to staging only — call add_layer instead).
 ---   - "anchor": no checking (post-pass, don't conflict with inline spans).
----   - "properties": properties-properties overlap allowed (later-wins merge);
----     properties replace overlap rejected.
----   - "replace": no overlaps except properties-properties.
+---   - "properties": properties-properties overlap allowed (later-wins merge).
 ---@param span table the span to add
 function SpanManager:add(span)
     if not self._spans then
@@ -468,7 +470,7 @@ function SpanManager:add(span)
         end
     end
 
-    table.insert(self._spans, idx, span)
+    table.insert(self._spans, span)
     self._gen = self._gen + 1
 end
 
@@ -529,16 +531,116 @@ function SpanManager:query_at(line, col)
     return result
 end
 
---- Return replace spans intersecting a given logical line.
+--- Return the virtual text span (properties span with `text` field)
+--- that contains the given buffer position, or nil if none.
+--- Uses a monotonic cursor for efficient sequential queries (e.g. cursor
+--- movement through a line during rendering). Random-access queries reset
+--- the cursor. For stateless one-off queries, use get_virtual_span_at.
 ---@param li integer 0-based line index
----@return table[] replace spans on this line
-function SpanManager:replace_spans_for_line(li)
+---@param col integer 0-based byte offset
+---@return table|nil
+function SpanManager:query_virtual_span_at(li, col)
+    if not self._spans then
+        return nil
+    end
+
+    -- Reset cursor on random access (non-monotonic query).
+    if not self._vcursor or not self._vcursor_line or self._vcursor_line ~= li then
+        self._vcursor = 1
+        self._vcursor_line = li
+    end
+
+    -- Skip past-ended spans.
+    while self._vcursor <= #self._spans do
+        local s = self._spans[self._vcursor]
+        if s.type ~= "properties" or s.text == nil or s.row_e == nil then
+            self._vcursor = self._vcursor + 1
+        elseif s.row_e < li then
+            self._vcursor = self._vcursor + 1
+        elseif s.row_s > li then
+            return nil
+        else
+            break
+        end
+    end
+
+    -- Search forward for a span covering (li, col).
+    local i = self._vcursor
+    while i <= #self._spans do
+        local s = self._spans[i]
+        if s.type == "properties" and s.text ~= nil and s.row_s ~= nil then
+            if s.row_s <= li and s.row_e >= li then
+                if s.row_s < li and li < s.row_e then
+                    return s
+                elseif li == s.row_s and li == s.row_e then
+                    if col >= s.col_s and col < s.col_e then
+                        return s
+                    end
+                elseif li == s.row_s then
+                    if col >= s.col_s then
+                        return s
+                    end
+                elseif li == s.row_e then
+                    if col < s.col_e then
+                        return s
+                    end
+                end
+            end
+            if s.row_s > li then
+                return nil
+            end
+        end
+        i = i + 1
+    end
+    return nil
+end
+
+--- Stateless lookup: return the virtual text span containing (li, col),
+--- or nil. Does not use or update any monotonic cursor — safe for
+--- one-off queries from motion commands, snap logic, etc.
+---@param li integer 0-based line index
+---@param col integer 0-based byte offset
+---@return table|nil
+function SpanManager:get_virtual_span_at(li, col)
+    if not self._spans then
+        return nil
+    end
+    for _, s in ipairs(self._spans) do
+        if s.type == "properties" and s.text ~= nil and s.row_s ~= nil then
+            if s.row_s <= li and s.row_e >= li then
+                if s.row_s < li and li < s.row_e then
+                    return s
+                elseif li == s.row_s and li == s.row_e then
+                    if col >= s.col_s and col < s.col_e then
+                        return s
+                    end
+                elseif li == s.row_s then
+                    if col >= s.col_s then
+                        return s
+                    end
+                elseif li == s.row_e then
+                    if col < s.col_e then
+                        return s
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+--- Return all properties spans that have a `text` field and intersect
+--- the given logical line. These are virtual-text spans: the byte range
+--- is rendered with the replacement text instead of buffer content.
+---@param li integer 0-based line index
+---@return table[] virtual text spans on this line
+function SpanManager:virtual_spans_for_line(li)
     if not self._spans then
         return {}
     end
     local result = {}
     for _, s in ipairs(self._spans) do
-        if s.type == "replace" and li >= s.row_s and li <= s.row_e then
+        if s.type == "properties" and s.text ~= nil and li >= s.row_s and li <= s.row_e then
             result[#result + 1] = s
         end
     end
@@ -558,9 +660,9 @@ function SpanManager:adjust_on_edit(edits)
         local kind = e.kind
         local el, ec = e.el, e.ec
 
-        local is_insert = kind == "insert"
-        local is_replace = type(kind) == "table"
-        local is_delete = is_replace or kind == nil
+        local is_insert = kind == "insert" or kind == "insert_relocate"
+        local is_delete = kind == "delete"
+        local is_replace = kind == "replace"
 
         local delta_lines = rl - sl
         local delta_cols
@@ -598,26 +700,39 @@ function SpanManager:adjust_on_edit(edits)
                 goto continue_edit
             end
 
-            if is_insert and delta_lines > 0 and sl <= s.row_s then
-                s.row_s = s.row_s + delta_lines
-                s.row_e = s.row_e + delta_lines
-                i = i + 1
-            elseif is_insert and delta_lines == 0 and sl == s.row_s and sc <= s.col_s then
-                s.col_s = s.col_s + delta_cols
-                if sl == s.row_e then
-                    s.col_e = s.col_e + delta_cols
-                end
-                i = i + 1
-            elseif del_lines > 0 and sl <= s.row_s then
-                if s.row_s <= el then
-                    i = i + 1
-                    goto continue_edit
-                else
+            -- Two-pass adjustment: delete first, then insert.
+            -- Split so replace edits (delete-then-insert composite) apply
+            -- both adjustments rather than only one via the old elseif chain.
+            local dropped = false
+
+            -- Pass 1: delete adjustment (for delete and replace)
+            -- Delete region is half-open [sl,sc) to [el,ec).
+            -- A span starting at (row_s, col_s) is inside if it lies
+            -- at or after (sl,sc) AND strictly before (el,ec).
+            if del_lines > 0 and sl <= s.row_s then
+                local after_start = s.row_s > sl or (s.row_s == sl and s.col_s >= sc)
+                local before_end = s.row_s < el or (s.row_s == el and s.col_s < ec)
+                if after_start and before_end then
+                    dropped = true
+                elseif after_start then
+                    -- Span is on or after the end line (or after el);
+                    -- shift rows and reposition columns for spans
+                    -- that rode the end line (content appended at sc).
+                    local on_end = s.row_s == el
+                    local on_end_e = s.row_e == el
                     s.row_s = s.row_s - del_lines
                     s.row_e = s.row_e - del_lines
-                    i = i + 1
+                    if on_end then
+                        s.col_s = s.col_s - ec + sc
+                    end
+                    if on_end_e then
+                        s.col_e = s.col_e - ec + sc
+                    end
                 end
-            elseif del_lines == 0 and del_cols > 0 then
+                -- else: span sits on sl before sc — outside the region, no
+                -- change.
+            end
+            if not dropped and del_lines == 0 and del_cols > 0 then
                 if sl == s.row_s and sc <= s.col_s then
                     if sl == s.row_e then
                         s.col_s = math.max(s.col_s - del_cols, 0)
@@ -629,17 +744,40 @@ function SpanManager:adjust_on_edit(edits)
                         s.col_e = math.max(s.col_e - del_cols, 0)
                     end
                 end
-                i = i + 1
-            elseif is_insert and delta_lines == 0 and sl == s.row_s and sc > s.col_s then
-                if s.col_s <= sc and sl == s.row_e then
-                    s.col_e = s.col_e + delta_cols
-                end
-                i = i + 1
-            else
-                i = i + 1
             end
 
-            if s.row_s > s.row_e or (s.row_s == s.row_e and s.col_s >= s.col_e) then
+            -- Pass 2: insert adjustment (for insert and replace)
+            -- Text is inserted at (sl,sc), cursor lands at (rl,rc).
+            -- Only spans starting at or after the insert point shift.
+            -- Spans on the insert line that shift get column-adjusted:
+            -- content from (sl,sc) onward lands at (rl,rc).
+            if not dropped and (is_insert or is_replace) then
+                if delta_lines > 0 and (s.row_s > sl or (s.row_s == sl and s.col_s >= sc)) then
+                    local on_line = s.row_s == sl
+                    local on_line_e = s.row_e == sl
+                    s.row_s = s.row_s + delta_lines
+                    s.row_e = s.row_e + delta_lines
+                    if on_line then
+                        s.col_s = s.col_s - sc + rc
+                    end
+                    if on_line_e then
+                        s.col_e = s.col_e - sc + rc
+                    end
+                elseif delta_lines == 0 and sl == s.row_s and sc <= s.col_s then
+                    s.col_s = s.col_s + delta_cols
+                    if sl == s.row_e then
+                        s.col_e = s.col_e + delta_cols
+                    end
+                elseif delta_lines == 0 and sl == s.row_s and sc > s.col_s then
+                    if sc < s.col_e and sl == s.row_e then
+                        s.col_e = s.col_e + delta_cols
+                    end
+                end
+            end
+
+            i = i + 1
+            if dropped or s.row_s > s.row_e
+                or (s.row_s == s.row_e and s.col_s >= s.col_e) then
                 -- collapsed; drop
             else
                 new_spans[#new_spans + 1] = s

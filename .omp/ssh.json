@@ -1,0 +1,8 @@
+{
+  "hosts": {
+    "neonvagabond": {
+      "host": "neonvagabond.xyz",
+      "username": "core"
+    }
+  }
+}

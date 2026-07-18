@@ -130,6 +130,7 @@ return {
 		["r"] = "lsp_rename",
 		["s"] = "lsp_start",
 		["k"] = "lsp_kill",
+		["t"] = "add_replacement",
 		["ctrl-r"] = "lsp_restart",
 	},
 

@@ -3420,7 +3420,7 @@ commands.delete_horizontal_space = function(view, _editor)
 		local s = spans[c]
 		local del_n = s.right - s.left
 		if del_n <= 0 then
-			return c.line, c.col, c.line, c.col, { c.line, c.col }
+			return c.line, c.col, c.line, c.col, "delete", c.line, c.col
 		end
 		local sl, sc = c.line, s.left
 		c.col = s.left
@@ -3428,7 +3428,7 @@ commands.delete_horizontal_space = function(view, _editor)
 		-- region end is (sl, sc + del_n) with no line change.
 		local el, ec = sl, sc + del_n
 		local rl, rc = buf:delete_char(sl, sc, del_n)
-		return sl, sc, rl, rc, { el, ec }
+		return sl, sc, rl, rc, "delete", el, ec
 	end)
 	view:_set_goal_col(view:p().col)
 end
@@ -4920,7 +4920,7 @@ commands.transpose_chars = function(view, _editor)
 	view:batch_edit(false, function(c)
 		local info = infos[c]
 		if info == nil then
-			return c.line, c.col, c.line, c.col, { c.line, c.col }
+			return c.line, c.col, c.line, c.col, "delete", c.line, c.col
 		end
 
 		local sl, sc = info.sl, info.sc
@@ -4928,7 +4928,7 @@ commands.transpose_chars = function(view, _editor)
 		buf:insert_char(sl, sc, info.first_text .. info.second_text)
 
 		local rc = sc + info.cursor_advance
-		return sl, sc, sl, rc, { sl, sc + info.total_len }
+		return sl, sc, sl, rc, "delete", sl, sc + info.total_len
 	end)
 
 	view:_set_goal_col(view:p().col)
@@ -5301,6 +5301,43 @@ commands.toggle_word_count_mode = function(view, editor)
 		view:activate_major_mode(template)
 		editor.status_message = "word-count enabled"
 	end
+end
+
+commands.add_replacement = function(view, editor)
+    if not view:has_selection() then
+        editor.status_message = "No selection"
+        return
+    end
+    local sl, sc, el, ec = view:selection_range()
+    ---@cast el integer
+    ---@cast ec integer
+    editor:read_from_minibuffer({
+        prompt = "Replacement text: ",
+        on_submit = function(input)
+            if #input == 0 then
+                return
+            end
+            local sm = view:span_manager()
+            local span = {
+                type = "properties",
+                row_s = sl,
+                col_s = sc,
+                row_e = el,
+                col_e = ec,
+                text = input,
+                ephemeral = false,
+            }
+            sm:add(span)
+            -- Virtual text spans affect token-stream rendering; invalidate
+            -- the screen-rows cache so _build_tokens re-runs next frame.
+            view._screen_rows_cache = nil
+            view._screen_row_counts = nil
+            view._screen_rows_gen = nil
+            if editor then
+                editor:push_background_task(function() return true end)
+            end
+        end,
+    })
 end
 
 ----------------------------------------------------------------------------------------------------

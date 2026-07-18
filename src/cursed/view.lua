@@ -12,26 +12,6 @@ local log = require("cursed.log")
 local IH = require("cursed.input_hook")
 local SpanManager = require("cursed.span_manager")
 local shared = require("cursed.shared")
-local DrawContext = require("cursed.draw_context")
-
---- Build a DrawContext from static text (fallback for replace spans
---- that carry `text` instead of `fn`).
----@param text string
----@return DrawContext
-local function build_text_dc(text)
-    if not text or #text == 0 then
-        return DrawContext.new()
-    end
-    local bs, widths, prefix = utf8.parse_line(text, 1)
-    local dc = DrawContext.new()
-    for i = 1, #widths do
-        local end_byte = (i < #bs) and (bs[i + 1] - 1) or #text
-        local ch = text:sub(bs[i], end_byte)
-        dc:set_cell(0, prefix[i], ch)
-    end
-    return dc
-end
-
 --- which return the resulting cursor position; the View owns the
 --- forwarding to each cursor.
 ---
@@ -116,9 +96,6 @@ end
 ---@field _screen_row_counts integer[]|nil cache: _screen_row_counts[li+1] = integer — total sub-rows per line (populated during token-stream build even without wrapping)
 ---@field _screen_rows_gen integer|nil generation counter the cache was built against
 ---@field _screen_rows_width integer|nil wrap_width the cache was built against
----@field _spans table[]|nil sorted array of all spans, sorted by (row_s, col_s)
----@field _span_gen integer|nil generation counter for span invalidation
----@field _span_cursor integer|nil monotonic cursor position into _spans for iteration
 ---@field _vp_row_cache table|nil viewport-relative screen-row cache: li -> row of (li, 0) rel. to the current scroll anchor; nil = stale. The cache is scoped to a single anchor (scroll_li/scroll_sub_row) + wrap generation + wrap_width (captured in _vp_row_sig), so it is rebuilt lazily after any scroll / edit / reflow. Within a stable frame it shares one forward walk across all callers (render + overlays) instead of re-walking from the anchor per call -- O(farthest query) total, not O(N x distance).
 ---@field _vp_row_sig string|nil signature (_wrap_gen|wrap_width|scroll_li|scroll_sub_row) the _vp_row_cache was built against
 ---@field _vp_row_filled_to integer|nil highest li >= anchor covered by _vp_row_cache (forward extent)
@@ -147,24 +124,23 @@ end
 ---@field _hl_last_vend integer|nil last viewport end byte we dispatched for
 ---@field _hl_last_gen integer|nil last buffer gen we dispatched an edit for (avoids repeat dispatch on every render when the edit was already sent)
 ---@class LineToken
----@field type '"text"'|'"replace"'
+---@field type '"text"'
 ---@field buf_start integer 0-based byte offset within logical line
 ---@field buf_end integer 0-based byte offset (exclusive)
----@field text string|nil raw text (TEXT only)
----@field byte_offsets integer[]|nil 0-based byte offsets per grapheme within the logical line (TEXT only)
----@field widths integer[]|nil display widths per grapheme (TEXT only)
----@field span table|nil the replace span (REPLACE only)
+---@field text string|nil raw text
+---@field byte_offsets integer[]|nil 0-based byte offsets per grapheme within the logical line
+---@field widths integer[]|nil display widths per grapheme
+---@field props table|nil styling properties (fg, bg, underline_color, bold, italic) carried on virtual-text tokens
 
 ---@class RowSegment
----@field type '"text"'|'"replace"'
+---@field type '"text"'
 ---@field buf_start integer 0-based byte offset
 ---@field buf_end integer 0-based byte offset (exclusive)
----@field text string|nil (TEXT only)
----@field col integer|nil 0-based display column start within the row (TEXT only)
----@field widths integer[]|nil display widths per grapheme (TEXT only)
----@field byte_offsets integer[]|nil 0-based byte offsets within segment text, parallel to widths (TEXT only)
----@field draw_ctx DrawContext|nil (REPLACE only)
----@field row_idx integer|nil 0-based row within DrawContext (REPLACE only)
+---@field text string|nil
+---@field col integer|nil 0-based display column start within the row
+---@field widths integer[]|nil display widths per grapheme
+---@field byte_offsets integer[]|nil 0-based byte offsets within segment text, parallel to widths
+---@field props table|nil styling properties carried on virtual-text tokens
 
 ---@class ScreenRow
 ---@field li integer logical line index
@@ -181,15 +157,6 @@ end
 ---@field row_e integer 0-based end line
 ---@field type '"properties"'
 ---@field [any] any arbitrary styling/metadata keys (bold, italic, fg, bg, ...)
-
----@class ReplaceSpan
----@field col_s integer
----@field row_s integer
----@field col_e integer
----@field row_e integer
----@field type '"replace"'
----@field text string|nil static text in place of buffer content
----@field fn fun(cols_skipped: integer): DrawContext|nil dynamic draw function
 
 ---@class LayerSpan
 ---@field type '"layer"'
@@ -874,6 +841,9 @@ function View:batch_edit(breaks_group, fn)
             local sl, sc, rl, rc, kind, e1, e2 = fn(cur)
             ---@cast rl integer
             ---@cast rc integer
+            -- Deleted-region end arrives as e1/e2 for both delete and
+            -- replace; nil for insert/insert_relocate.
+            local el, ec = e1, e2
             -- Capture for the highlighter (every edit). `orig_*` is the
             -- cursor's pre-batch (OLD-frame) position from the snapshot;
             -- the highlighter builds a composite TSInputEdit spanning
@@ -886,14 +856,15 @@ function View:batch_edit(breaks_group, fn)
                 kind = kind,
                 e1 = e1,
                 e2 = e2,
+                el = el,
+                ec = ec,
                 orig_line = entry.line,
                 orig_col = entry.col,
             }
             hl_edit_count = hl_edit_count + 1
             if (kind == "insert" or kind == "insert_relocate") and rl ~= sl then
                 hl_crossed_newline = true
-            elseif kind == "replace" or type(kind) == "table" then
-                local el, ec = e1, e2
+            elseif kind == "delete" or kind == "replace" then
                 if el ~= nil and el ~= sl then
                     hl_crossed_newline = true
                 end
@@ -925,7 +896,6 @@ function View:batch_edit(breaks_group, fn)
                 -- we compose the delete translator (collapses/pulls
                 -- in- and post-region cursors) with the insert
                 -- translator (shifts by the replacement's line delta).
-                local el, ec = e1, e2
                 local dt = delete_translator(sl, sc, el, ec)
                 local it = insert_translator(sl, sc, rl, rc)
                 tr = function(o)
@@ -934,10 +904,9 @@ function View:batch_edit(breaks_group, fn)
                         it(o)
                     end
                 end
-            elseif type(kind) == "table" then
-                -- kind = { el, ec } deleted region end; region [start, end)
-                -- with start = (sl, sc).
-                local el, ec = kind[1], kind[2]
+            elseif kind == "delete" then
+                -- kind "delete": deleted region [start, end) with
+                -- start = (sl, sc), end = (el, ec).
                 tr = delete_translator(sl, sc, el, ec)
             end
             if tr then
@@ -971,12 +940,6 @@ function View:batch_edit(breaks_group, fn)
         c.yank_col = nil
     end
 
-    -- Defensive: guarantee every cursor sits on a valid (line, col)
-    -- after the edit + translator pass, regardless of what the buffer
-    -- reported or the translator computed. This is the single backstop
-    -- that prevents a cursor from ever being left past end-of-line.
-    self:_clamp_all_cursors()
-
     -- Notify the highlight lane. Each edit (single or multi) translates
     -- the cache so off-screen spans stay byte-correct as a bridge; the
     -- lane is then re-queried only for viewport ± margin (the visible
@@ -1006,6 +969,13 @@ function View:batch_edit(breaks_group, fn)
     -- end-of-line — and defers the wrap-graph walk to the render frame.
     self:_graph_apply_edits(hl_edits)
     self:_adjust_spans_on_edit(hl_edits)
+
+    -- Defensive: guarantee every cursor sits on a valid (line, col)
+    -- after the edit + translator pass, regardless of what the buffer
+    -- reported or the translator computed. This is the single backstop
+    -- that prevents a cursor from ever being left past end-of-line.
+    -- Must run AFTER span adjustment so _snap_vtext sees updated spans.
+    self:_clamp_all_cursors()
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -1891,12 +1861,7 @@ function View:_hl_record_edit(edits, crossed_newline, frames)
     if last.kind == "insert" then
         region_end_pre_last = (starts_before_last[last.sl + 1] or 0) + last.sc
     else
-        local el, ec
-        if type(last.kind) == "table" then
-            el, ec = last.kind[1], last.kind[2]
-        else
-            el, ec = last.e1, last.e2
-        end
+        local el, ec = last.el, last.ec
         ---@cast el integer
         ---@cast ec integer
         region_end_pre_last = (starts_before_last[el + 1] or 0) + ec
@@ -2787,8 +2752,6 @@ function View:invalidate_wrap_cache()
     -- scroll_to_cursor re-centers on the cursor after the reflow.
     self._scroll_guard_line = nil
     self._scroll_guard_col = nil
-    -- Reset the span cursor so the next render starts iteration fresh.
-    self._span_cursor = nil
     -- New ScreenRows cache (token-stream based wrapping).
     self._screen_rows_cache = nil
     self._screen_row_counts = nil
@@ -2839,13 +2802,8 @@ function View:_graph_apply_edits(edits)
         end
         -- For deletes/replaces that span multiple lines, touch the
         -- intermediate and final lines.
-        if type(e.kind) == "table" then
-            local el, _ = e.kind[1], e.kind[2]
-            for li = e.sl + 1, el do
-                affected[li] = true
-            end
-        elseif e.kind == "replace" and e.e1 and e.e1 ~= e.sl then
-            for li = e.sl + 1, e.e1 do
+        if e.el and e.el ~= e.sl then
+            for li = e.sl + 1, e.el do
                 affected[li] = true
             end
         end
@@ -2869,15 +2827,8 @@ function View:_graph_apply_edits(edits)
             structural[e.sl] = true
             structural[e.rl] = true
         end
-        if type(e.kind) == "table" then
-            local el, _ = e.kind[1], e.kind[2]
-            if el ~= e.sl then
-                for li = e.sl, el do
-                    structural[li] = true
-                end
-            end
-        elseif e.kind == "replace" and e.e1 and e.e1 ~= e.sl then
-            for li = e.sl, e.e1 do
+        if e.el and e.el ~= e.sl then
+            for li = e.sl, e.el do
                 structural[li] = true
             end
         end
@@ -3271,9 +3222,47 @@ end
 ---@param b integer 0-based starting byte offset
 ---@param n integer signed grapheme count
 ---@return integer
+--- Advance a grapheme boundary by n graphemes. Virtual text spans
+--- (properties spans with `text`) are treated as single units:
+--- moving forward into one snaps to its end, moving backward into
+--- one snaps to its start.
 function View:advance_grapheme(li, b, n)
     local bs, _, _, ll = self:_graph(li)
-    return utf8.advance_grapheme(bs, b, n, ll)
+    local result = utf8.advance_grapheme(bs, b, n, ll)
+
+    -- Snap past virtual text spans: moving forward into a span snaps
+    -- to its col_e (after); moving backward into a span snaps to
+    -- its col_s (start).
+    if n > 0 then
+        local span = self:_virtual_span_at(li, result)
+        if span and result >= span.col_s then
+            -- Snap past the span, but not past the end of content.
+            -- When the span covers the newline (col_e == line_len),
+            -- there's no valid position after it — snap to col_s.
+            result = (span.col_e < ll) and span.col_e or span.col_s
+        end
+    elseif n < 0 then
+        local span = self:_virtual_span_at(li, result)
+        if span and result > span.col_s then
+            result = span.col_s
+        end
+    end
+    return result
+end
+
+--- Snap a byte column outside any virtual text span on the given line.
+--- Returns the snapped column. If col is inside a span (col_s <= col < col_e),
+--- snaps to col_s; if col is at/past col_e, snaps to col_e.
+--- Used as a choke point by all cursor-positioning methods.
+---@param li integer 0-based line index
+---@param col integer 0-based byte offset
+---@return integer snapped byte offset
+function View:_snap_vtext(li, col)
+    local span = self:_virtual_span_at(li, col)
+    if span and col > span.col_s then
+        return (col < span.col_e) and span.col_s or span.col_e
+    end
+    return col
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -3304,12 +3293,7 @@ local function _flush_row(rows, row_segs, buf_start, li)
             if end_col > width then
                 width = end_col
             end
-        else -- replace
-            local dc = seg.draw_ctx
-            local rw = (dc._row_max[seg.row_idx] or -1) + 1
-            if rw > width then
-                width = rw
-            end
+
         end
     end
 
@@ -3343,6 +3327,7 @@ end
 local function _wrap_text_token(tok, ww, ws, rows, row_segs, li)
     local widths = tok.widths
     local byte_offsets = tok.byte_offsets
+    local tok_props = tok.props
     local ng = #widths
     if ng == 0 then
         return
@@ -3402,6 +3387,7 @@ local function _wrap_text_token(tok, ww, ws, rows, row_segs, li)
                     col = seg_col,
                     widths = t_widths,
                     byte_offsets = seg_bo,
+                    props = tok_props,
                 })
             end
 
@@ -3454,6 +3440,7 @@ local function _wrap_text_token(tok, ww, ws, rows, row_segs, li)
             col = seg_col,
             widths = t_widths,
             byte_offsets = seg_bo2,
+            props = tok_props,
         })
     end
 
@@ -3461,32 +3448,39 @@ local function _wrap_text_token(tok, ww, ws, rows, row_segs, li)
 end
 
 --- Build the visual token stream for logical line li.
---- Walks buffer text and replace spans, alternating TEXT and REPLACE tokens.
---- TEXT tokens pre-extract grapheme widths and byte offsets for the wrap algorithm.
+--- Walks buffer text and produces TEXT tokens.
+--- Tokens pre-extract grapheme widths and byte offsets for the wrap algorithm.
 ---@param li integer 0-based line index
 ---@return LineToken[]
 function View:_build_tokens(li)
     local bs, widths, _, ll = self:_graph(li)
     local text = self:_line_text_stripped(li)
-    local replace_spans = self:_replace_spans_for_line(li)
 
     local tokens = {}
 
     -- Empty line: single zero-length TEXT token.
     if #bs == 0 then
-        tokens[1] = {
-            type = "text",
-            buf_start = 0,
-            buf_end = 0,
-            text = "",
-            widths = {},
-            byte_offsets = {},
-        }
-        return tokens
+        local sm = self:span_manager()
+        local vspans = sm:virtual_spans_for_line(li)
+        if #vspans == 0 then
+            tokens[1] = {
+                type = "text",
+                buf_start = 0,
+                buf_end = 0,
+                text = "",
+                widths = {},
+                byte_offsets = {},
+            }
+            return tokens
+        end
+        -- Empty buffer line with virtual text spans: fall through to span handling.
     end
 
-    if #replace_spans == 0 then
-        -- No replace spans: single TEXT token for the entire line.
+    local sm = self:span_manager()
+    local vspans = sm:virtual_spans_for_line(li)
+
+    -- Fast path: no virtual text spans, single TEXT token for the entire line.
+    if #vspans == 0 then
         local tw = {}
         local tbo = {}
         for i = 1, #widths do
@@ -3504,85 +3498,102 @@ function View:_build_tokens(li)
         return tokens
     end
 
-    -- Replace spans present: walk the line alternating TEXT and REPLACE tokens.
-    local pos = 0 -- 0-based byte offset
+    -- Virtual text spans present: walk the line alternating buffer text and virtual-text tokens.
+    -- Sort spans by their start byte offset (col_s is 0-based byte offset within the line).
+    table.sort(vspans, function(a, b)
+        return a.col_s < b.col_s
+    end)
 
-    for _, span in ipairs(replace_spans) do
-        local s_start = span.col_s -- 0-based byte offset
-        local s_end = span.col_e -- 0-based byte offset (exclusive)
+    local cursor = 0 -- 0-based byte offset within the line
 
-        -- Clamp to line bounds.
-        if s_start > ll then
-            break
-        end
-        if s_end > ll then
-            s_end = ll
-        end
-
-        -- Text before this span.
-        if s_start > pos then
-            local t_text = text:sub(pos + 1, s_start)
-            local gi_start = utf8.grapheme_at_byte(bs, pos)
-            local gi_end
-            if s_start >= ll then
-                gi_end = #bs
-            else
-                gi_end = utf8.grapheme_at_byte(bs, s_start - 1)
+    -- Helper to extract grapheme data from bs/widths arrays for a byte range.
+    -- Accepts a 0-based byte offset range [start_byte, end_byte) within the line.
+    -- Returns {widths, byte_offsets} where byte_offsets are line-relative 0-based.
+    local function extract_graphemes(start_byte, end_byte)
+        local gw = {}
+        local gbo = {}
+        for i = 1, #bs do
+            local bo = bs[i] - 1 -- 0-based byte offset of this grapheme
+            if bo >= start_byte and bo < end_byte then
+                gw[#gw + 1] = widths[i]
+                gbo[#gbo + 1] = bo
             end
-            local tw = {}
-            local tbo = {}
-            for i = gi_start, gi_end do
-                tw[#tw + 1] = widths[i]
-                tbo[#tbo + 1] = bs[i] - 1
-            end
-            tokens[#tokens + 1] = {
-                type = "text",
-                buf_start = pos,
-                buf_end = s_start,
-                text = t_text,
-                widths = tw,
-                byte_offsets = tbo,
-            }
         end
-
-        -- The replace span itself.
-        tokens[#tokens + 1] = {
-            type = "replace",
-            buf_start = s_start,
-            buf_end = s_end,
-            span = span,
-        }
-
-        pos = math.max(pos, s_end)
+        return gw, gbo
     end
 
-    -- Text after the last span.
-    if pos < ll then
-        local t_text = text:sub(pos + 1)
-        local gi_start
-        if pos >= ll then
-            gi_start = #bs + 1
-        else
-            gi_start = utf8.grapheme_at_byte(bs, pos)
+    for _, span in ipairs(vspans) do
+        -- Emit normal buffer text before this span (if any gap).
+        if span.col_s > cursor then
+            local seg_text = text:sub(cursor + 1, span.col_s)
+            local seg_w, seg_bo = extract_graphemes(cursor, span.col_s)
+            tokens[#tokens + 1] = {
+                type = "text",
+                buf_start = cursor,
+                buf_end = span.col_s,
+                text = seg_text,
+                widths = seg_w,
+                byte_offsets = seg_bo,
+            }
+            cursor = span.col_s
         end
-        local tw = {}
-        local tbo = {}
-        for i = gi_start, #bs do
-            tw[#tw + 1] = widths[i]
-            tbo[#tbo + 1] = bs[i] - 1
+
+        -- Emit virtual text token for this span.
+        local vt_bs, vt_widths = utf8.parse_line(span.text, 1)
+        local vt_bo = {}
+        for i = 1, #vt_widths do
+            vt_bo[i] = span.col_s + vt_bs[i] - 1 -- line-relative 0-based byte offsets
         end
+
+        -- Copy styling keys from span to props.
+        local props = {}
+        if span.fg ~= nil then props.fg = span.fg end
+        if span.bg ~= nil then props.bg = span.bg end
+        if span.underline_color ~= nil then props.underline_color = span.underline_color end
+        if span.bold ~= nil then props.bold = span.bold end
+        if span.italic ~= nil then props.italic = span.italic end
+
         tokens[#tokens + 1] = {
             type = "text",
-            buf_start = pos,
+            buf_start = span.col_s,
+            buf_end = span.col_e,
+            text = span.text,
+            widths = vt_widths,
+            byte_offsets = vt_bo,
+            props = props,
+        }
+        cursor = span.col_e
+    end
+
+    -- Emit remaining buffer text after the last span.
+    if cursor < ll then
+        local seg_text = text:sub(cursor + 1)
+        local seg_w, seg_bo = extract_graphemes(cursor, ll)
+        tokens[#tokens + 1] = {
+            type = "text",
+            buf_start = cursor,
             buf_end = ll,
-            text = t_text,
-            widths = tw,
-            byte_offsets = tbo,
+            text = seg_text,
+            widths = seg_w,
+            byte_offsets = seg_bo,
+        }
+    end
+
+    -- Ensure at least one token exists (empty line with virtual text that covers everything).
+    if #tokens == 0 then
+        tokens[1] = {
+            type = "text",
+            buf_start = 0,
+            buf_end = 0,
+            text = "",
+            widths = {},
+            byte_offsets = {},
         }
     end
 
     return tokens
 end
+
 
 --- Single-row path when wrap_width <= 0 (no wrapping).
 --- Builds a single ScreenRow with all tokens laid out sequentially.
@@ -3596,63 +3607,36 @@ function View:_build_unwrapped_rows(li, tokens)
     local buf_end = (tokens[#tokens] and tokens[#tokens].buf_end) or 0
 
     for _, tok in ipairs(tokens) do
-        if tok.type == "text" then
-            local seg_w = 0
-            for _, gw in ipairs(tok.widths) do
-                seg_w = seg_w + gw
-            end
-            local seg_bo = {}
-            for i = 1, #tok.widths do
-                seg_bo[i] = tok.byte_offsets[i] - tok.buf_start
-            end
-            table.insert(row_segs, {
-                type = "text",
-                buf_start = tok.buf_start,
-                buf_end = tok.buf_end,
-                text = tok.text,
-                col = col,
-                widths = tok.widths,
-                byte_offsets = seg_bo,
-            })
-            col = col + seg_w
-        else -- replace
-            local dc
-            if tok.span.fn then
-                dc = tok.span.fn(col)
-            elseif tok.span.text then
-                dc = build_text_dc(tok.span.text)
-            else
-                dc = DrawContext.new()
-            end
-            local footprint = dc:finalize()
-            table.insert(row_segs, {
-                type = "replace",
-                buf_start = tok.buf_start,
-                buf_end = tok.buf_end,
-                draw_ctx = dc,
-                row_idx = 0,
-            })
-            col = col + (footprint.cols_used or 0)
+        local seg_w = 0
+        for _, gw in ipairs(tok.widths) do
+            seg_w = seg_w + gw
         end
+        local seg_bo = {}
+        for i = 1, #tok.widths do
+            seg_bo[i] = tok.byte_offsets[i] - tok.buf_start
+        end
+        table.insert(row_segs, {
+            type = "text",
+            buf_start = tok.buf_start,
+            buf_end = tok.buf_end,
+            text = tok.text,
+            col = col,
+            widths = tok.widths,
+            byte_offsets = seg_bo,
+            props = tok.props,
+        })
+        col = col + seg_w
     end
 
     -- Compute overall width.
     local width = 0
     for _, seg in ipairs(row_segs) do
-        if seg.type == "text" then
-            local seg_w = 0
-            for _, gw in ipairs(seg.widths) do
-                seg_w = seg_w + gw
-            end
-            if seg.col + seg_w > width then
-                width = seg.col + seg_w
-            end
-        else
-            local dc = seg.draw_ctx
-            local rw = (dc._row_max[seg.row_idx] or -1) + 1
-            if rw > width then
-                width = rw
-            end
+        local seg_w = 0
+        for _, gw in ipairs(seg.widths) do
+            seg_w = seg_w + gw
+        end
+        if seg.col + seg_w > width then
+            width = seg.col + seg_w
         end
     end
 
@@ -3668,10 +3652,11 @@ function View:_build_unwrapped_rows(li, tokens)
     }
 end
 
+
 --- Core token-aware wrap algorithm.
 --- Consumes the token stream and produces ScreenRow[] with word-wrap at
---- `wrap_width`. Handles both TEXT and REPLACE tokens, splitting REPLACE
---- tokens across their DrawContext rows.
+--- `wrap_width`.
+
 ---@param li integer 0-based line index
 ---@return ScreenRow[]
 function View:_wrap_line(li)
@@ -3692,77 +3677,14 @@ function View:_wrap_line(li)
     local row_segs = {} -- accumulating RowSegment[] on the current row
 
     for _, tok in ipairs(tokens) do
-        if tok.type == "text" then
-            _wrap_text_token(tok, ww, ws, rows, row_segs, li)
-        else -- replace
-            -- Call the replace function with current column as cols_skipped.
-            local dc
-            if tok.span.fn then
-                dc = tok.span.fn(ws.col)
-            elseif tok.span.text then
-                dc = build_text_dc(tok.span.text)
-            else
-                dc = DrawContext.new()
-            end
-            local footprint = dc:finalize()
-            local rows_used = footprint.rows_used
-            local cols_used = footprint.cols_used
-
-            -- If this replace starts mid-row and can't fit, push it to its own row.
-            if ws.col > 0 and (ws.col + cols_used > ww or rows_used > 1) then
-                _flush_row(rows, row_segs, ws.row_buf, li)
-                -- Clear row_segs.
-                for j = #row_segs, 1, -1 do
-                    row_segs[j] = nil
-                end
-                ws.row_buf = tok.buf_start
-                ws.col = 0
-                ws.last_space_byte = nil
-                ws.last_space_gi = nil
-
-                -- Recompute at column 0.
-                if tok.span.fn then
-                    dc = tok.span.fn(0)
-                elseif tok.span.text then
-                    dc = build_text_dc(tok.span.text)
-                else
-                    dc = DrawContext.new()
-                end
-                footprint = dc:finalize()
-                rows_used = footprint.rows_used
-                cols_used = footprint.cols_used
-            end
-
-            -- Emit one segment per replace row.
-            for r = 0, rows_used - 1 do
-                if r > 0 then
-                    _flush_row(rows, row_segs, ws.row_buf, li)
-                    for j = #row_segs, 1, -1 do
-                        row_segs[j] = nil
-                    end
-                    ws.row_buf = tok.buf_start
-                    ws.col = 0
-                end
-                table.insert(row_segs, {
-                    type = "replace",
-                    buf_start = tok.buf_start,
-                    buf_end = tok.buf_end,
-                    draw_ctx = dc,
-                    row_idx = r,
-                })
-            end
-            ws.col = cols_used
-            ws.last_space_byte = nil
-            ws.last_space_gi = nil
-        end
+        _wrap_text_token(tok, ww, ws, rows, row_segs, li)
     end
 
     -- Flush the final row.
     _flush_row(rows, row_segs, ws.row_buf, li)
 
     -- Guard: an empty line (no tokens, or zero-width tokens) must still
-    -- produce at least one ScreenRow. The existing wrap path returns
-    -- total_rows=1 for empty lines, so match that.
+    -- produce at least one ScreenRow.
     if #rows == 0 then
         rows[1] = {
             li = li,
@@ -3776,10 +3698,9 @@ function View:_wrap_line(li)
     return rows
 end
 
+
 --- Cached wrapper that builds or returns ScreenRow[] for a line.
---- Cache keyed on _graph_gen + wrap_width. When replace spans are present,
---- builds the full token stream and wrap algorithm result. When no replace
---- spans exist, this is a no-op (fast path in wrap_rows skips this).
+--- Cache keyed on _graph_gen + wrap_width.
 --- Also populates _screen_row_counts as a side effect.
 ---@param li integer 0-based line index
 ---@return ScreenRow[]
@@ -3810,7 +3731,7 @@ function View:_screen_rows(li)
 
     -- Build _wrap_graph_cache from ScreenRow TEXT segments so that
     -- wrap_sub_position / wrap_byte_offset use the O(log N) binary-search
-    -- path for ALL lines, regardless of whether replace spans are present.
+    -- path for ALL lines.
     if ww > 0 then
         local bs, widths, _, _ = self:_graph(li)
         local ng = #widths
@@ -3844,25 +3765,50 @@ function View:_screen_rows(li)
                 local vis_col = 0
                 for _, seg in ipairs(row.segments) do
                     if seg.type == "text" then
-                        local gi_start = grapheme_at(seg.buf_start)
-                        for i, w in ipairs(seg.widths) do
-                            local gi = gi_start + i - 1
-                            if gi <= ng then
-                                sub_rows[gi] = row.sub_row
-                                sub_cols[gi] = seg.col + vis_col
-                                vis_col = vis_col + w
+                        -- Virtual text spans (segments with props): map all buffer
+                        -- graphemes inside the span's byte range [buf_start, buf_end)
+                        -- to the span's visual footprint. The first grapheme (buf_start)
+                        -- maps to the visual start; subsequent graphemes map to the
+                        -- visual end (after the replacement text).
+                        if seg.props then
+                            local vt_start = grapheme_at(seg.buf_start)
+                            -- Compute total visual width of the replacement text.
+                            local total_vt_w = 0
+                            for _, vtw in ipairs(seg.widths) do
+                                total_vt_w = total_vt_w + vtw
                             end
+                            local vt_end_gi = grapheme_at(seg.buf_end - 1)
+                            for gi = vt_start, math.min(vt_end_gi, ng) do
+                                if gi == vt_start then
+                                    sub_rows[gi] = row.sub_row
+                                    sub_cols[gi] = seg.col
+                                else
+                                    sub_rows[gi] = row.sub_row
+                                    sub_cols[gi] = seg.col + total_vt_w
+                                end
+                            end
+                            -- Advance visual column past the replacement text.
+                            vis_col = vis_col + total_vt_w
+                            if not sub_first[row.sub_row] then
+                                sub_first[row.sub_row] = vt_start
+                            end
+                            sub_last[row.sub_row] = math.min(vt_end_gi, ng)
+                        else
+                            local gi_start = grapheme_at(seg.buf_start)
+                            for i, w in ipairs(seg.widths) do
+                                local gi = gi_start + i - 1
+                                if gi <= ng then
+                                    sub_rows[gi] = row.sub_row
+                                    sub_cols[gi] = seg.col + vis_col
+                                    vis_col = vis_col + w
+                                end
+                            end
+                            if not sub_first[row.sub_row] then
+                                sub_first[row.sub_row] = gi_start
+                            end
+                            sub_last[row.sub_row] = gi_start + #seg.widths - 1
                         end
-                        if not sub_first[row.sub_row] then
-                            sub_first[row.sub_row] = gi_start
-                        end
-                        sub_last[row.sub_row] = gi_start + #seg.widths - 1
-                    else
-                        -- REPLACE: graphemes inside stay at (0,0). Advance
-                        -- visual column past the footprint.
-                        local dc = seg.draw_ctx
-                        local rw = (dc._row_max[seg.row_idx] or -1) + 1
-                        vis_col = vis_col + rw
+
                     end
                 end
             end
@@ -4487,8 +4433,7 @@ function View:wrap_sub_position(li, byte_offset)
     end
 
     -- Unified O(log N) path: _screen_rows populates _wrap_graph_cache for
-    -- every line, with or without replace spans. Graphemes inside REPLACE
-    -- spans map to (sub_row=0, col=0).
+    -- every line.
     self:_screen_rows(li) -- ensure _wrap_graph_cache is populated
     local bs, widths, _, ll = self:_graph(li)
     local ng = #bs
@@ -4720,12 +4665,12 @@ function View:delete_selection()
         local nn = n_by_cursor[c] or 0
         if nn == 0 then
             -- No region for this cursor; identity edit (no translator).
-            return c.line, c.col, c.line, c.col, { c.line, c.col }
+            return c.line, c.col, c.line, c.col, "delete", c.line, c.col
         end
         local sl, sc = c.line, c.col
         local el, ec = delete_region_end(buf, sl, sc, nn)
         local rl, rc = buf:delete_char(sl, sc, nn)
-        return sl, sc, rl, rc, { el, ec }
+        return sl, sc, rl, rc, "delete", el, ec
     end)
     self:unset_mark_all()
     self:_set_goal_col(self:p().col)
@@ -5150,6 +5095,12 @@ function View:insert_newline()
         end
         local sl, sc = c.line, c.col
         local rl, rc = buf:insert_char(c.line, c.col, "\n" .. indent)
+        if rl == sl then
+            -- Cursor stayed on original line (col-0 split of non-empty
+            -- line). Follow the newline down to column 0 of the new line.
+            rl = sl + 1
+            rc = 0
+        end
         return sl, sc, rl, rc, "insert"
     end)
     self:_set_goal_col(self:p().col)
@@ -5202,7 +5153,7 @@ function View:replace_selections(fn)
         local d = data_by_cursor[c]
         if not d or d.n == 0 then
             -- No region for this cursor; identity edit (no translator).
-            return c.line, c.col, c.line, c.col, { c.line, c.col }
+            return c.line, c.col, c.line, c.col, "delete", c.line, c.col
         end
         local sl, sc = c.line, c.col
         local replacement = fn(d.text)
@@ -5325,7 +5276,7 @@ function View:delete_char(n)
             sl, sc = el, ec
             el, ec = c.line, origin
         end
-        return sl, sc, rl, rc, { el, ec }
+        return sl, sc, rl, rc, "delete", el, ec
     end)
     self:_set_goal_col(self:p().col)
 end
@@ -5371,11 +5322,11 @@ function View:move_char(n)
                 -- Cross a line boundary.
                 if forward and line < buf:line_count() - 1 then
                     line = line + 1
-                    col = 0
+                    col = self:_snap_vtext(line, 0)
                     remaining = remaining - 1
                 elseif not forward and line > 0 then
                     line = line - 1
-                    col = buf:line_len(line) - 1
+                    col = self:_snap_vtext(line, buf:line_len(line) - 1)
                     remaining = remaining - 1
                 else
                     c.line = line
@@ -5390,6 +5341,8 @@ function View:move_char(n)
         end
 
         c.line = line
+        -- advance_grapheme already handles virtual-text snapping
+        -- per grapheme step; no additional boundary jump needed.
         c.col = col
         c.goal_col = self:byte_to_col(line, col)
         c.visual_col = nil
@@ -5467,7 +5420,7 @@ function View:move_line(n)
             local sub_col = math.min(visual_goal, math.max(0, last_row_width))
             local byte_off = self:wrap_byte_offset(li, sub_row, sub_col)
             -- Clamp to actual content length
-            c.col = math.min(byte_off, content_len)
+            c.col = self:_snap_vtext(li, math.min(byte_off, content_len))
             return true
         end)
     end
@@ -5503,15 +5456,15 @@ function View:move_line(n)
         local line_len = buf:line_len(target) - 1
         local max_col = self:byte_to_col(target, line_len)
         local goal = math.min(c.goal_col, max_col)
-        c.col = self:col_to_byte(target, goal)
+        c.col = self:_snap_vtext(target, self:col_to_byte(target, goal))
         return true
     end)
 end
 
 function View:move_line_start()
     return self:each_cursor(function(c)
-        c.col = 0
-        c.goal_col = 0
+        c.col = self:_snap_vtext(c.line, 0)
+        c.goal_col = self:byte_to_col(c.line, c.col)
         c.visual_col = nil
         c.yank_line = nil
         c.yank_col = nil
@@ -5522,8 +5475,11 @@ end
 function View:move_line_end()
     return self:each_cursor(function(c)
         local content_len = self.buffer:line_len(c.line) - 1
+        -- Go to the real end-of-line content regardless of virtual
+        -- text spans; _snap_vtext would snap left to col_s when a
+        -- span covers the newline, which is wrong for EOL motion.
         c.col = content_len
-        c.goal_col = self:byte_to_col(c.line, content_len)
+        c.goal_col = self:byte_to_col(c.line, c.col)
         c.visual_col = nil
         c.yank_line = nil
         c.yank_col = nil
@@ -5533,61 +5489,16 @@ end
 
 --- Move the primary cursor one logical line forward (next actual line in the
 --- buffer, ignoring soft wrap sub-rows). Preserves goal_col and snaps to
---- grapheme boundaries. Falls back to move_line_start for the no-wrap case.
+--- grapheme boundaries. Delegates to move_line.
 function View:forward_line()
-    return self:each_cursor(function(c)
-        local buf = self.buffer
-        local line_count = buf:line_count()
-        local target = c.line + 1
-        if target >= line_count then
-            c.line = line_count - 1
-            local end_byte = buf:line_len(line_count - 1) - 1
-            c.col = end_byte
-            c.goal_col = self:byte_to_col(line_count - 1, end_byte)
-            c.visual_col = nil
-            c.yank_line = nil
-            c.yank_col = nil
-            return nil, "end of document"
-        end
-        c.line = target
-        local line_len = buf:line_len(target) - 1
-        local max_col = self:byte_to_col(target, line_len)
-        c.goal_col = c.goal_col or max_col
-        c.col = self:col_to_byte(target, math.min(c.goal_col, max_col))
-        c.visual_col = nil
-        c.yank_line = nil
-        c.yank_col = nil
-        return true
-    end)
+    return self:move_line(1)
 end
 
 --- Move the primary cursor one logical line backward (previous actual line in
 --- the buffer, ignoring soft wrap sub-rows). Preserves goal_col and snaps to
---- grapheme boundaries. Falls back to move_line_start for the no-wrap case.
+--- grapheme boundaries. Delegates to move_line.
 function View:backward_line()
-    return self:each_cursor(function(c)
-        local buf = self.buffer
-        local line_count = buf:line_count()
-        local target = c.line - 1
-        if target < 0 then
-            c.line = 0
-            c.col = 0
-            c.goal_col = 0
-            c.visual_col = nil
-            c.yank_line = nil
-            c.yank_col = nil
-            return nil, "start of document"
-        end
-        c.line = target
-        local line_len = buf:line_len(target) - 1
-        local max_col = self:byte_to_col(target, line_len)
-        c.goal_col = c.goal_col or max_col
-        c.col = self:col_to_byte(target, math.min(c.goal_col, max_col))
-        c.visual_col = nil
-        c.yank_line = nil
-        c.yank_col = nil
-        return true
-    end)
+    return self:move_line(-1)
 end
 
 --- Move the primary cursor to the start of the current visual sub-row.
@@ -6903,6 +6814,11 @@ function View:move_word(n, obj_name)
                 c.col = sc
             end
         end
+        -- Jump over virtual text spans as single units.
+        local vt = self:_virtual_span_at(c.line, c.col)
+        if vt then
+            c.col = forward and vt.col_e or vt.col_s
+        end
         c.goal_col = self:byte_to_col(c.line, c.col)
         c.visual_col = nil
         c.yank_line = nil
@@ -6912,74 +6828,19 @@ function View:move_word(n, obj_name)
 end
 
 function View:cursor_left()
-    return self:each_cursor(function(c)
-        if c.col > 0 then
-            -- Step one grapheme cluster backward so the caret never lands
-            -- between a base char and its combining marks / ZWJ sequence.
-            c.col = self:advance_grapheme(c.line, c.col, -1)
-            c.goal_col = self:byte_to_col(c.line, c.col)
-            c.visual_col = nil
-            c.yank_line = nil
-            c.yank_col = nil
-        elseif c.line > 0 then
-            c.line = c.line - 1
-            c.col = self:content_len(c.line)
-            c.goal_col = self:byte_to_col(c.line, c.col)
-            c.visual_col = nil
-            c.yank_line = nil
-            c.yank_col = nil
-        end
-        return true
-    end)
+    return self:move_char(-1)
 end
 
 function View:cursor_right()
-    return self:each_cursor(function(c)
-        local dl = self:content_len(c.line)
-        if c.col < dl then
-            -- Step one grapheme cluster forward (skips zero-width combining
-            -- marks / ZWJ continuations so the caret stops on the next base).
-            c.col = self:advance_grapheme(c.line, c.col, 1)
-            c.goal_col = self:byte_to_col(c.line, c.col)
-            c.visual_col = nil
-            c.yank_line = nil
-            c.yank_col = nil
-        elseif c.line < self:line_count() - 1 then
-            c.line = c.line + 1
-            c.col = 0
-            c.goal_col = 0
-            c.visual_col = nil
-            c.yank_line = nil
-            c.yank_col = nil
-        end
-        return true
-    end)
+    return self:move_char(1)
 end
 
 function View:cursor_up()
-    return self:each_cursor(function(c)
-        if c.line > 0 then
-            c.line = c.line - 1
-            local content_len = self:content_len(c.line)
-            local max_col = self:byte_to_col(c.line, content_len)
-            local goal = math.min(c.goal_col, max_col)
-            c.col = self:col_to_byte(c.line, goal)
-        end
-        return true
-    end)
+    return self:move_line(-1)
 end
 
 function View:cursor_down()
-    return self:each_cursor(function(c)
-        if c.line < self:line_count() - 1 then
-            c.line = c.line + 1
-            local content_len = self:content_len(c.line)
-            local max_col = self:byte_to_col(c.line, content_len)
-            local goal = math.min(c.goal_col, max_col)
-            c.col = self:col_to_byte(c.line, goal)
-        end
-        return true
-    end)
+    return self:move_line(1)
 end
 
 ----------------------------------------------------------------------------------------------------
@@ -7324,19 +7185,6 @@ end
 ----------------------------------------------------------------------------------------------------
 -- Span infrastructure
 --
--- Spans are a sorted array of {col_s, row_s, col_e, row_e, type, ...}
--- tables. Sorting is by (row_s, col_s). Only properties-properties
--- overlap is allowed; all other overlaps are logged and rejected.
--- Span mutations lodge a 0ms background task to force re-render.
-----------------------------------------------------------------------------------------------------
-
---- Find the insertion index for a span keyed by (row_s, col_s) into
---- the sorted _spans array. Returns 1-based index where the span
---- should be inserted (or the index of an existing span with an equal
---- key, for overlap checking).
----@param row_s integer
----@param col_s integer
----@return integer 1-based insertion index
 --- Ensure the SpanManager exists (lazy init).
 ---@param editor Editor|nil optional editor reference for lifecycle ops
 ---@return SpanManager
@@ -7354,6 +7202,13 @@ end
 function View:add_span(span)
     local sm = self:span_manager()
     sm:add(span)
+    -- Virtual text spans (properties with a `text` field) affect
+    -- token-stream rendering; invalidate cached ScreenRows.
+    if span.text then
+        self._screen_rows_cache = nil
+        self._screen_row_counts = nil
+        self._screen_rows_gen = nil
+    end
     if self.editor then
         self.editor:push_background_task(function() return true end)
     end
@@ -7374,9 +7229,20 @@ function View:query_at(line, col)
     return self:span_manager():query_at(line, col)
 end
 
---- Delegate: get replace spans for a line.
-function View:_replace_spans_for_line(li)
-    return self:span_manager():replace_spans_for_line(li)
+--- Delegate: get the virtual text span containing a buffer position, or nil.
+---@param line integer
+---@param col integer
+---@return table|nil
+function View:_virtual_span_at(line, col)
+    return self:span_manager():get_virtual_span_at(line, col)
+end
+
+--- Delegate: cursor-aware virtual span query (for sequential rendering).
+---@param line integer 0-based line index
+---@param col integer 0-based byte offset
+---@return table|nil
+function View:_query_virtual_span_at(line, col)
+    return self:span_manager():query_virtual_span_at(line, col)
 end
 
 --- Delegate: adjust span positions on edit.

@@ -3772,6 +3772,15 @@ local function _paint_text_segment(
     -- Accumulated column width within this segment (for tab expansion).
     local total_w = 0
 
+    -- Extract segment-level props as base defaults (from virtual text spans).
+    ---@type table|nil
+    local seg_props = seg.props
+    local base_fg = seg_props and seg_props.fg
+    local base_bg = seg_props and seg_props.bg
+    local base_underline = seg_props and seg_props.underline_color
+    local base_bold = seg_props and seg_props.bold
+    local base_italic = seg_props and seg_props.italic
+
     if seg_segs == nil or #seg_segs == 0 then
         -- No highlighting: paint each grapheme with default colors.
         for gi = 1, n do
@@ -3790,11 +3799,11 @@ local function _paint_text_segment(
             -- Resolve properties spans covering this grapheme
             local line_byte = seg.buf_start + bo[gi]
             local props = sm and sm:properties_at(li, line_byte) or nil
-            local props_fg = props and props.fg
-            local props_bg = props and props.bg
-            local props_underline = props and props.underline_color
-            local props_bold = props and props.bold
-            local props_italic = props and props.italic
+            local props_fg = props and props.fg or base_fg
+            local props_bg = props and props.bg or base_bg
+            local props_underline = props and props.underline_color or base_underline
+            local props_bold = props and props.bold or base_bold
+            local props_italic = props and props.italic or base_italic
 
             local final_fg = props_fg or dfg
             local final_bg = props_bg or dbg
@@ -3856,64 +3865,22 @@ local function _paint_text_segment(
         local props_fg, props_bg, props_underline = nil, nil, nil
         local props_bold, props_italic = false, false
 
-        if span_ctx and span_ctx.n > 0 and view._spans then
-            -- Advance cursor past spans that end before this byte
-            while span_ctx.cur <= span_ctx.n do
-                local s = view._spans[span_ctx.cur]
-                if s.type ~= "properties" then
-                    span_ctx.cur = span_ctx.cur + 1
-                elseif s.row_e < li or (s.row_e == li and s.col_e <= line_byte) then
-                    span_ctx.cur = span_ctx.cur + 1
-                else
-                    break
-                end
-            end
-
-            -- Collect all overlapping properties spans (later wins)
-            local i = span_ctx.cur
-            while i <= span_ctx.n do
-                local s = view._spans[i]
-                if s.type ~= "properties" then
-                    i = i + 1
-                else
-                    -- Check coverage
-                    local covers = false
-                    if s.row_s < li and s.row_e > li then
-                        covers = true
-                    elseif s.row_s == li and s.row_e > li then
-                        covers = line_byte >= s.col_s
-                    elseif s.row_s < li and s.row_e == li then
-                        covers = line_byte < s.col_e
-                    elseif s.row_s == li and s.row_e == li then
-                        covers = line_byte >= s.col_s and line_byte < s.col_e
-                    end
-
-                    if not covers then
-                        if s.row_s > li or (s.row_s == li and s.col_s > line_byte) then
-                            break
-                        end
-                        i = i + 1
-                    else
-                        if s.fg then
-                            props_fg = s.fg
-                        end
-                        if s.bg then
-                            props_bg = s.bg
-                        end
-                        if s.underline_color then
-                            props_underline = s.underline_color
-                        end
-                        if s.bold then
-                            props_bold = s.bold
-                        end
-                        if s.italic then
-                            props_italic = s.italic
-                        end
-                        i = i + 1
-                    end
-                end
+        if sm then
+            local props = sm:properties_at(li, line_byte)
+            if props then
+                props_fg = props.fg
+                props_bg = props.bg
+                props_underline = props.underline_color
+                props_bold = props.bold
+                props_italic = props.italic
             end
         end
+        -- Fall back to segment-level base props (from virtual text spans)
+        props_fg = props_fg or base_fg
+        props_bg = props_bg or base_bg
+        props_underline = props_underline or base_underline
+        props_bold = props_bold or base_bold
+        props_italic = props_italic or base_italic
 
         local final_fg = props_fg or use_fg or dfg
         local final_bg = props_bg or dbg
@@ -4199,10 +4166,6 @@ function Editor:_render_content(view, term, mb, sm, focus_dim, geo, layout)
                                 end
                             end
                         end
-                    elseif seg.type == "replace" then
-                        -- Stamp the DrawContext row. No highlight/selection/isearch overlay
-                        -- applies to replaced visual content.
-                        seg.draw_ctx:stamp_row(seg.row_idx, term, geo.text_x, row, geo.block_w)
                     end
                 end
 
@@ -4308,19 +4271,72 @@ function Editor:_render_content(view, term, mb, sm, focus_dim, geo, layout)
                         end
                     end
                 else
-                    local ch = " "
-                    for _, seg in ipairs(segments) do
-                        if
-                            seg.type == "text"
-                            and c.col + 1 >= seg.buf_start
-                            and c.col + 1 <= seg.buf_end
-                        then
-                            local offset = c.col - seg.buf_start
-                            ch = _segment_char_at(seg, offset, ccol, tw)
-                            break
+                    -- Check if cursor is at the start of a virtual text span.
+                    -- If so, render a block cursor covering the span's visual
+                    -- footprint (like a button).
+                    local vt_span = view:_query_virtual_span_at(c.line, c.col)
+                    if vt_span and c.col == vt_span.col_s then
+                        -- Find the virtual text segment(s) on this row and render
+                        -- a block cursor over their visual extent.
+                        for _, seg in ipairs(segments) do
+                            if seg.props then
+                                local seg_end_col = seg.col
+                                for _, sgw in ipairs(seg.widths) do
+                                    seg_end_col = seg_end_col + sgw
+                                end
+                                local cfg = ui("cursor_fg")
+                                local cbg = ui("cursor_bg")
+                                -- Background fill for the span's visual footprint.
+                                sm:add_layer_span(geo.text_x + seg.col, sy, spaces(seg_end_col - seg.col), cfg, cbg)
+                                -- Re-paint the replacement text in cursor colors.
+                                local s_text = seg.text
+                                local s_bo = seg.byte_offsets
+                                local acc_w = 0
+                                for gi = 1, #seg.widths do
+                                    local gw = seg.widths[gi]
+                                    local gs = s_bo[gi] + 1
+                                    local ge = (gi < #seg.widths) and s_bo[gi + 1] or #s_text
+                                    local ch = s_text:sub(gs, ge)
+                                    if ch:byte(1) == 9 then
+                                        ch = string.rep(" ", tw - ((seg.col + acc_w) % tw))
+                                    end
+                                    if #ch > 0 then
+                                        sm:add_layer_span(geo.text_x + seg.col + acc_w, sy, ch, cfg, cbg)
+                                    end
+                                    acc_w = acc_w + gw
+                                end
+                            end
                         end
+                    else
+                        local ch = " "
+                        -- Adjust screen column for virtual text compression.
+                        -- wrap_sub_position uses raw buffer bytes; VT spans
+                        -- compress the display, so a cursor past a span
+                        -- appears too far right without adjustment.
+                        local vts = view:span_manager():virtual_spans_for_line(c.line)
+                        for _, vt in ipairs(vts) do
+                            if c.col >= vt.col_e then
+                                local _, raw_start = view:wrap_sub_position(c.line, vt.col_s)
+                                local _, raw_end = view:wrap_sub_position(c.line, vt.col_e)
+                                local compressed = raw_end - raw_start
+                                local _, vtw_arr, vtp_arr = utf8_mod.parse_line(vt.text, tw)
+                                local vtw = utf8_mod.line_width(vtp_arr, vtw_arr)
+                                ccol = ccol - compressed + vtw
+                            end
+                        end
+                        for _, seg in ipairs(segments) do
+                            if
+                                seg.type == "text"
+                                and c.col + 1 >= seg.buf_start
+                                and c.col + 1 <= seg.buf_end
+                            then
+                                local offset = c.col - seg.buf_start
+                                ch = _segment_char_at(seg, offset, ccol, tw)
+                                break
+                            end
+                        end
+                        sm:add_layer_span(geo.text_x + ccol, sy, ch, ui("cursor_fg"), ui("cursor_bg"))
                     end
-                    sm:add_layer_span(geo.text_x + ccol, sy, ch, ui("cursor_fg"), ui("cursor_bg"))
                 end
             end
         end
